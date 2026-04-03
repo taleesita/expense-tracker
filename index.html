@@ -783,23 +783,62 @@
 
                     // Parse OCR text
                     const lines = text.split('\n').filter(l => l.trim());
-                    let merchant = lines[0] || 'Unknown';
+                    let merchant = '';
                     let amount = 0;
                     let date = new Date().toISOString().split('T')[0];
 
-                    // Look for total/amount
-                    const amountRegex = /(?:total|amount|due|balance)[\s:]*\$?(\d+\.?\d*)/i;
-                    const amountMatch = text.match(amountRegex);
-                    if (amountMatch) amount = parseFloat(amountMatch[1]);
-
-                    // Look for date
-                    const dateRegex = /(\d{1,2})\/(\d{1,2})\/(\d{2,4})/;
-                    const dateMatch = text.match(dateRegex);
-                    if (dateMatch) {
-                        const [, m, d, y] = dateMatch;
-                        const fullYear = y.length === 2 ? parseInt('20' + y) : parseInt(y);
-                        date = `${fullYear}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+                    // Merchant: first non-trivial line (skip very short lines, numbers-only lines)
+                    for (const line of lines) {
+                        const cleaned = line.trim();
+                        if (cleaned.length > 2 && !/^\d+[\d\s.,$%]*$/.test(cleaned) && !/^(tel|phone|fax|www\.|http)/i.test(cleaned)) {
+                            merchant = cleaned.replace(/[^a-zA-Z0-9\s&'.-]/g, '').trim();
+                            if (merchant.length > 1) break;
+                        }
                     }
+                    merchant = merchant || 'Unknown';
+
+                    // Look for total/amount — try labeled totals first, then largest dollar amount
+                    const totalPatterns = [
+                        /(?:grand\s*total|total\s*due|amount\s*due|balance\s*due|total\s*charged?)[\s:]*\$?\s*(\d{1,6}[,.]?\d{0,2})/i,
+                        /(?:total)[\s:]*\$?\s*(\d{1,6}[,.]?\d{0,2})/i,
+                        /(?:amount|subtotal|sub\s*total)[\s:]*\$?\s*(\d{1,6}[,.]?\d{0,2})/i,
+                    ];
+                    for (const pat of totalPatterns) {
+                        const m = text.match(pat);
+                        if (m) { amount = parseFloat(m[1].replace(',', '')); break; }
+                    }
+                    // Fallback: find all dollar amounts and pick the largest
+                    if (!amount) {
+                        const allAmounts = [...text.matchAll(/\$\s*(\d{1,6}[,.]?\d{0,2})/g)];
+                        if (allAmounts.length) {
+                            const nums = allAmounts.map(m => parseFloat(m[1].replace(',', ''))).filter(n => n > 0);
+                            if (nums.length) amount = Math.max(...nums);
+                        }
+                    }
+
+                    // Look for date in multiple formats: MM/DD/YY(YY), MM-DD-YY(YY), Mon DD YYYY, YYYY-MM-DD
+                    const datePatterns = [
+                        { re: /(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/, parse: (m) => ({ mo: m[1], d: m[2], y: m[3] }) },
+                        { re: /(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/, parse: (m) => ({ mo: m[2], d: m[3], y: m[1] }) },
+                        { re: /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*[\s.,]+(\d{1,2})[\s.,]+(\d{2,4})/i, parse: (m) => {
+                            const months = {jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12};
+                            return { mo: String(months[m[1].toLowerCase().slice(0,3)]), d: m[2], y: m[3] };
+                        }},
+                    ];
+                    for (const { re, parse } of datePatterns) {
+                        const dm = text.match(re);
+                        if (dm) {
+                            const { mo, d, y } = parse(dm);
+                            const fullYear = y.length <= 2 ? parseInt('20' + y) : parseInt(y);
+                            if (fullYear >= 2020 && fullYear <= 2030) {
+                                date = `${fullYear}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+                                break;
+                            }
+                        }
+                    }
+
+                    console.log('OCR raw text:', text);
+                    console.log('OCR parsed:', { merchant, amount, date });
 
                     return {
                         merchant,
