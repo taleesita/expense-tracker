@@ -347,13 +347,18 @@
             if (lower.includes('fitness') || lower.includes('gym') || lower.includes('athletic')) return 'fitness';
             if (lower.includes('travel')) return 'travel';
             if (lower.includes('blink')) return 'blink';
-            if (lower.includes('treatteek') || lower.includes('treat teek')) return 'treatteek';
-            if (lower.includes('cash') || lower.includes('withdrawal')) return 'cash';
+            if (lower.includes('treatteek') && lower.includes('income')) return 'treatteek_income';
+            if (lower.includes('treatteek') && lower.includes('expense')) return 'treatteek_expense';
+            if (lower.includes('treatteek') || lower.includes('treat teek')) return 'treatteek_expense';
+            if (lower.includes('child invest')) return 'child_invest';
             if (lower.includes('invest')) return 'invest';
-            if (lower.includes('work income') || lower.includes('income') || lower.includes('salary') || lower.includes('payroll')) return 'work_income';
+            if (lower.includes('insurance')) return 'insurance';
+            if (lower.includes('deposit')) return 'deposit';
+            if (lower.includes('misc income')) return 'misc_income';
+            if (lower.includes('work income') || lower.includes('salary') || lower.includes('payroll')) return 'work_income';
+            if (lower.includes('income')) return 'work_income';
             if (lower.includes('transfer')) return 'transfer';
             if (lower.includes('card payment') || lower.includes('credit card payment')) return 'card_payment';
-            if (lower.includes('subscription')) return 'subscription';
             return 'other';
         };
 
@@ -409,10 +414,30 @@
 
         // ============ GOOGLE OAUTH ============
         const useGoogleAuth = () => {
-            const [user, setUser] = useState(null);
-            const [token, setToken] = useState(null);
+            // Restore saved session from localStorage
+            const savedUser = (() => { try { return JSON.parse(localStorage.getItem('expense_user')); } catch { return null; } })();
+            const savedToken = localStorage.getItem('expense_token');
+            const savedExpiry = parseInt(localStorage.getItem('expense_token_expiry') || '0');
+            const isExpired = !savedToken || !savedExpiry || Date.now() > savedExpiry;
+
+            const [user, setUser] = useState(isExpired ? null : savedUser);
+            const [token, setToken] = useState(isExpired ? null : savedToken);
             const tokenClientRef = useRef(null);
-            const tokenExpiryRef = useRef(null);
+            const tokenExpiryRef = useRef(isExpired ? null : savedExpiry);
+
+            const saveSession = useCallback((tkn, usr, expiry) => {
+                try {
+                    if (tkn && usr) {
+                        localStorage.setItem('expense_token', tkn);
+                        localStorage.setItem('expense_user', JSON.stringify(usr));
+                        localStorage.setItem('expense_token_expiry', expiry.toString());
+                    } else {
+                        localStorage.removeItem('expense_token');
+                        localStorage.removeItem('expense_user');
+                        localStorage.removeItem('expense_token_expiry');
+                    }
+                } catch (e) { /* localStorage unavailable */ }
+            }, []);
 
             const initTokenClient = useCallback(() => {
                 if (!window.google) return;
@@ -421,9 +446,9 @@
                     scope: 'openid email profile https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file',
                     callback: async (resp) => {
                         if (resp.access_token) {
+                            const expiry = Date.now() + 50 * 60 * 1000;
                             setToken(resp.access_token);
-                            // Set expiry to 50 minutes (tokens last ~1 hour)
-                            tokenExpiryRef.current = Date.now() + 50 * 60 * 1000;
+                            tokenExpiryRef.current = expiry;
                             // Fetch user info
                             try {
                                 const userResp = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
@@ -431,15 +456,18 @@
                                 });
                                 const userData = await userResp.json();
                                 if (ALLOWED_EMAILS.includes(userData.email)) {
-                                    setUser({
+                                    const usr = {
                                         email: userData.email,
                                         name: EMAIL_TO_NAME[userData.email] || userData.name,
                                         picture: userData.picture
-                                    });
+                                    };
+                                    setUser(usr);
+                                    saveSession(resp.access_token, usr, expiry);
                                 } else {
                                     alert('Email not authorized');
                                     setToken(null);
                                     setUser(null);
+                                    saveSession(null, null, 0);
                                 }
                             } catch (err) {
                                 console.error('Failed to fetch user info:', err);
@@ -447,11 +475,20 @@
                         }
                     }
                 });
-            }, []);
+            }, [saveSession]);
 
             useEffect(() => {
                 if (window.google) {
                     initTokenClient();
+                    // If we have a saved token but it'll expire soon, silently refresh
+                    if (token && tokenExpiryRef.current && Date.now() > tokenExpiryRef.current - 10 * 60 * 1000) {
+                        // Token expiring soon, request silent refresh once client is ready
+                        setTimeout(() => {
+                            if (tokenClientRef.current) {
+                                tokenClientRef.current.requestAccessToken({ prompt: '' });
+                            }
+                        }, 1000);
+                    }
                 }
             }, [initTokenClient]);
 
@@ -477,7 +514,8 @@
                 setUser(null);
                 setToken(null);
                 tokenExpiryRef.current = null;
-            }, []);
+                saveSession(null, null, 0);
+            }, [saveSession]);
 
             return { user, token, login, logout };
         };
@@ -503,8 +541,8 @@
                     for (let i = 1; i < rows.length; i++) {
                         const row = rows[i];
                         if (!row || !row[0]) continue;
-                        const charge = parseFloat(row[4]) || 0;  // E: Charge/Debit
-                        const deposit = parseFloat(row[5]) || 0;  // F: Deposit
+                        const charge = parseFloat(String(row[4] || '').replace(/[,$]/g, '')) || 0;  // E: Charge/Debit
+                        const deposit = parseFloat(String(row[5] || '').replace(/[,$]/g, '')) || 0;  // F: Deposit
                         const hasDeposit = deposit > 0;
                         const hasCharge = charge > 0;
                         const amount = hasDeposit && !hasCharge ? deposit : charge;
@@ -795,23 +833,34 @@
                             {isInflow ? '+' : '-'}${Math.abs(expense.amount).toFixed(2)}
                         </span>
                     </div>
-                    {showReconcile && !isLocked && (
-                        <button
-                            onClick={(e) => { e.stopPropagation(); onReconcile(expense.rowIndex, !expense.reconciled); }}
-                            className="ml-1 flex-shrink-0"
-                        >
-                            {expense.reconciled ? (
-                                <CheckCircleIcon size={18} className="text-green-600" />
-                            ) : (
-                                <CircleIcon size={18} className="text-gray-300" />
-                            )}
-                        </button>
-                    )}
-                    {showReconcile && isLocked && expense.reconciled && (
-                        <div className="ml-1 flex-shrink-0">
-                            <CheckCircleIcon size={18} className="text-amber-600" />
-                        </div>
-                    )}
+                    {(() => {
+                        const dateISO = parseDateToISO(expense.date);
+                        const isPre2026 = dateISO < '2026-01-01';
+                        if (isPre2026 && showReconcile) {
+                            return <div className="ml-1 flex-shrink-0"><CircleIcon size={18} className="text-gray-200" /></div>;
+                        }
+                        return (
+                            <>
+                                {showReconcile && !isLocked && (
+                                    <button
+                                        onClick={(e) => { e.stopPropagation(); onReconcile(expense.rowIndex, !expense.reconciled); }}
+                                        className="ml-1 flex-shrink-0"
+                                    >
+                                        {expense.reconciled ? (
+                                            <CheckCircleIcon size={18} className="text-green-600" />
+                                        ) : (
+                                            <CircleIcon size={18} className="text-gray-300" />
+                                        )}
+                                    </button>
+                                )}
+                                {showReconcile && isLocked && expense.reconciled && (
+                                    <div className="ml-1 flex-shrink-0">
+                                        <CheckCircleIcon size={18} className="text-amber-600" />
+                                    </div>
+                                )}
+                            </>
+                        );
+                    })()}
                     {onEdit && (
                         <button
                             onClick={(e) => { e.stopPropagation(); onEdit(expense); }}
@@ -822,8 +871,8 @@
                         </button>
                     )}
                     <button
-                        onClick={(e) => { e.stopPropagation(); onDelete(expense.rowIndex); }}
-                        className="ml-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+                        onClick={(e) => { e.stopPropagation(); if (confirm('Delete this expense?')) onDelete(expense.rowIndex); }}
+                        className="ml-1 flex-shrink-0"
                     >
                         <Trash2Icon size={16} className="text-red-400 hover:text-red-600" />
                     </button>
@@ -1294,29 +1343,32 @@
             const [isLocked, setIsLocked] = useState(false);
             const [searchTerm, setSearchTerm] = useState('');
 
-            const reconciledExpenses = accountExpenses.filter(e => e.reconciled);
-            const unlockedExpenses = accountExpenses.filter(e => !e.reconciledLocked);
+            // Only count 2026+ expenses for reconciliation progress
+            const isRecent = (e) => {
+                const d = parseDateToISO(e.date);
+                return d >= '2026-01-01';
+            };
+            const recentExpenses = accountExpenses.filter(isRecent);
+            const reconciledExpenses = recentExpenses.filter(e => e.reconciled);
+            const unlockedExpenses = recentExpenses.filter(e => !e.reconciledLocked && !e.reconciled);
 
             const filteredExpenses = accountExpenses.filter(e =>
                 e.merchant.toLowerCase().includes(searchTerm.toLowerCase())
             );
 
             const isCreditCard = CREDIT_CARDS.some(c => c.id === accountId);
-            const total = accountExpenses.reduce((sum, e) => {
+            const calcBalance = (sum, e) => {
                 if (isCreditCard) {
+                    if (e.category === 'card_payment') return sum - e.amount;
                     return e.txnType === 'charge' ? sum + e.amount : sum - e.amount;
                 } else {
                     return (e.txnType === 'deposit' || e.txnType === 'credit_refund') ? sum + e.amount : sum - e.amount;
                 }
-            }, 0);
-            const reconciledTotal = reconciledExpenses.reduce((sum, e) => {
-                if (isCreditCard) {
-                    return e.txnType === 'charge' ? sum + e.amount : sum - e.amount;
-                } else {
-                    return (e.txnType === 'deposit' || e.txnType === 'credit_refund') ? sum + e.amount : sum - e.amount;
-                }
-            }, 0);
-            const progress = total > 0 ? (reconciledTotal / total) * 100 : 0;
+            };
+            const total = accountExpenses.reduce(calcBalance, 0);
+            const reconciledTotal = reconciledExpenses.reduce(calcBalance, 0);
+            const recentTotal = recentExpenses.reduce(calcBalance, 0);
+            const progress = recentExpenses.length > 0 ? (reconciledExpenses.length / recentExpenses.length) * 100 : 0;
 
             const handleClearUnlocked = () => {
                 if (confirm(`Clear ${unlockedExpenses.length} unreconciled items?`)) {
@@ -1350,7 +1402,7 @@
                                 }}
                             />
                         </div>
-                        <div className="text-sm text-gray-600 mb-3">{reconciledTotal.toFixed(2)} of ${total.toFixed(2)} reconciled</div>
+                        <div className="text-sm text-gray-600 mb-3">{reconciledExpenses.length} of {recentExpenses.length} reconciled (2026)</div>
                         {!isLocked && unlockedExpenses.length > 0 && (
                             <button
                                 onClick={handleClearUnlocked}
@@ -1430,7 +1482,9 @@
                 creditCardTotals[card.id] = {
                     ...card,
                     total: cardExpenses.reduce((sum, e) => {
-                        // Charges add to balance owed, deposits/credits/payments reduce it
+                        // Card payments always reduce CC balance, regardless of which column
+                        if (e.category === 'card_payment') return sum - e.amount;
+                        // Charges add to balance owed, deposits/credits reduce it
                         if (e.txnType === 'charge') return sum + e.amount;
                         return sum - e.amount;
                     }, 0)
