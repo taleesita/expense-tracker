@@ -11,6 +11,8 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/recharts@2.10.0/dist/recharts.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script>if (window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';</script>
     <style>
         [data-testid="recharts-wrapper"] { width: 100% !important; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
@@ -767,18 +769,50 @@
         const useOCR = () => {
             const [processing, setProcessing] = useState(false);
 
+            // Convert PDF to image data URLs (all pages)
+            const pdfToImages = async (file) => {
+                const arrayBuffer = await file.arrayBuffer();
+                const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+                const images = [];
+                for (let i = 1; i <= pdf.numPages; i++) {
+                    const page = await pdf.getPage(i);
+                    const viewport = page.getViewport({ scale: 2.0 });
+                    const canvas = document.createElement('canvas');
+                    canvas.width = viewport.width;
+                    canvas.height = viewport.height;
+                    await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+                    images.push(canvas.toDataURL('image/png'));
+                }
+                return images;
+            };
+
             const scanReceipt = useCallback(async (imageFile) => {
                 setProcessing(true);
                 try {
-                    const imageData = await new Promise((resolve) => {
-                        const reader = new FileReader();
-                        reader.onload = (e) => resolve(e.target.result);
-                        reader.readAsDataURL(imageFile);
-                    });
+                    const isPDF = imageFile.type === 'application/pdf' || imageFile.name?.toLowerCase().endsWith('.pdf');
+                    let imageDatas;
+
+                    if (isPDF && window.pdfjsLib) {
+                        // Convert all PDF pages to images
+                        imageDatas = await pdfToImages(imageFile);
+                    } else {
+                        // Single image file
+                        const dataUrl = await new Promise((resolve) => {
+                            const reader = new FileReader();
+                            reader.onload = (e) => resolve(e.target.result);
+                            reader.readAsDataURL(imageFile);
+                        });
+                        imageDatas = [dataUrl];
+                    }
 
                     const { createWorker } = Tesseract;
                     const worker = await createWorker();
-                    const { data: { text } } = await worker.recognize(imageData);
+                    // OCR all pages/images and combine text
+                    let text = '';
+                    for (const imgData of imageDatas) {
+                        const { data: { text: pageText } } = await worker.recognize(imgData);
+                        text += pageText + '\n';
+                    }
                     await worker.terminate();
 
                     // Parse OCR text
@@ -1143,7 +1177,7 @@
                             </button>
                             <input
                                 type="file"
-                                accept="image/*"
+                                accept="image/*,application/pdf"
                                 onChange={(e) => e.target.files?.[0] && handleReceiptUpload(e.target.files[0])}
                                 className="hidden"
                                 id="receipt-file"
@@ -1414,7 +1448,7 @@
                                     </button>
                                     <input
                                         type="file"
-                                        accept="image/*"
+                                        accept="image/*,application/pdf"
                                         onChange={(e) => e.target.files?.[0] && onFile(e.target.files[0])}
                                         className="hidden"
                                         id="scanner-file"
