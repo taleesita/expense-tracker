@@ -1413,7 +1413,7 @@
                                 <LockIcon size={16} /> {isLocked ? 'Locked' : 'Unlocked'}
                             </button>
                         </div>
-                        <div className="text-2xl font-bold mb-3">{total < 0 ? '-' : ''}${fmt(total)}</div>
+                        <div className={`text-2xl font-bold mb-3 ${isCreditCard ? (total > 0 ? 'text-red-600' : 'text-green-600') : (total >= 0 ? 'text-green-600' : 'text-red-600')}`}>{total < 0 ? '-' : ''}${fmt(total)}</div>
                         <div className="w-full bg-gray-200 rounded-full h-2 mb-2">
                             <div
                                 className={`h-2 rounded-full transition-all ${isLocked ? 'bg-amber-500' : ''}`}
@@ -1470,49 +1470,50 @@
         };
 
         const HomeTab = ({ expenses, onEdit }) => {
-            const [chartFilter, setChartFilter] = useState('');  // '' = all, 'YYYY' = year, 'YYYY-MM' = month, 'YYYY-Q1' etc
+            const [chartYear, setChartYear] = useState('');
+            const [chartPeriod, setChartPeriod] = useState('');  // '' = full year, 'Q1'-'Q4', or 'YYYY-MM'
             const [hoveredSlice, setHoveredSlice] = useState(null);
 
-            // Get available years and months from expenses
-            const { years, monthsByYear } = useMemo(() => {
+            // Get available years from expenses
+            const years = useMemo(() => {
                 const ySet = new Set();
-                const mMap = {};
                 expenses.forEach(e => {
                     const d = parseDateToISO(e.date || e.timestamp);
-                    if (d) {
-                        const y = d.substring(0, 4);
-                        const m = d.substring(0, 7);
-                        ySet.add(y);
-                        if (!mMap[y]) mMap[y] = new Set();
-                        mMap[y].add(m);
-                    }
+                    if (d) ySet.add(d.substring(0, 4));
                 });
-                const years = Array.from(ySet).sort().reverse();
-                const monthsByYear = {};
-                years.forEach(y => { monthsByYear[y] = Array.from(mMap[y]).sort(); });
-                return { years, monthsByYear };
+                return Array.from(ySet).sort().reverse();
             }, [expenses]);
 
-            // Filter expenses by selected filter
+            const MONTH_LABELS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+            // Filter expenses
             const filteredExpenses = useMemo(() => {
-                if (!chartFilter) return expenses;
-                // Quarter filter: YYYY-Q1, YYYY-Q2, etc.
-                const qMatch = chartFilter.match(/^(\d{4})-Q(\d)$/);
-                if (qMatch) {
-                    const [, yr, q] = qMatch;
-                    const startMonth = (parseInt(q) - 1) * 3 + 1;
-                    const months = [startMonth, startMonth + 1, startMonth + 2].map(m => `${yr}-${String(m).padStart(2, '0')}`);
-                    return expenses.filter(e => {
+                let filtered = expenses;
+                if (chartYear) {
+                    filtered = filtered.filter(e => {
                         const d = parseDateToISO(e.date || e.timestamp);
-                        return d && months.some(m => d.startsWith(m));
+                        return d && d.startsWith(chartYear);
                     });
                 }
-                // Year or month filter
-                return expenses.filter(e => {
-                    const d = parseDateToISO(e.date || e.timestamp);
-                    return d && d.startsWith(chartFilter);
-                });
-            }, [expenses, chartFilter]);
+                if (chartPeriod) {
+                    const qMatch = chartPeriod.match(/^Q(\d)$/);
+                    if (qMatch) {
+                        const startMonth = (parseInt(qMatch[1]) - 1) * 3 + 1;
+                        const qMonths = [startMonth, startMonth + 1, startMonth + 2].map(m => String(m).padStart(2, '0'));
+                        filtered = filtered.filter(e => {
+                            const d = parseDateToISO(e.date || e.timestamp);
+                            return d && qMonths.some(m => d.substring(5, 7) === m);
+                        });
+                    } else {
+                        // Individual month like '01', '02', etc.
+                        filtered = filtered.filter(e => {
+                            const d = parseDateToISO(e.date || e.timestamp);
+                            return d && d.substring(5, 7) === chartPeriod;
+                        });
+                    }
+                }
+                return filtered;
+            }, [expenses, chartYear, chartPeriod]);
 
             const byCategory = {};
             CATEGORIES.forEach(cat => {
@@ -1615,7 +1616,7 @@
                                                 <p className="text-xs text-gray-400">···{bank.last4}</p>
                                             </div>
                                         </div>
-                                        <span className={`font-bold ${bank.total < 0 ? 'text-red-600' : ''}`}>{bank.total < 0 ? '-' : ''}${fmt(bank.total)}</span>
+                                        <span className={`font-bold ${bank.total >= 0 ? 'text-green-600' : 'text-red-600'}`}>{bank.total < 0 ? '-' : ''}${fmt(bank.total)}</span>
                                     </div>
                                 ))}
                             </div>
@@ -1626,30 +1627,45 @@
                         const totalValue = categoryData.reduce((sum, c) => sum + c.value, 0);
                         return (
                         <div>
-                            <div className="flex items-center justify-between mb-3">
-                                <h3 className="font-bold text-lg">Spending by Category</h3>
-                                <select
-                                    value={chartFilter}
-                                    onChange={(e) => { setChartFilter(e.target.value); setHoveredSlice(null); }}
-                                    className="text-sm border border-gray-200 rounded-lg px-2 py-1 bg-white"
-                                >
-                                    <option value="">All Time</option>
-                                    {years.map(y => (
-                                        <React.Fragment key={y}>
-                                            <option value={y}>{y} (Full Year)</option>
-                                            <option value={`${y}-Q1`}>&nbsp;&nbsp;Q1 (Jan–Mar)</option>
-                                            <option value={`${y}-Q2`}>&nbsp;&nbsp;Q2 (Apr–Jun)</option>
-                                            <option value={`${y}-Q3`}>&nbsp;&nbsp;Q3 (Jul–Sep)</option>
-                                            <option value={`${y}-Q4`}>&nbsp;&nbsp;Q4 (Oct–Dec)</option>
-                                            {(monthsByYear[y] || []).map(m => {
-                                                const mo = parseInt(m.split('-')[1]);
-                                                const label = new Date(y, mo - 1).toLocaleString('en-US', { month: 'short' });
-                                                return <option key={m} value={m}>&nbsp;&nbsp;&nbsp;&nbsp;{label} {y}</option>;
-                                            })}
-                                        </React.Fragment>
-                                    ))}
-                                </select>
+                            <h3 className="font-bold text-lg mb-2">Spending by Category</h3>
+                            <div className="flex flex-wrap gap-1.5 mb-2">
+                                <button
+                                    onClick={() => { setChartYear(''); setChartPeriod(''); setHoveredSlice(null); }}
+                                    className={`px-3 py-1 rounded-full text-xs font-medium transition ${!chartYear ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+                                >All</button>
+                                {years.map(y => (
+                                    <button
+                                        key={y}
+                                        onClick={() => { setChartYear(chartYear === y ? '' : y); setChartPeriod(''); setHoveredSlice(null); }}
+                                        className={`px-3 py-1 rounded-full text-xs font-medium transition ${chartYear === y ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+                                    >{y}</button>
+                                ))}
                             </div>
+                            {chartYear && (
+                                <div className="flex flex-wrap gap-1.5 mb-2">
+                                    <button
+                                        onClick={() => { setChartPeriod(''); setHoveredSlice(null); }}
+                                        className={`px-2.5 py-0.5 rounded-full text-[11px] font-medium transition ${!chartPeriod ? 'bg-blue-100 text-blue-700' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'}`}
+                                    >Full Year</button>
+                                    {['Q1','Q2','Q3','Q4'].map(q => (
+                                        <button
+                                            key={q}
+                                            onClick={() => { setChartPeriod(chartPeriod === q ? '' : q); setHoveredSlice(null); }}
+                                            className={`px-2.5 py-0.5 rounded-full text-[11px] font-medium transition ${chartPeriod === q ? 'bg-blue-100 text-blue-700' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'}`}
+                                        >{q}</button>
+                                    ))}
+                                    {MONTH_LABELS.map((label, i) => {
+                                        const mo = String(i + 1).padStart(2, '0');
+                                        return (
+                                            <button
+                                                key={mo}
+                                                onClick={() => { setChartPeriod(chartPeriod === mo ? '' : mo); setHoveredSlice(null); }}
+                                                className={`px-2.5 py-0.5 rounded-full text-[11px] font-medium transition ${chartPeriod === mo ? 'bg-blue-100 text-blue-700' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'}`}
+                                            >{label}</button>
+                                        );
+                                    })}
+                                </div>
+                            )}
                             <div className="bg-white p-4 rounded-lg border border-gray-200">
                                 <div className="flex flex-col md:flex-row items-center gap-4">
                                     <div className="relative" style={{ width: 200, height: 200, flexShrink: 0 }}>
