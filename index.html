@@ -93,6 +93,9 @@
             { id: 'credit_refund', label: 'Credit/Refund', desc: 'Return / refund', color: '#3B82F6' },
         ];
 
+        // Format money with commas
+        const fmt = (n) => Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
         const MERCHANT_TO_CATEGORY = {
             'metro': 'transit',
             'metrocard': 'transit',
@@ -573,7 +576,7 @@
                             isCredit: txnType !== 'charge',  // backwards compat for display
                             originalCurrency: 'USD',
                             originalAmount: amount,
-                            reconciled: false,
+                            reconciled: (() => { try { return JSON.parse(localStorage.getItem('rec_' + (i + 1))) || false; } catch { return false; } })(),
                             reconciledLocked: false,
                             notes: '',
                             person: '',
@@ -840,7 +843,7 @@
                     </div>
                     <div className="text-right flex-shrink-0">
                         <span className={`font-semibold text-sm ${isPaymentOrTransfer ? 'text-gray-500' : isInflow ? 'text-green-600' : 'text-red-600'}`}>
-                            {isPaymentOrTransfer ? '' : isInflow ? '+' : '-'}${Math.abs(expense.amount).toFixed(2)}
+                            {isPaymentOrTransfer ? '' : isInflow ? '+' : '-'}${fmt(expense.amount)}
                         </span>
                     </div>
                     {(() => {
@@ -1410,7 +1413,7 @@
                                 <LockIcon size={16} /> {isLocked ? 'Locked' : 'Unlocked'}
                             </button>
                         </div>
-                        <div className="text-2xl font-bold mb-3">{total < 0 ? '-' : ''}${Math.abs(total).toFixed(2)}</div>
+                        <div className="text-2xl font-bold mb-3">{total < 0 ? '-' : ''}${fmt(total)}</div>
                         <div className="w-full bg-gray-200 rounded-full h-2 mb-2">
                             <div
                                 className={`h-2 rounded-full transition-all ${isLocked ? 'bg-amber-500' : ''}`}
@@ -1467,11 +1470,28 @@
         };
 
         const HomeTab = ({ expenses, onEdit }) => {
-            const charges = expenses.filter(e => e.txnType === 'charge');
-            const deposits = expenses.filter(e => e.txnType === 'deposit');
-            const totalSpent = charges.reduce((sum, e) => sum + e.amount, 0);
-            const totalIncome = deposits.reduce((sum, e) => sum + e.amount, 0);
-            const total = totalSpent;
+            const [chartMonth, setChartMonth] = useState('');  // '' = all time
+            const [hoveredSlice, setHoveredSlice] = useState(null);
+
+            // Get available months from expenses
+            const months = useMemo(() => {
+                const m = new Set();
+                expenses.forEach(e => {
+                    const d = parseDateToISO(e.date || e.timestamp);
+                    if (d) m.add(d.substring(0, 7)); // YYYY-MM
+                });
+                return Array.from(m).sort().reverse();
+            }, [expenses]);
+
+            // Filter expenses by selected month
+            const filteredExpenses = useMemo(() => {
+                if (!chartMonth) return expenses;
+                return expenses.filter(e => {
+                    const d = parseDateToISO(e.date || e.timestamp);
+                    return d && d.startsWith(chartMonth);
+                });
+            }, [expenses, chartMonth]);
+
             const byCategory = {};
             CATEGORIES.forEach(cat => {
                 byCategory[cat.id] = {
@@ -1482,9 +1502,9 @@
                 };
             });
 
-            expenses.forEach(e => {
+            filteredExpenses.forEach(e => {
                 if (byCategory[e.category]) {
-                    if (e.txnType === 'charge') {
+                    if (e.txnType === 'charge' && e.category !== 'card_payment' && e.category !== 'transfer') {
                         byCategory[e.category].value += e.amount;
                     }
                 }
@@ -1492,8 +1512,7 @@
 
             const categoryData = Object.values(byCategory)
                 .filter(c => c.value > 0)
-                .sort((a, b) => b.value - a.value)
-                .slice(0, 8);
+                .sort((a, b) => b.value - a.value);
 
             const creditCardTotals = {};
             CREDIT_CARDS.forEach(card => {
@@ -1533,89 +1552,142 @@
                     <div className="flex gap-3">
                         <div className="flex-1 bg-gradient-to-r from-red-500 to-red-600 text-white p-4 rounded-lg">
                             <p className="text-[10px] opacity-80 uppercase tracking-wide">Credit Cards</p>
-                            <p className="text-xl font-bold mt-0.5">${Math.abs(totalCCBalance).toFixed(2)}</p>
-                            <p className="text-[10px] opacity-70 mt-0.5">{totalCCBalance > 0 ? 'owed' : 'credit'}</p>
+                            <p className="text-xl font-bold mt-0.5">${fmt(totalCCBalance)}</p>
+                            <p className="text-[10px] opacity-70 mt-0.5">{totalCCBalance > 0 ? 'owed' : totalCCBalance < 0 ? 'credit' : 'clear'}</p>
                         </div>
                         <div className="flex-1 bg-gradient-to-r from-emerald-500 to-emerald-600 text-white p-4 rounded-lg">
                             <p className="text-[10px] opacity-80 uppercase tracking-wide">Bank Accounts</p>
-                            <p className="text-xl font-bold mt-0.5">${Math.abs(totalBankBalance).toFixed(2)}</p>
+                            <p className="text-xl font-bold mt-0.5">${fmt(totalBankBalance)}</p>
                             <p className="text-[10px] opacity-70 mt-0.5">{totalBankBalance >= 0 ? 'balance' : 'overdrawn'}</p>
                         </div>
                     </div>
 
-                    <div>
-                        <h3 className="font-bold text-lg mb-2">Credit Cards</h3>
-                        <div className="space-y-2">
-                            {Object.values(creditCardTotals).map(card => (
-                                <div key={card.id} className="bg-white p-3 rounded-lg border border-gray-200 flex items-center justify-between">
-                                    <div className="flex items-center gap-2">
-                                        <div className="w-2 h-8 rounded-full" style={{ backgroundColor: card.color }} />
-                                        <div>
-                                            <span className="font-medium text-sm">{card.shortName}</span>
-                                            <p className="text-xs text-gray-400">···{card.last4}</p>
-                                        </div>
-                                    </div>
-                                    <span className={`font-bold ${card.total < 0 ? 'text-green-600' : ''}`}>{card.total < 0 ? '-' : ''}${Math.abs(card.total).toFixed(2)}</span>
-                                </div>
-                            ))}
-                        </div>
-                    </div>
-
-                    <div>
-                        <h3 className="font-bold text-lg mb-2">Bank Accounts</h3>
-                        <div className="space-y-2">
-                            {Object.values(bankTotals).map(bank => (
-                                <div key={bank.id} className="bg-white p-3 rounded-lg border border-gray-200 flex items-center justify-between">
-                                    <div className="flex items-center gap-2">
-                                        <div className="w-2 h-8 rounded-full" style={{ backgroundColor: bank.color }} />
-                                        <div>
-                                            <span className="font-medium text-sm">{bank.shortName}</span>
-                                            <p className="text-xs text-gray-400">···{bank.last4}</p>
-                                        </div>
-                                    </div>
-                                    <span className={`font-bold ${bank.total < 0 ? 'text-red-600' : ''}`}>{bank.total < 0 ? '-' : ''}${Math.abs(bank.total).toFixed(2)}</span>
-                                </div>
-                            ))}
-                        </div>
-                    </div>
-
-                    {categoryData.length > 0 && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                         <div>
-                            <h3 className="font-bold text-lg mb-3">Spending by Category</h3>
-                            <div className="bg-white p-4 rounded-lg border border-gray-200" style={{ height: 300 }}>
-                                <svg viewBox="0 0 300 300" style={{ width: '100%', height: '100%' }}>
-                                    {categoryData.map((cat, i) => {
-                                        const totalValue = categoryData.reduce((sum, c) => sum + c.value, 0);
-                                        const angle = (cat.value / totalValue) * 360;
-                                        const startAngle = categoryData.slice(0, i).reduce((sum, c) => sum + (c.value / totalValue) * 360, 0);
-                                        const endAngle = startAngle + angle;
-                                        const startRad = (startAngle - 90) * Math.PI / 180;
-                                        const endRad = (endAngle - 90) * Math.PI / 180;
-                                        const x1 = 150 + 100 * Math.cos(startRad);
-                                        const y1 = 150 + 100 * Math.sin(startRad);
-                                        const x2 = 150 + 100 * Math.cos(endRad);
-                                        const y2 = 150 + 100 * Math.sin(endRad);
-                                        const largeArc = angle > 180 ? 1 : 0;
-                                        const pathData = `M 150 150 L ${x1} ${y1} A 100 100 0 ${largeArc} 1 ${x2} ${y2} Z`;
-                                        return (
-                                            <path key={i} d={pathData} fill={cat.color} stroke="white" strokeWidth="2" />
-                                        );
-                                    })}
-                                </svg>
-                            </div>
-                            <div className="mt-3 space-y-1">
-                                {categoryData.map(cat => (
-                                    <div key={cat.label} className="flex justify-between text-sm">
-                                        <span className="flex items-center gap-2">
-                                            <span className="text-lg">{cat.emoji}</span>
-                                            {cat.label}
-                                        </span>
-                                        <span className="font-medium">${cat.value.toFixed(2)}</span>
+                            <h3 className="font-bold text-lg mb-2">Credit Cards</h3>
+                            <div className="space-y-2">
+                                {Object.values(creditCardTotals).map(card => (
+                                    <div key={card.id} className="bg-white p-3 rounded-lg border border-gray-200 flex items-center justify-between">
+                                        <div className="flex items-center gap-2">
+                                            <div className="w-2 h-8 rounded-full" style={{ backgroundColor: card.color }} />
+                                            <div>
+                                                <span className="font-medium text-sm">{card.shortName}</span>
+                                                <p className="text-xs text-gray-400">···{card.last4}</p>
+                                            </div>
+                                        </div>
+                                        <span className={`font-bold ${card.total < 0 ? 'text-green-600' : ''}`}>{card.total < 0 ? '-' : ''}${fmt(card.total)}</span>
                                     </div>
                                 ))}
                             </div>
                         </div>
-                    )}
+
+                        <div>
+                            <h3 className="font-bold text-lg mb-2">Bank Accounts</h3>
+                            <div className="space-y-2">
+                                {Object.values(bankTotals).map(bank => (
+                                    <div key={bank.id} className="bg-white p-3 rounded-lg border border-gray-200 flex items-center justify-between">
+                                        <div className="flex items-center gap-2">
+                                            <div className="w-2 h-8 rounded-full" style={{ backgroundColor: bank.color }} />
+                                            <div>
+                                                <span className="font-medium text-sm">{bank.shortName}</span>
+                                                <p className="text-xs text-gray-400">···{bank.last4}</p>
+                                            </div>
+                                        </div>
+                                        <span className={`font-bold ${bank.total < 0 ? 'text-red-600' : ''}`}>{bank.total < 0 ? '-' : ''}${fmt(bank.total)}</span>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+
+                    {categoryData.length > 0 && (() => {
+                        const totalValue = categoryData.reduce((sum, c) => sum + c.value, 0);
+                        return (
+                        <div>
+                            <div className="flex items-center justify-between mb-3">
+                                <h3 className="font-bold text-lg">Spending by Category</h3>
+                                <select
+                                    value={chartMonth}
+                                    onChange={(e) => setChartMonth(e.target.value)}
+                                    className="text-sm border border-gray-200 rounded-lg px-2 py-1 bg-white"
+                                >
+                                    <option value="">All Time</option>
+                                    {months.map(m => {
+                                        const [y, mo] = m.split('-');
+                                        const label = new Date(y, parseInt(mo) - 1).toLocaleString('en-US', { month: 'short', year: 'numeric' });
+                                        return <option key={m} value={m}>{label}</option>;
+                                    })}
+                                </select>
+                            </div>
+                            <div className="bg-white p-4 rounded-lg border border-gray-200">
+                                <div className="flex flex-col md:flex-row items-center gap-4">
+                                    <div className="relative" style={{ width: 200, height: 200, flexShrink: 0 }}>
+                                        <svg viewBox="0 0 200 200" style={{ width: '100%', height: '100%' }}>
+                                            {categoryData.map((cat, i) => {
+                                                const angle = (cat.value / totalValue) * 360;
+                                                const startAngle = categoryData.slice(0, i).reduce((s, c) => s + (c.value / totalValue) * 360, 0);
+                                                const endAngle = startAngle + angle;
+                                                const isHovered = hoveredSlice === i;
+                                                const r = isHovered ? 88 : 82;
+                                                const startRad = (startAngle - 90) * Math.PI / 180;
+                                                const endRad = (endAngle - 90) * Math.PI / 180;
+                                                const x1 = 100 + r * Math.cos(startRad);
+                                                const y1 = 100 + r * Math.sin(startRad);
+                                                const x2 = 100 + r * Math.cos(endRad);
+                                                const y2 = 100 + r * Math.sin(endRad);
+                                                const largeArc = angle > 180 ? 1 : 0;
+                                                const pathData = `M 100 100 L ${x1} ${y1} A ${r} ${r} 0 ${largeArc} 1 ${x2} ${y2} Z`;
+                                                return (
+                                                    <path
+                                                        key={i}
+                                                        d={pathData}
+                                                        fill={cat.color}
+                                                        stroke="white"
+                                                        strokeWidth="2"
+                                                        onMouseEnter={() => setHoveredSlice(i)}
+                                                        onMouseLeave={() => setHoveredSlice(null)}
+                                                        onClick={() => setHoveredSlice(hoveredSlice === i ? null : i)}
+                                                        style={{ cursor: 'pointer', transition: 'all 0.15s' }}
+                                                    />
+                                                );
+                                            })}
+                                        </svg>
+                                        {hoveredSlice !== null && categoryData[hoveredSlice] && (
+                                            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                                                <div className="bg-white/90 rounded-lg shadow px-3 py-1.5 text-center">
+                                                    <p className="text-xs font-medium">{categoryData[hoveredSlice].emoji} {categoryData[hoveredSlice].label}</p>
+                                                    <p className="text-sm font-bold">${fmt(categoryData[hoveredSlice].value)}</p>
+                                                    <p className="text-[10px] text-gray-500">{((categoryData[hoveredSlice].value / totalValue) * 100).toFixed(1)}%</p>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                    <div className="flex-1 w-full max-h-48 overflow-y-auto space-y-1">
+                                        {categoryData.map((cat, i) => (
+                                            <div
+                                                key={cat.label}
+                                                className={`flex justify-between text-xs py-1 px-2 rounded cursor-pointer transition ${hoveredSlice === i ? 'bg-gray-100' : ''}`}
+                                                onMouseEnter={() => setHoveredSlice(i)}
+                                                onMouseLeave={() => setHoveredSlice(null)}
+                                            >
+                                                <span className="flex items-center gap-1.5">
+                                                    <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: cat.color }} />
+                                                    <span className="text-sm">{cat.emoji}</span>
+                                                    <span className="truncate">{cat.label}</span>
+                                                </span>
+                                                <span className="font-medium ml-2 flex-shrink-0">${fmt(cat.value)}</span>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>
+                                <div className="mt-2 pt-2 border-t border-gray-100 text-right">
+                                    <span className="text-sm text-gray-500">Total: </span>
+                                    <span className="text-sm font-bold">${fmt(totalValue)}</span>
+                                </div>
+                            </div>
+                        </div>
+                        );
+                    })()}
 
                     {recent.length > 0 && (
                         <div>
@@ -1759,7 +1831,7 @@
                     date: etDate,
                 });
                 setToast('🚇 Metrocard added');
-                setTimeout(() => setToast(''), 3000);
+                setTimeout(() => setToast(''), 5000);
             };
 
             useEffect(() => {
@@ -1772,7 +1844,7 @@
                 pushUndo(expenses);
                 await appendExpense(expenseData);
                 setToast('Expense added');
-                setTimeout(() => setToast(''), 3000);
+                setTimeout(() => setToast(''), 5000);
             };
 
             const handleUpdateExpense = async (rowIndex, updated) => {
@@ -1785,7 +1857,7 @@
                     pushUndo(expenses);
                     await deleteExpense(rowIndex);
                     setToast('Expense deleted');
-                    setTimeout(() => setToast(''), 3000);
+                    setTimeout(() => setToast(''), 5000);
                 }
             };
 
@@ -1793,7 +1865,12 @@
                 const expense = expenses.find(e => e.rowIndex === rowIndex);
                 if (expense) {
                     pushUndo(expenses);
-                    await updateExpense(rowIndex, { ...expense, reconciled });
+                    // Save reconcile state to localStorage (no sheet column for this)
+                    try { localStorage.setItem('rec_' + rowIndex, JSON.stringify(reconciled)); } catch {}
+                    // Update in-memory state without rewriting the sheet row
+                    const updated = expenses.map(e => e.rowIndex === rowIndex ? { ...e, reconciled } : e);
+                    // Trigger re-render via fetchExpenses replacement
+                    await fetchExpenses(true);
                 }
             };
 
@@ -1801,7 +1878,7 @@
                 const previousState = undoAction();
                 if (previousState) {
                     setToast('Undo successful');
-                    setTimeout(() => setToast(''), 3000);
+                    setTimeout(() => setToast(''), 5000);
                 }
             };
 
@@ -1978,10 +2055,18 @@
                         ))}
                     </div>
 
-                    {/* Toast */}
+                    {/* Toast with Undo */}
                     {toast && (
-                        <div className="fixed bottom-20 left-1/2 transform -translate-x-1/2 bg-black text-white px-4 py-2 rounded-lg z-40">
-                            {toast}
+                        <div className="fixed bottom-20 left-1/2 transform -translate-x-1/2 bg-gray-900 text-white px-4 py-2.5 rounded-lg z-40 flex items-center gap-3 shadow-lg">
+                            <span className="text-sm">{toast}</span>
+                            {canUndo && (
+                                <button
+                                    onClick={handleUndo}
+                                    className="text-sm font-bold text-blue-300 hover:text-blue-100 uppercase tracking-wide"
+                                >
+                                    Undo
+                                </button>
+                            )}
                         </div>
                     )}
                 </div>
