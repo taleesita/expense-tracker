@@ -90,7 +90,7 @@
         const TXN_TYPES = [
             { id: 'charge', label: 'Charge', desc: 'Expense / debit', color: '#EF4444' },
             { id: 'deposit', label: 'Deposit', desc: 'Income / inflow', color: '#10B981' },
-            { id: 'credit_refund', label: 'Credit/Refund', desc: 'Return / refund', color: '#3B82F6' },
+            { id: 'credit_refund', label: 'Refund', desc: 'Return / refund', color: '#3B82F6' },
         ];
 
         // Format money with commas
@@ -737,20 +737,22 @@
                     formData.append('metadata', new Blob([JSON.stringify(metadata)], { type: 'application/json' }));
                     formData.append('file', file);
 
-                    const resp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+                    const resp = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,name,webViewLink,webContentLink', {
                         method: 'POST',
                         headers: { 'Authorization': `Bearer ${token}` },
                         body: formData
                     });
                     const result = await resp.json();
-                    if (result.webViewLink) {
+                    if (result.id) {
                         // Share with view access
-                        await fetch(`https://www.googleapis.com/drive/v3/files/${result.id}/permissions`, {
-                            method: 'POST',
-                            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ role: 'reader', type: 'anyone' })
-                        });
-                        return result.webViewLink;
+                        try {
+                            await fetch(`https://www.googleapis.com/drive/v3/files/${result.id}/permissions`, {
+                                method: 'POST',
+                                headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ role: 'reader', type: 'anyone' })
+                            });
+                        } catch (e) { /* sharing is nice-to-have */ }
+                        return result.webViewLink || `https://drive.google.com/file/d/${result.id}/view`;
                     }
                 } catch (err) {
                     console.error('Failed to upload receipt:', err);
@@ -1005,9 +1007,34 @@
             };
 
             const handleReceiptUpload = async (file) => {
-                if (token && merchant) {
-                    const url = await uploadReceipt(file, merchant, userName);
-                    if (url) setReceipt(url);
+                if (!token) return;
+                try {
+                    // Run OCR and Drive upload in parallel
+                    setShowOCRSpinner(true);
+                    const [ocrResult, url] = await Promise.all([
+                        scanReceipt(file).catch(err => { console.error('OCR error:', err); return null; }),
+                        uploadReceipt(file, merchant || 'receipt', userName).catch(err => { console.error('Upload error:', err); return null; })
+                    ]);
+                    setShowOCRSpinner(false);
+
+                    // Autofill empty fields from OCR
+                    if (ocrResult) {
+                        if (!merchant && ocrResult.merchant) setMerchant(ocrResult.merchant);
+                        if (!amount && ocrResult.amount) setAmount(ocrResult.amount.toString());
+                        if (ocrResult.date) setDate(ocrResult.date);
+                        if (ocrResult.category) setCategory(ocrResult.category);
+                    }
+
+                    // Set receipt link from Drive upload
+                    if (url) {
+                        setReceipt(url);
+                    } else {
+                        alert('Upload failed — please try again');
+                    }
+                } catch (err) {
+                    setShowOCRSpinner(false);
+                    console.error('Receipt upload error:', err);
+                    alert('Upload failed: ' + err.message);
                 }
             };
 
@@ -1577,7 +1604,7 @@
             const totalBankBalance = Object.values(bankBalances).reduce((sum, b) => sum + b.total, 0);
 
             return (
-                <div className="space-y-4 pb-20">
+                <div className="space-y-4 pb-24">
                     <div className="flex gap-3">
                         <div className="flex-1 bg-gradient-to-r from-red-500 to-red-600 text-white p-4 rounded-lg">
                             <p className="text-[10px] opacity-80 uppercase tracking-wide">Credit Cards</p>
@@ -1779,7 +1806,7 @@
             );
 
             return (
-                <div className="pb-20">
+                <div className="pb-24">
                     <div className="sticky top-0 bg-white p-3 border-b border-gray-200 flex gap-2 z-10">
                         <SearchIcon size={20} className="text-gray-400" />
                         <input
@@ -2034,7 +2061,7 @@
                                 )}
 
                                 {activeTab === 'cards' && (
-                                    <div className="pb-20 p-4 space-y-4">
+                                    <div className="pb-24 p-4 space-y-4">
                                         <div className="flex gap-2 overflow-x-auto no-scrollbar">
                                             {CREDIT_CARDS.map(card => (
                                                 <button
@@ -2058,7 +2085,7 @@
                                 )}
 
                                 {activeTab === 'banks' && (
-                                    <div className="pb-20 p-4 space-y-4">
+                                    <div className="pb-24 p-4 space-y-4">
                                         <div className="flex gap-2 overflow-x-auto no-scrollbar">
                                             {BANK_ACCOUNTS.map(bank => (
                                                 <button
