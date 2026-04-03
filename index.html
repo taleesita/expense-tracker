@@ -76,7 +76,18 @@
             { id: 'treatteek', emoji: '🍰', name: 'TreatTeek', color: '#F59E0B' },
             { id: 'cash', emoji: '💰', name: 'Cash', color: '#10B981' },
             { id: 'invest', emoji: '📈', name: 'Invest', color: '#059669' },
+            { id: 'work_income', emoji: '💼', name: 'Work Income', color: '#2563EB' },
+            { id: 'transfer', emoji: '🔄', name: 'Transfer', color: '#7C3AED' },
+            { id: 'card_payment', emoji: '💳', name: 'Card Payment', color: '#374151' },
+            { id: 'subscription', emoji: '🔁', name: 'Subscription', color: '#DB2777' },
             { id: 'other', emoji: '📦', name: 'Other', color: '#6B7280' },
+        ];
+
+        // Transaction types: 'charge' (expense), 'deposit' (income/inflow), 'credit_refund' (return/refund)
+        const TXN_TYPES = [
+            { id: 'charge', label: 'Charge', desc: 'Expense / debit', color: '#EF4444' },
+            { id: 'deposit', label: 'Deposit', desc: 'Income / inflow', color: '#10B981' },
+            { id: 'credit_refund', label: 'Credit/Refund', desc: 'Return / refund', color: '#3B82F6' },
         ];
 
         const MERCHANT_TO_CATEGORY = {
@@ -336,8 +347,10 @@
             if (lower.includes('treatteek') || lower.includes('treat teek')) return 'treatteek';
             if (lower.includes('cash') || lower.includes('withdrawal')) return 'cash';
             if (lower.includes('invest')) return 'invest';
-            if (lower.includes('work income') || lower.includes('income') || lower.includes('transfer')) return 'other';
-            if (lower.includes('card payment')) return 'other';
+            if (lower.includes('work income') || lower.includes('income') || lower.includes('salary') || lower.includes('payroll')) return 'work_income';
+            if (lower.includes('transfer')) return 'transfer';
+            if (lower.includes('card payment') || lower.includes('credit card payment')) return 'card_payment';
+            if (lower.includes('subscription')) return 'subscription';
             return 'other';
         };
 
@@ -359,7 +372,10 @@
                 'fun': 'Entertainment', 'donate': 'Donations',
                 'health': 'Health/Medical', 'fitness': 'Fitness & Wellness',
                 'travel': 'Travel', 'blink': 'Blink', 'treatteek': 'TreatTeek Expense',
-                'cash': 'Cash Withdrawal', 'invest': 'Investment', 'other': 'Other',
+                'cash': 'Cash Withdrawal', 'invest': 'Investment',
+                'work_income': 'Work Income', 'transfer': 'Transfer',
+                'card_payment': 'Card Payment', 'subscription': 'Subscription',
+                'other': 'Other',
             };
             return map[catId] || catId;
         };
@@ -486,8 +502,20 @@
                         if (!row || !row[0]) continue;
                         const charge = parseFloat(row[4]) || 0;  // E: Charge/Debit
                         const deposit = parseFloat(row[5]) || 0;  // F: Deposit
-                        const isDeposit = deposit > 0 && charge === 0;
-                        const amount = isDeposit ? deposit : charge;
+                        const hasDeposit = deposit > 0;
+                        const hasCharge = charge > 0;
+                        const amount = hasDeposit && !hasCharge ? deposit : charge;
+                        // Determine transaction type
+                        const catRaw = (row[7] || '').toLowerCase();
+                        let txnType = 'charge'; // default
+                        if (hasDeposit && !hasCharge) {
+                            // It's in the Deposit column — is it income or a refund?
+                            if (catRaw.includes('refund') || catRaw.includes('credit') || catRaw.includes('return')) {
+                                txnType = 'credit_refund';
+                            } else {
+                                txnType = 'deposit';
+                            }
+                        }
                         parsed.push({
                             rowIndex: i + 1,
                             timestamp: row[0] || '',                    // A: Timestamp
@@ -500,7 +528,8 @@
                             accountRaw: row[2] || '',                   // Keep original for writing back
                             receipt: row[8] || '',                      // I: Receipt
                             fee: parseFloat(row[6]) || 0,              // G: Fee
-                            isCredit: isDeposit,
+                            txnType: txnType,
+                            isCredit: txnType !== 'charge',  // backwards compat for display
                             originalCurrency: 'USD',
                             originalAmount: amount,
                             reconciled: false,
@@ -528,8 +557,9 @@
                 try {
                     // Sheet columns: A=Timestamp, B=Purchase Date, C=Card, D=Store/Transaction,
                     // E=Charge/Debit, F=Deposit, G=Fee, H=Category, I=Receipt
-                    const chargeAmt = expense.isCredit ? '' : expense.amount;
-                    const depositAmt = expense.isCredit ? expense.amount : '';
+                    const isInflow = expense.txnType === 'deposit' || expense.txnType === 'credit_refund';
+                    const chargeAmt = isInflow ? '' : expense.amount;
+                    const depositAmt = isInflow ? expense.amount : '';
                     const row = [
                         getCurrentTimestamp(),                              // A: Timestamp
                         expense.date || new Date().toLocaleDateString('en-US'), // B: Purchase Date
@@ -559,8 +589,9 @@
                 if (!token) return;
                 try {
                     // Sheet: A=Timestamp, B=Purchase Date, C=Card, D=Store, E=Charge, F=Deposit, G=Fee, H=Category, I=Receipt
-                    const chargeAmt = expense.isCredit ? '' : expense.amount;
-                    const depositAmt = expense.isCredit ? expense.amount : '';
+                    const isInflow = expense.txnType === 'deposit' || expense.txnType === 'credit_refund';
+                    const chargeAmt = isInflow ? '' : expense.amount;
+                    const depositAmt = isInflow ? expense.amount : '';
                     const row = [
                         expense.timestamp,                                      // A
                         expense.date || '',                                     // B
@@ -736,112 +767,74 @@
         const ExpenseRow = ({ expense, onDelete, onUpdate, onReconcile, showReconcile, isLocked, onEdit }) => {
             const category = getCategoryById(expense.category);
             const account = getAccountById(expense.account);
-            const [editingField, setEditingField] = useState(null);
-            const [editDraft, setEditDraft] = useState('');
-
-            const handleInlineStart = (field) => {
-                setEditDraft(field === 'amount' ? expense.amount.toString() : expense[field]);
-                setEditingField(field);
-            };
-
-            const handleInlineCommit = (field) => {
-                const value = field === 'amount' ? parseFloat(editDraft) || expense.amount : editDraft;
-                if (value !== expense[field]) {
-                    onUpdate({ ...expense, [field]: value });
-                }
-                setEditingField(null);
-            };
+            const isInflow = expense.txnType === 'deposit' || expense.txnType === 'credit_refund';
 
             return (
-                <div className="flex items-center gap-3 py-3 px-4 border-b border-gray-200 hover:bg-gray-50 group">
-                    <div className="text-2xl cursor-pointer" onClick={() => onEdit && onEdit(expense)}>{category?.emoji || '📦'}</div>
+                <div className="flex items-center gap-2.5 py-2.5 px-3 border-b border-gray-100 hover:bg-gray-50 group cursor-pointer" onClick={() => onEdit && onEdit(expense)}>
+                    <div className="text-xl flex-shrink-0">{category?.emoji || '📦'}</div>
                     <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                            {editingField === 'merchant' ? (
-                                <input
-                                    autoFocus
-                                    className="border rounded px-2 py-1 text-sm w-full"
-                                    value={editDraft}
-                                    onChange={(e) => setEditDraft(e.target.value)}
-                                    onBlur={() => handleInlineCommit('merchant')}
-                                    onKeyDown={(e) => { if (e.key === 'Enter') handleInlineCommit('merchant'); if (e.key === 'Escape') setEditingField(null); }}
-                                />
-                            ) : (
-                                <span
-                                    className="font-medium cursor-pointer hover:underline truncate"
-                                    onClick={() => handleInlineStart('merchant')}
-                                >
-                                    {expense.merchant}
-                                </span>
+                        <div className="flex items-center gap-1.5">
+                            <span className="font-medium text-sm truncate">{expense.merchant}</span>
+                            {expense.txnType === 'deposit' && (
+                                <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded flex-shrink-0 leading-none">Income</span>
                             )}
-                            {expense.originalCurrency && expense.originalCurrency !== 'USD' && (
-                                <span className="text-xs bg-blue-100 text-blue-700 px-2 py-0.5 rounded flex-shrink-0">
-                                    {expense.originalCurrency}
-                                </span>
-                            )}
-                            {expense.isCredit && (
-                                <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded flex-shrink-0">Credit</span>
+                            {expense.txnType === 'credit_refund' && (
+                                <span className="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded flex-shrink-0 leading-none">Refund</span>
                             )}
                         </div>
-                        <div className="text-xs text-gray-500 flex items-center gap-2 mt-1 flex-wrap">
+                        <div className="text-[11px] text-gray-400 flex items-center gap-1.5 mt-0.5">
                             <span>{expense.date || expense.timestamp}</span>
-                            {account && <span className="text-xs font-medium" style={{ color: account.color }}>{account.shortName}</span>}
-                            {expense.receipt && (
-                                <a href={expense.receipt} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
-                                    <ExternalLinkIcon size={12} />Receipt
-                                </a>
-                            )}
-                            <span className="text-gray-300 cursor-pointer hover:text-blue-500" onClick={() => onEdit && onEdit(expense)} title="Edit all fields">
-                                <Edit2Icon size={11} />
-                            </span>
+                            {account && <span className="font-medium" style={{ color: account.color }}>{account.shortName}</span>}
                         </div>
                     </div>
                     <div className="text-right flex-shrink-0">
-                        {editingField === 'amount' ? (
-                            <input
-                                autoFocus
-                                type="number"
-                                step="0.01"
-                                className="border rounded px-2 py-1 text-sm w-24 text-right"
-                                value={editDraft}
-                                onChange={(e) => setEditDraft(e.target.value)}
-                                onBlur={() => handleInlineCommit('amount')}
-                                onKeyDown={(e) => { if (e.key === 'Enter') handleInlineCommit('amount'); if (e.key === 'Escape') setEditingField(null); }}
-                            />
-                        ) : (
-                            <span
-                                className={`font-medium cursor-pointer hover:underline ${expense.isCredit || expense.amount < 0 ? 'text-green-600' : ''}`}
-                                onClick={() => handleInlineStart('amount')}
-                            >
-                                ${Math.abs(expense.amount).toFixed(2)}
-                            </span>
-                        )}
+                        <span className={`font-semibold text-sm ${isInflow ? 'text-green-600' : ''}`}>
+                            {isInflow ? '+' : ''}${Math.abs(expense.amount).toFixed(2)}
+                        </span>
                     </div>
                     {showReconcile && !isLocked && (
                         <button
-                            onClick={() => onReconcile(expense.rowIndex, !expense.reconciled)}
-                            className="ml-2 flex-shrink-0"
+                            onClick={(e) => { e.stopPropagation(); onReconcile(expense.rowIndex, !expense.reconciled); }}
+                            className="ml-1 flex-shrink-0"
                         >
                             {expense.reconciled ? (
-                                <CheckCircleIcon size={20} className="text-green-600" />
+                                <CheckCircleIcon size={18} className="text-green-600" />
                             ) : (
-                                <CircleIcon size={20} className="text-gray-400" />
+                                <CircleIcon size={18} className="text-gray-300" />
                             )}
                         </button>
                     )}
                     {showReconcile && isLocked && expense.reconciled && (
-                        <div className="ml-2 flex-shrink-0">
-                            <CheckCircleIcon size={20} className="text-amber-600" />
+                        <div className="ml-1 flex-shrink-0">
+                            <CheckCircleIcon size={18} className="text-amber-600" />
                         </div>
                     )}
                     <button
-                        onClick={() => onDelete(expense.rowIndex)}
-                        className="ml-2 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+                        onClick={(e) => { e.stopPropagation(); onDelete(expense.rowIndex); }}
+                        className="ml-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
                     >
-                        <Trash2Icon size={20} className="text-red-600" />
+                        <Trash2Icon size={16} className="text-red-400 hover:text-red-600" />
                     </button>
                 </div>
             );
+        };
+
+        // Helper: parse various date formats to YYYY-MM-DD for input[type=date]
+        const parseDateToISO = (dateStr) => {
+            if (!dateStr) return new Date().toISOString().split('T')[0];
+            // Already YYYY-MM-DD?
+            if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return dateStr;
+            // Try MM/DD/YYYY or M/D/YYYY
+            const mdyMatch = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+            if (mdyMatch) {
+                const [, m, d, y] = mdyMatch;
+                const fullYear = y.length === 2 ? '20' + y : y;
+                return `${fullYear}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+            }
+            // Try Date.parse as fallback
+            const parsed = new Date(dateStr);
+            if (!isNaN(parsed)) return parsed.toISOString().split('T')[0];
+            return new Date().toISOString().split('T')[0];
         };
 
         const AddExpenseModal = ({ isOpen, onClose, onAdd, onUpdate, editExpense, token, userName }) => {
@@ -853,7 +846,7 @@
             const [account, setAccount] = useState('');
             const [notes, setNotes] = useState('');
             const [receipt, setReceipt] = useState('');
-            const [isCredit, setIsCredit] = useState(false);
+            const [txnType, setTxnType] = useState('charge');
             const [originalCurrency, setOriginalCurrency] = useState('USD');
             const [originalAmount, setOriginalAmount] = useState('');
 
@@ -862,12 +855,12 @@
                 if (editExpense && isOpen) {
                     setMerchant(editExpense.merchant || '');
                     setAmount(editExpense.amount?.toString() || '');
-                    setDate(editExpense.date || new Date().toISOString().split('T')[0]);
+                    setDate(parseDateToISO(editExpense.date));
                     setCategory(editExpense.category || 'other');
                     setAccount(editExpense.account || '');
                     setNotes(editExpense.notes || '');
                     setReceipt(editExpense.receipt || '');
-                    setIsCredit(editExpense.isCredit || false);
+                    setTxnType(editExpense.txnType || 'charge');
                     setOriginalCurrency(editExpense.originalCurrency || 'USD');
                     setOriginalAmount(editExpense.originalAmount?.toString() || '');
                 } else if (!editExpense && isOpen) {
@@ -878,7 +871,7 @@
                     setAccount('');
                     setNotes('');
                     setReceipt('');
-                    setIsCredit(false);
+                    setTxnType('charge');
                     setOriginalCurrency('USD');
                     setOriginalAmount('');
                 }
@@ -920,7 +913,8 @@
                     account,
                     notes,
                     receipt,
-                    isCredit,
+                    txnType,
+                    isCredit: txnType !== 'charge',
                     originalCurrency,
                     originalAmount: originalAmount ? parseFloat(originalAmount) : parseFloat(amount),
                     person: userName,
@@ -966,9 +960,10 @@
                         <div className="flex gap-2 mb-4">
                             <button
                                 onClick={() => setShowScanner(true)}
-                                className="flex items-center gap-2 flex-1 bg-blue-600 text-white py-2 rounded-lg font-medium hover:bg-blue-700"
+                                className="flex items-center justify-center gap-2 flex-1 bg-blue-600 text-white py-2.5 rounded-lg font-medium hover:bg-blue-700 text-sm"
                             >
-                                <CameraIcon size={18} /> Scan Receipt
+                                <CameraIcon size={16} className="flex-shrink-0" />
+                                <span>Scan Receipt</span>
                             </button>
                             <input
                                 type="file"
@@ -977,19 +972,20 @@
                                 className="hidden"
                                 id="receipt-file"
                             />
-                            <label htmlFor="receipt-file" className="flex items-center gap-2 flex-1 bg-gray-200 text-gray-800 py-2 rounded-lg font-medium hover:bg-gray-300 cursor-pointer justify-center">
-                                <Upload2Icon size={18} /> Upload File
+                            <label htmlFor="receipt-file" className="flex items-center justify-center gap-2 flex-1 bg-gray-200 text-gray-800 py-2.5 rounded-lg font-medium hover:bg-gray-300 cursor-pointer text-sm">
+                                <Upload2Icon size={16} className="flex-shrink-0" />
+                                <span>Upload File</span>
                             </label>
                         </div>
 
-                        <div className="space-y-4">
+                        <div className="space-y-3">
                             <input
                                 type="text"
                                 placeholder="Merchant name"
                                 value={merchant}
                                 onChange={(e) => setMerchant(e.target.value)}
-                                onBlur={() => setCategory(suggestCategory(merchant))}
-                                className="w-full border rounded-lg px-4 py-2"
+                                onBlur={() => { if (!isEdit) setCategory(suggestCategory(merchant)); }}
+                                className="w-full border rounded-lg px-4 py-2.5"
                             />
 
                             <div className="flex gap-2">
@@ -999,41 +995,48 @@
                                     step="0.01"
                                     value={amount}
                                     onChange={(e) => setAmount(e.target.value)}
-                                    className="flex-1 border rounded-lg px-4 py-2"
+                                    className="flex-1 border rounded-lg px-4 py-2.5"
                                 />
                                 <input
                                     type="date"
                                     value={date}
                                     onChange={(e) => setDate(e.target.value)}
-                                    className="flex-1 border rounded-lg px-4 py-2"
+                                    className="flex-1 border rounded-lg px-4 py-2.5"
                                 />
                             </div>
 
-                            <div className="flex gap-2">
-                                <label className="flex items-center gap-2 flex-1">
-                                    <input
-                                        type="checkbox"
-                                        checked={isCredit}
-                                        onChange={(e) => setIsCredit(e.target.checked)}
-                                    />
-                                    <span className="text-sm">Credit/Refund</span>
-                                </label>
-                                {originalCurrency !== 'USD' && (
-                                    <input
-                                        type="number"
-                                        placeholder="Original amount"
-                                        step="0.01"
-                                        value={originalAmount}
-                                        onChange={(e) => setOriginalAmount(e.target.value)}
-                                        className="flex-1 border rounded-lg px-4 py-2"
-                                    />
-                                )}
+                            <div>
+                                <label className="block text-xs font-medium text-gray-500 mb-1.5">Transaction Type</label>
+                                <div className="flex gap-1.5">
+                                    {TXN_TYPES.map(t => (
+                                        <button
+                                            key={t.id}
+                                            onClick={() => setTxnType(t.id)}
+                                            className={`flex-1 py-2 rounded-lg text-xs font-medium border-2 transition ${txnType === t.id ? 'border-current' : 'border-gray-200 bg-gray-50'}`}
+                                            style={txnType === t.id ? { color: t.color, backgroundColor: t.color + '15', borderColor: t.color } : {}}
+                                        >
+                                            {t.label}
+                                        </button>
+                                    ))}
+                                </div>
                             </div>
+
+                            {originalCurrency !== 'USD' && (
+                                <input
+                                    type="number"
+                                    placeholder="Original amount"
+                                    step="0.01"
+                                    value={originalAmount}
+                                    onChange={(e) => setOriginalAmount(e.target.value)}
+                                    className="w-full border rounded-lg px-4 py-2.5"
+                                />
+                            )}
 
                             <select
                                 value={originalCurrency}
                                 onChange={(e) => setOriginalCurrency(e.target.value)}
-                                className="w-full border rounded-lg px-4 py-2"
+                                className="w-full border rounded-lg px-4 py-2.5 appearance-none bg-white"
+                                style={{ backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236B7280' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E\")", backgroundRepeat: 'no-repeat', backgroundPosition: 'right 12px center' }}
                             >
                                 {Object.keys(CURRENCIES).map(curr => (
                                     <option key={curr} value={curr}>{curr}</option>
@@ -1041,50 +1044,59 @@
                             </select>
 
                             <div>
-                                <label className="block text-sm font-medium mb-2">Category</label>
-                                <div className="grid grid-cols-6 gap-1">
+                                <label className="block text-xs font-medium text-gray-500 mb-1.5">Category</label>
+                                <div className="grid grid-cols-7 gap-1">
                                     {CATEGORIES.map(cat => (
                                         <button
                                             key={cat.id}
                                             onClick={() => setCategory(cat.id)}
-                                            className={`flex flex-col items-center p-1.5 rounded-lg border transition ${category === cat.id ? 'bg-blue-100 border-2 border-blue-600' : 'bg-gray-50 border-gray-200'}`}
+                                            className={`flex flex-col items-center p-1 rounded-lg border transition ${category === cat.id ? 'bg-blue-100 border-2 border-blue-600' : 'bg-gray-50 border-gray-200'}`}
                                         >
-                                            <div className="text-base">{cat.emoji}</div>
-                                            <div className="text-[7px] font-medium truncate w-full text-center leading-tight mt-0.5">{cat.name}</div>
+                                            <div className="text-sm">{cat.emoji}</div>
+                                            <div className="text-[6px] font-medium truncate w-full text-center leading-tight mt-0.5">{cat.name}</div>
                                         </button>
                                     ))}
                                 </div>
                             </div>
 
-                            <select
-                                value={account}
-                                onChange={(e) => setAccount(e.target.value)}
-                                className="w-full border rounded-lg px-4 py-2"
-                            >
-                                <option value="">Select Account</option>
-                                <optgroup label="Credit Cards">
-                                    {CREDIT_CARDS.map(card => (
-                                        <option key={card.id} value={card.id}>{card.name}</option>
-                                    ))}
-                                </optgroup>
-                                <optgroup label="Bank Accounts">
-                                    {BANK_ACCOUNTS.map(bank => (
-                                        <option key={bank.id} value={bank.id}>{bank.name}</option>
-                                    ))}
-                                </optgroup>
-                            </select>
+                            <div className="relative">
+                                <select
+                                    value={account}
+                                    onChange={(e) => setAccount(e.target.value)}
+                                    className="w-full border rounded-lg px-4 py-2.5 pr-10 appearance-none bg-white"
+                                    style={{ backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236B7280' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E\")", backgroundRepeat: 'no-repeat', backgroundPosition: 'right 12px center' }}
+                                >
+                                    <option value="">Select Account</option>
+                                    <optgroup label="Credit Cards">
+                                        {CREDIT_CARDS.map(card => (
+                                            <option key={card.id} value={card.id}>{card.name}</option>
+                                        ))}
+                                    </optgroup>
+                                    <optgroup label="Bank Accounts">
+                                        {BANK_ACCOUNTS.map(bank => (
+                                            <option key={bank.id} value={bank.id}>{bank.name}</option>
+                                        ))}
+                                    </optgroup>
+                                </select>
+                            </div>
 
                             <textarea
                                 placeholder="Notes (optional)"
                                 value={notes}
                                 onChange={(e) => setNotes(e.target.value)}
-                                className="w-full border rounded-lg px-4 py-2 h-20 resize-none"
+                                className="w-full border rounded-lg px-4 py-2.5 h-16 resize-none text-sm"
                             />
 
                             {receipt && (
-                                <div className="bg-green-50 p-3 rounded-lg flex items-center gap-2 text-green-700">
-                                    <CheckIcon size={18} />
-                                    <span className="text-sm">Receipt uploaded</span>
+                                <div className="bg-green-50 p-3 rounded-lg">
+                                    <div className="flex items-center gap-2 text-green-700 mb-1">
+                                        <CheckIcon size={16} />
+                                        <span className="text-sm font-medium">Receipt attached</span>
+                                    </div>
+                                    <a href={receipt} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 hover:underline flex items-center gap-1 ml-6">
+                                        <ExternalLinkIcon size={12} />
+                                        View receipt
+                                    </a>
                                 </div>
                             )}
 
@@ -1310,7 +1322,11 @@
         };
 
         const HomeTab = ({ expenses, onEdit }) => {
-            const total = expenses.reduce((sum, e) => sum + (e.isCredit ? -e.amount : e.amount), 0);
+            const charges = expenses.filter(e => e.txnType === 'charge');
+            const deposits = expenses.filter(e => e.txnType === 'deposit');
+            const totalSpent = charges.reduce((sum, e) => sum + e.amount, 0);
+            const totalIncome = deposits.reduce((sum, e) => sum + e.amount, 0);
+            const total = totalSpent;
             const byCategory = {};
             CATEGORIES.forEach(cat => {
                 byCategory[cat.id] = {
@@ -1323,7 +1339,9 @@
 
             expenses.forEach(e => {
                 if (byCategory[e.category]) {
-                    byCategory[e.category].value += e.isCredit ? -e.amount : e.amount;
+                    if (e.txnType === 'charge') {
+                        byCategory[e.category].value += e.amount;
+                    }
                 }
             });
 
@@ -1350,13 +1368,16 @@
                 };
             });
 
-            const recent = expenses.slice(-5).reverse();
+            const recent = expenses.slice(0, 5);
 
             return (
                 <div className="space-y-4 pb-20">
-                    <div className="bg-gradient-to-r from-blue-600 to-blue-700 text-white p-6 rounded-lg">
-                        <p className="text-sm opacity-90">Total Spent</p>
-                        <p className="text-4xl font-bold">${total.toFixed(2)}</p>
+                    <div className="bg-gradient-to-r from-blue-600 to-blue-700 text-white p-5 rounded-lg">
+                        <p className="text-xs opacity-75 uppercase tracking-wide">Total Spent</p>
+                        <p className="text-3xl font-bold mt-0.5">${totalSpent.toFixed(2)}</p>
+                        {totalIncome > 0 && (
+                            <p className="text-sm opacity-80 mt-1">+${totalIncome.toFixed(2)} income</p>
+                        )}
                     </div>
 
                     <div>
@@ -1565,6 +1586,7 @@
                     account: 'reserve_chase',
                     notes: '',
                     receipt: '',
+                    txnType: 'charge',
                     isCredit: false,
                     originalCurrency: 'USD',
                     originalAmount: 3.00,
@@ -1620,17 +1642,26 @@
 
             if (!user || !token) {
                 return (
-                    <div className="flex items-center justify-center h-screen bg-gradient-to-br from-blue-600 to-blue-700">
-                        <div className="bg-white p-8 rounded-lg shadow-xl text-center max-w-sm">
-                            <DollarSignIcon size={48} className="mx-auto mb-4 text-blue-600" />
-                            <h1 className="text-3xl font-bold mb-2">Expenses</h1>
-                            <p className="text-gray-600 mb-6">Track your spending with ease</p>
+                    <div className="min-h-screen bg-gray-50 flex items-center justify-center px-4" style={{ fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" }}>
+                        <div className="bg-white rounded-2xl p-8 shadow-lg border border-gray-100 max-w-sm w-full text-center">
+                            <div className="w-14 h-14 bg-blue-50 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                                <LockIcon size={24} className="text-blue-500" />
+                            </div>
+                            <h1 className="text-xl font-bold text-gray-900 mb-1">Expense Tracker</h1>
+                            <p className="text-sm text-gray-400 mb-6">Sign in with Google to continue</p>
                             <button
                                 onClick={login}
-                                className="w-full bg-blue-600 text-white py-3 rounded-lg font-medium hover:bg-blue-700 transition"
+                                className="w-full flex items-center justify-center gap-3 py-3 px-4 bg-white border border-gray-200 rounded-xl text-sm font-medium text-gray-700 hover:bg-gray-50 hover:border-gray-300 transition-colors"
                             >
+                                <svg width="18" height="18" viewBox="0 0 24 24">
+                                    <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z" fill="#4285F4"/>
+                                    <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+                                    <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+                                    <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+                                </svg>
                                 Sign in with Google
                             </button>
+                            <p className="text-xs text-gray-300 mt-4">Restricted to authorized users only</p>
                         </div>
                     </div>
                 );
