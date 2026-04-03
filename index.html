@@ -98,6 +98,33 @@
         // Format money with commas
         const fmt = (n) => Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
+        // Fuzzy match: find closest known merchant name
+        const levenshtein = (a, b) => {
+            const m = a.length, n = b.length;
+            const dp = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+            for (let i = 0; i <= m; i++) dp[i][0] = i;
+            for (let j = 0; j <= n; j++) dp[0][j] = j;
+            for (let i = 1; i <= m; i++)
+                for (let j = 1; j <= n; j++)
+                    dp[i][j] = a[i-1] === b[j-1] ? dp[i-1][j-1] : 1 + Math.min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1]);
+            return dp[m][n];
+        };
+        const fuzzyMatchMerchant = (ocrName, knownMerchants) => {
+            if (!ocrName || !knownMerchants.length) return ocrName;
+            const lower = ocrName.toLowerCase();
+            let bestMatch = null, bestScore = Infinity;
+            for (const known of knownMerchants) {
+                const dist = levenshtein(lower, known.toLowerCase());
+                const maxLen = Math.max(lower.length, known.length);
+                // Accept if edit distance is ≤30% of the longer string
+                if (dist < bestScore && dist / maxLen <= 0.3) {
+                    bestScore = dist;
+                    bestMatch = known;
+                }
+            }
+            return bestMatch || ocrName;
+        };
+
         // Calculate account balance from raw sheet columns
         // Matches user's sheet formula: =SUM(F:F)-SUM(E:E)-SUM(J:J)
         // Result is positive for bank accounts (deposits > charges = money you have)
@@ -308,8 +335,38 @@
         );
 
         // ============ UTILITIES ============
+        // Data-driven category suggestion: learns from existing entries, falls back to hardcoded map
+        let _expensesCache = [];
+        const setExpensesCache = (expenses) => { _expensesCache = expenses || []; };
         const suggestCategory = (merchant) => {
-            const lower = merchant.toLowerCase();
+            if (!merchant) return 'other';
+            const lower = merchant.toLowerCase().trim();
+
+            // First: check actual data — what category does this merchant usually get?
+            if (_expensesCache.length > 0) {
+                const catCounts = {};
+                // Split input into key words for flexible matching
+                const inputWords = lower.split(/[\s\-–—]+/).filter(w => w.length >= 3);
+                for (const e of _expensesCache) {
+                    const eMerch = (e.merchant || '').toLowerCase().trim();
+                    if (!eMerch) continue;
+                    // Match if: exact, one contains the other, or significant word overlap
+                    const isMatch = eMerch === lower
+                        || (lower.length >= 4 && eMerch.includes(lower))
+                        || (eMerch.length >= 4 && lower.includes(eMerch))
+                        || (inputWords.length >= 2 && inputWords.filter(w => eMerch.includes(w)).length >= Math.ceil(inputWords.length * 0.6));
+                    if (isMatch) {
+                        const cat = e.category;
+                        if (cat && cat !== 'other' && cat !== 'card_payment' && cat !== 'transfer') {
+                            catCounts[cat] = (catCounts[cat] || 0) + 1;
+                        }
+                    }
+                }
+                const best = Object.entries(catCounts).sort((a, b) => b[1] - a[1])[0];
+                if (best && best[1] >= 1) return best[0];
+            }
+
+            // Fallback: hardcoded map for new merchants
             for (const [key, catId] of Object.entries(MERCHANT_TO_CATEGORY)) {
                 if (lower.includes(key)) return catId;
             }
@@ -621,6 +678,7 @@
                         return new Date(dateB) - new Date(dateA) || b.rowIndex - a.rowIndex;
                     });
                     setExpenses(parsed);
+                    setExpensesCache(parsed);
                 } catch (err) {
                     console.error('Failed to fetch expenses:', err);
                 } finally {
@@ -1151,10 +1209,12 @@
                 const result = await scanReceipt(file);
                 setShowOCRSpinner(false);
                 if (result) {
-                    setMerchant(result.merchant);
+                    const knownNames = [...new Set((allExpenses || []).map(e => e.merchant).filter(Boolean))];
+                    const corrected = fuzzyMatchMerchant(result.merchant, knownNames);
+                    setMerchant(corrected);
                     setAmount(result.amount.toString());
                     setDate(result.date);
-                    setCategory(result.category);
+                    setCategory(result.category || suggestCategory(corrected));
                 }
             };
 
@@ -1169,12 +1229,17 @@
                     ]);
                     setShowOCRSpinner(false);
 
-                    // Autofill empty fields from OCR
+                    // Autofill empty fields from OCR, with fuzzy merchant matching
                     if (ocrResult) {
-                        if (!merchant && ocrResult.merchant) setMerchant(ocrResult.merchant);
+                        if (!merchant && ocrResult.merchant) {
+                            const knownNames = [...new Set((allExpenses || []).map(e => e.merchant).filter(Boolean))];
+                            const corrected = fuzzyMatchMerchant(ocrResult.merchant, knownNames);
+                            setMerchant(corrected);
+                            if (!isEdit) setCategory(suggestCategory(corrected));
+                        }
                         if (!amount && ocrResult.amount) setAmount(ocrResult.amount.toString());
                         if (ocrResult.date) setDate(ocrResult.date);
-                        if (ocrResult.category) setCategory(ocrResult.category);
+                        if (ocrResult.category && !merchant) setCategory(ocrResult.category);
                     }
 
                     // Set receipt link from Drive upload
@@ -1201,8 +1266,15 @@
             };
 
             const handleAdd = () => {
-                if (!merchant || !amount || !account) {
-                    alert('Please fill in merchant, amount, and account');
+                const missing = [];
+                if (!account) missing.push('account');
+                if (!merchant) missing.push('merchant');
+                if (!amount) missing.push('amount');
+                if (!date) missing.push('date');
+                if (!category || category === 'other') missing.push('category');
+                if (!txnType) missing.push('transaction type');
+                if (missing.length) {
+                    alert('Please fill in: ' + missing.join(', '));
                     return;
                 }
                 // Rename Drive file if merchant was updated after upload
