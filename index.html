@@ -96,12 +96,13 @@
         // Format money with commas
         const fmt = (n) => Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
-        // Manual balance storage (localStorage)
-        const getManualBalance = (accountId) => {
-            try { const v = localStorage.getItem('bal_' + accountId); return v !== null ? parseFloat(v) : null; } catch { return null; }
-        };
-        const setManualBalance = (accountId, amount) => {
-            try { localStorage.setItem('bal_' + accountId, String(amount)); } catch {}
+        // Calculate account balance from raw sheet columns
+        // CC: charges (col E) - deposits/payments (col F) = amount owed
+        // Bank: deposits (col F) - charges/withdrawals (col E) = balance
+        const calcAccountBalance = (accountExpenses, isCreditCard) => {
+            const totalCharges = accountExpenses.reduce((sum, e) => sum + (e.rawCharge || 0), 0);
+            const totalDeposits = accountExpenses.reduce((sum, e) => sum + (e.rawDeposit || 0), 0);
+            return isCreditCard ? totalCharges - totalDeposits : totalDeposits - totalCharges;
         };
 
         const MERCHANT_TO_CATEGORY = {
@@ -489,17 +490,26 @@
             }, [saveSession]);
 
             useEffect(() => {
-                if (window.google) {
+                const tryInit = () => {
+                    if (!window.google) return false;
                     initTokenClient();
-                    // If we have a saved token but it'll expire soon, silently refresh
-                    if (token && tokenExpiryRef.current && Date.now() > tokenExpiryRef.current - 10 * 60 * 1000) {
-                        // Token expiring soon, request silent refresh once client is ready
+                    // If we have a saved user but token is expired or expiring, auto re-auth
+                    const savedEmail = (() => { try { const u = JSON.parse(localStorage.getItem('expense_user')); return u?.email; } catch { return null; } })();
+                    if (savedEmail && (!token || !tokenExpiryRef.current || Date.now() > tokenExpiryRef.current - 5 * 60 * 1000)) {
                         setTimeout(() => {
                             if (tokenClientRef.current) {
-                                tokenClientRef.current.requestAccessToken({ prompt: '' });
+                                tokenClientRef.current.requestAccessToken({ prompt: '', login_hint: savedEmail });
                             }
-                        }, 1000);
+                        }, 500);
                     }
+                    return true;
+                };
+                if (!tryInit()) {
+                    // GIS script not loaded yet — wait for it
+                    const interval = setInterval(() => {
+                        if (tryInit()) clearInterval(interval);
+                    }, 300);
+                    return () => clearInterval(interval);
                 }
             }, [initTokenClient]);
 
@@ -574,6 +584,8 @@
                             date: row[1] || '',                         // B: Purchase Date
                             merchant: row[3] || '',                     // D: Store/Transaction
                             amount: amount,
+                            rawCharge: charge,                          // E raw
+                            rawDeposit: deposit,                        // F raw
                             category: matchCategoryFromSheet(row[7]),    // H: Category
                             categoryRaw: row[7] || '',                  // Keep original for writing back
                             account: matchAccountFromSheet(row[2]),      // C: Card
@@ -812,76 +824,6 @@
             }, [stack]);
 
             return { stack, push, undo, canUndo: stack.length > 0 };
-        };
-
-        // ============ EDITABLE BALANCE ============
-        const EditableBalance = ({ accountId, colorClass, size = 'sm' }) => {
-            const [editing, setEditing] = useState(false);
-            const [bal, setBal] = useState(() => getManualBalance(accountId));
-            const [inputVal, setInputVal] = useState('');
-            const inputRef = useRef(null);
-
-            useEffect(() => {
-                if (editing && inputRef.current) inputRef.current.focus();
-            }, [editing]);
-
-            const save = () => {
-                const parsed = parseFloat(inputVal.replace(/[,$]/g, ''));
-                if (!isNaN(parsed)) {
-                    setManualBalance(accountId, parsed);
-                    setBal(parsed);
-                }
-                setEditing(false);
-            };
-
-            if (bal === null) {
-                return (
-                    editing ? (
-                        <form onSubmit={(e) => { e.preventDefault(); save(); }} className="flex items-center gap-1">
-                            <span className="text-gray-400">$</span>
-                            <input
-                                ref={inputRef}
-                                type="text"
-                                value={inputVal}
-                                onChange={(e) => setInputVal(e.target.value)}
-                                onBlur={save}
-                                className={`${size === 'lg' ? 'w-32 text-lg' : 'w-20 text-sm'} border-b border-gray-300 outline-none bg-transparent font-bold ${colorClass}`}
-                                placeholder="0.00"
-                            />
-                        </form>
-                    ) : (
-                        <button onClick={() => { setInputVal(''); setEditing(true); }} className="text-xs text-gray-400 hover:text-blue-500 italic">
-                            set balance
-                        </button>
-                    )
-                );
-            }
-
-            if (editing) {
-                return (
-                    <form onSubmit={(e) => { e.preventDefault(); save(); }} className="flex items-center gap-1">
-                        <span className={colorClass}>$</span>
-                        <input
-                            ref={inputRef}
-                            type="text"
-                            value={inputVal}
-                            onChange={(e) => setInputVal(e.target.value)}
-                            onBlur={save}
-                            className={`${size === 'lg' ? 'w-32 text-lg' : 'w-20 text-sm'} border-b border-gray-300 outline-none bg-transparent font-bold ${colorClass}`}
-                        />
-                    </form>
-                );
-            }
-
-            return (
-                <span
-                    onClick={() => { setInputVal(bal.toFixed(2)); setEditing(true); }}
-                    className={`font-bold cursor-pointer hover:opacity-70 ${colorClass}`}
-                    title="Click to update balance"
-                >
-                    ${fmt(bal)}
-                </span>
-            );
         };
 
         // ============ MAIN COMPONENTS ============
@@ -1456,17 +1398,9 @@
             );
 
             const isCreditCard = CREDIT_CARDS.some(c => c.id === accountId);
-            const calcBalance = (sum, e) => {
-                if (isCreditCard) {
-                    if (e.category === 'card_payment') return sum - e.amount;
-                    return e.txnType === 'charge' ? sum + e.amount : sum - e.amount;
-                } else {
-                    return (e.txnType === 'deposit' || e.txnType === 'credit_refund') ? sum + e.amount : sum - e.amount;
-                }
-            };
-            const total = accountExpenses.reduce(calcBalance, 0);
-            const reconciledTotal = reconciledExpenses.reduce(calcBalance, 0);
-            const recentTotal = recentExpenses.reduce(calcBalance, 0);
+            const total = calcAccountBalance(accountExpenses, isCreditCard);
+            const reconciledTotal = calcAccountBalance(reconciledExpenses, isCreditCard);
+            const recentTotal = calcAccountBalance(recentExpenses, isCreditCard);
             const progress = recentExpenses.length > 0 ? (reconciledExpenses.length / recentExpenses.length) * 100 : 0;
 
             const handleClearUnlocked = () => {
@@ -1491,9 +1425,7 @@
                                 <LockIcon size={16} /> {isLocked ? 'Locked' : 'Unlocked'}
                             </button>
                         </div>
-                        <div className="text-2xl mb-3">
-                            <EditableBalance accountId={accountId} colorClass={isCreditCard ? 'text-red-600' : 'text-green-600'} size="lg" />
-                        </div>
+                        <div className={`text-2xl font-bold mb-3 ${isCreditCard ? (total > 0 ? 'text-red-600' : 'text-green-600') : (total >= 0 ? 'text-green-600' : 'text-red-600')}`}>{total < 0 ? '-' : ''}${fmt(total)}</div>
                         <div className="w-full bg-gray-200 rounded-full h-2 mb-2">
                             <div
                                 className={`h-2 rounded-full transition-all ${isLocked ? 'bg-amber-500' : ''}`}
@@ -1620,9 +1552,19 @@
 
             const recent = expenses.slice(0, 5);
 
-            // Compute totals from manual balances
-            const totalCCBalance = CREDIT_CARDS.reduce((sum, c) => sum + (getManualBalance(c.id) || 0), 0);
-            const totalBankBalance = BANK_ACCOUNTS.reduce((sum, b) => sum + (getManualBalance(b.id) || 0), 0);
+            // Compute balances from raw sheet columns (E=charge, F=deposit)
+            const ccBalances = {};
+            CREDIT_CARDS.forEach(card => {
+                const acctExp = expenses.filter(e => e.account === card.id);
+                ccBalances[card.id] = { ...card, total: calcAccountBalance(acctExp, true) };
+            });
+            const bankBalances = {};
+            BANK_ACCOUNTS.forEach(bank => {
+                const acctExp = expenses.filter(e => e.account === bank.id);
+                bankBalances[bank.id] = { ...bank, total: calcAccountBalance(acctExp, false) };
+            });
+            const totalCCBalance = Object.values(ccBalances).reduce((sum, c) => sum + c.total, 0);
+            const totalBankBalance = Object.values(bankBalances).reduce((sum, b) => sum + b.total, 0);
 
             return (
                 <div className="space-y-4 pb-20">
@@ -1643,7 +1585,7 @@
                         <div>
                             <h3 className="font-bold text-lg mb-2">Credit Cards</h3>
                             <div className="space-y-2">
-                                {CREDIT_CARDS.map(card => (
+                                {Object.values(ccBalances).map(card => (
                                     <div key={card.id} className="bg-white p-3 rounded-lg border border-gray-200 flex items-center justify-between">
                                         <div className="flex items-center gap-2">
                                             <div className="w-2 h-8 rounded-full" style={{ backgroundColor: card.color }} />
@@ -1652,7 +1594,7 @@
                                                 <p className="text-xs text-gray-400">···{card.last4}</p>
                                             </div>
                                         </div>
-                                        <EditableBalance accountId={card.id} colorClass="text-red-600" />
+                                        <span className={`font-bold ${card.total > 0 ? 'text-red-600' : card.total < 0 ? 'text-green-600' : 'text-gray-500'}`}>{card.total < 0 ? '-' : ''}${fmt(card.total)}</span>
                                     </div>
                                 ))}
                             </div>
@@ -1661,7 +1603,7 @@
                         <div>
                             <h3 className="font-bold text-lg mb-2">Bank Accounts</h3>
                             <div className="space-y-2">
-                                {BANK_ACCOUNTS.map(bank => (
+                                {Object.values(bankBalances).map(bank => (
                                     <div key={bank.id} className="bg-white p-3 rounded-lg border border-gray-200 flex items-center justify-between">
                                         <div className="flex items-center gap-2">
                                             <div className="w-2 h-8 rounded-full" style={{ backgroundColor: bank.color }} />
@@ -1670,7 +1612,7 @@
                                                 <p className="text-xs text-gray-400">···{bank.last4}</p>
                                             </div>
                                         </div>
-                                        <EditableBalance accountId={bank.id} colorClass="text-green-600" />
+                                        <span className={`font-bold ${bank.total >= 0 ? 'text-green-600' : 'text-red-600'}`}>{bank.total < 0 ? '-' : ''}${fmt(bank.total)}</span>
                                     </div>
                                 ))}
                             </div>
