@@ -762,7 +762,32 @@
                 return null;
             }, [token]);
 
-            return { uploadReceipt };
+            const deleteFile = useCallback(async (fileUrl) => {
+                if (!token || !fileUrl) return;
+                try {
+                    const match = fileUrl.match(/\/d\/([^/]+)/);
+                    if (!match) return;
+                    await fetch(`https://www.googleapis.com/drive/v3/files/${match[1]}`, {
+                        method: 'DELETE',
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                } catch (err) { console.error('Failed to delete file:', err); }
+            }, [token]);
+
+            const renameFile = useCallback(async (fileUrl, newName) => {
+                if (!token || !fileUrl || !newName) return;
+                try {
+                    const match = fileUrl.match(/\/d\/([^/]+)/);
+                    if (!match) return;
+                    await fetch(`https://www.googleapis.com/drive/v3/files/${match[1]}`, {
+                        method: 'PATCH',
+                        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name: newName })
+                    });
+                } catch (err) { console.error('Failed to rename file:', err); }
+            }, [token]);
+
+            return { uploadReceipt, deleteFile, renameFile };
         };
 
         // ============ TESSERACT OCR ============
@@ -821,13 +846,51 @@
                     let amount = 0;
                     let date = new Date().toISOString().split('T')[0];
 
-                    // Merchant: first non-trivial line (skip very short lines, numbers-only lines)
-                    for (const line of lines) {
-                        const cleaned = line.trim();
-                        if (cleaned.length > 2 && !/^\d+[\d\s.,$%]*$/.test(cleaned) && !/^(tel|phone|fax|www\.|http)/i.test(cleaned)) {
-                            merchant = cleaned.replace(/[^a-zA-Z0-9\s&'.-]/g, '').trim();
-                            if (merchant.length > 1) break;
+                    // Smart merchant name extraction
+                    const cleanMerchantName = (raw) => {
+                        let name = raw;
+                        // Remove email addresses
+                        name = name.replace(/\S+@\S+\.\S+/g, '');
+                        // Remove URLs and domains (anything with .com, .net, .org, .io, etc.)
+                        name = name.replace(/\S*\.(com|net|org|io|co|shop|store|email)\S*/gi, '');
+                        // Remove store/order IDs (long alphanumeric strings)
+                        name = name.replace(/\b[a-z0-9]{10,}\b/gi, '');
+                        // Remove common prefixes
+                        name = name.replace(/^(from|to|by|via|at|order|receipt|invoice|confirmation)\s+/i, '');
+                        // Remove country codes like "US", "UK" at word boundaries after the name
+                        name = name.replace(/\s+(US|UK|CA|AU|EU|USA|GBP|USD)\s*$/i, '');
+                        // Strip non-name characters but keep &, ', -, spaces
+                        name = name.replace(/[^a-zA-Z0-9\s&'.,-]/g, '');
+                        // Collapse whitespace
+                        name = name.replace(/\s+/g, ' ').trim();
+                        return name;
+                    };
+
+                    // Try multiple strategies to find merchant name
+                    // Strategy 1: Look for "from <name>" pattern anywhere in text
+                    const fromMatch = text.match(/(?:from|by|via)\s+([A-Z][A-Za-z\s&'.-]{2,30})(?:\s|$|\n)/);
+                    if (fromMatch) {
+                        merchant = cleanMerchantName(fromMatch[1]);
+                    }
+                    // Strategy 2: First non-trivial line
+                    if (!merchant || merchant.length < 2) {
+                        for (const line of lines) {
+                            const cleaned = line.trim();
+                            // Skip lines that are mostly numbers, emails, URLs, dates, or very short
+                            if (cleaned.length < 3) continue;
+                            if (/^\d+[\d\s.,$%]*$/.test(cleaned)) continue;
+                            if (/^(tel|phone|fax|www\.|http|order|invoice|receipt|#|date|item|qty|description)/i.test(cleaned)) continue;
+                            if (/\S+@\S+\.\S+/.test(cleaned) && cleaned.split('@').length > 1) continue;
+                            const candidate = cleanMerchantName(cleaned);
+                            if (candidate.length >= 2 && candidate.length <= 40) {
+                                merchant = candidate;
+                                break;
+                            }
                         }
+                    }
+                    // Titlecase cleanup
+                    if (merchant && merchant === merchant.toUpperCase() && merchant.length > 3) {
+                        merchant = merchant.replace(/\b\w+/g, w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
                     }
                     merchant = merchant || 'Unknown';
 
@@ -1022,7 +1085,7 @@
             return parseDateToISO(expense.date || expense.timestamp);
         };
 
-        const AddExpenseModal = ({ isOpen, onClose, onAdd, onUpdate, editExpense, token, userName }) => {
+        const AddExpenseModal = ({ isOpen, onClose, onAdd, onUpdate, editExpense, token, userName, expenses: allExpenses }) => {
             const isEdit = !!editExpense;
             const [merchant, setMerchant] = useState('');
             const [amount, setAmount] = useState('');
@@ -1063,9 +1126,25 @@
             }, [editExpense, isOpen]);
             const [showScanner, setShowScanner] = useState(false);
             const [showOCRSpinner, setShowOCRSpinner] = useState(false);
+            const [showSuggestions, setShowSuggestions] = useState(false);
+            const uploadedReceiptUrl = useRef(null); // track file uploaded this session for cancel/rename
+
+            // Compute frequent merchants (5+ entries)
+            const frequentMerchants = useMemo(() => {
+                if (!allExpenses) return [];
+                const counts = {};
+                allExpenses.forEach(e => {
+                    const name = (e.merchant || '').trim();
+                    if (name) counts[name] = (counts[name] || 0) + 1;
+                });
+                return Object.entries(counts)
+                    .filter(([, count]) => count >= 5)
+                    .sort((a, b) => b[1] - a[1])
+                    .map(([name]) => name);
+            }, [allExpenses]);
 
             const { scanReceipt, processing } = useOCR();
-            const { uploadReceipt } = useGoogleDrive(token);
+            const { uploadReceipt, deleteFile, renameFile } = useGoogleDrive(token);
 
             const handleScan = async (file) => {
                 setShowOCRSpinner(true);
@@ -1100,6 +1179,7 @@
 
                     // Set receipt link from Drive upload
                     if (url) {
+                        uploadedReceiptUrl.current = url;
                         setReceipt(url);
                     } else {
                         alert('Upload failed — please try again');
@@ -1111,10 +1191,26 @@
                 }
             };
 
+            // Cancel: delete uploaded Drive file if any
+            const handleCancel = () => {
+                if (uploadedReceiptUrl.current) {
+                    deleteFile(uploadedReceiptUrl.current);
+                    uploadedReceiptUrl.current = null;
+                }
+                onClose();
+            };
+
             const handleAdd = () => {
                 if (!merchant || !amount || !account) {
                     alert('Please fill in merchant, amount, and account');
                     return;
+                }
+                // Rename Drive file if merchant was updated after upload
+                if (uploadedReceiptUrl.current && merchant && merchant !== 'receipt') {
+                    const now = new Date();
+                    const dateStr = `${now.getFullYear()}.${String(now.getMonth() + 1).padStart(2, '0')}.${String(now.getDate()).padStart(2, '0')}`;
+                    renameFile(uploadedReceiptUrl.current, `${dateStr} - ${merchant} (${userName})`);
+                    uploadedReceiptUrl.current = null;
                 }
                 const data = {
                     merchant,
@@ -1145,7 +1241,7 @@
                     <div className="bg-white w-full rounded-t-2xl p-6 max-h-[90vh] overflow-y-auto">
                         <div className="flex justify-between items-center mb-4">
                             <h2 className="text-2xl font-bold">{isEdit ? 'Edit Expense' : 'Add Expense'}</h2>
-                            <button onClick={onClose} className="p-1 hover:bg-gray-200 rounded">
+                            <button onClick={handleCancel} className="p-1 hover:bg-gray-200 rounded">
                                 <XIcon size={24} />
                             </button>
                         </div>
@@ -1210,14 +1306,30 @@
                                 </select>
                             </div>
 
-                            <input
-                                type="text"
-                                placeholder="Merchant name"
-                                value={merchant}
-                                onChange={(e) => setMerchant(e.target.value)}
-                                onBlur={() => { if (!isEdit) setCategory(suggestCategory(merchant)); }}
-                                className="w-full border rounded-lg px-4 py-2.5"
-                            />
+                            <div className="relative">
+                                <input
+                                    type="text"
+                                    placeholder="Merchant name"
+                                    value={merchant}
+                                    onChange={(e) => { setMerchant(e.target.value); setShowSuggestions(true); }}
+                                    onFocus={() => setShowSuggestions(true)}
+                                    onBlur={() => { setTimeout(() => setShowSuggestions(false), 200); if (!isEdit) setCategory(suggestCategory(merchant)); }}
+                                    className="w-full border rounded-lg px-4 py-2.5"
+                                />
+                                {showSuggestions && merchant.length >= 2 && (() => {
+                                    const matches = frequentMerchants.filter(m => m.toLowerCase().includes(merchant.toLowerCase()) && m.toLowerCase() !== merchant.toLowerCase());
+                                    return matches.length > 0 ? (
+                                        <div className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-40 overflow-y-auto">
+                                            {matches.slice(0, 6).map((m, i) => (
+                                                <button key={i} type="button"
+                                                    onMouseDown={(e) => { e.preventDefault(); setMerchant(m); setShowSuggestions(false); if (!isEdit) setCategory(suggestCategory(m)); }}
+                                                    className="w-full text-left px-4 py-2.5 text-sm hover:bg-blue-50 border-b border-gray-100 last:border-0"
+                                                >{m}</button>
+                                            ))}
+                                        </div>
+                                    ) : null;
+                                })()}
+                            </div>
 
                             <div className="flex gap-2">
                                 <input
@@ -2193,6 +2305,7 @@
                         editExpense={editExpense}
                         token={token}
                         userName={user?.name}
+                        expenses={expenses}
                     />
 
                     {/* Bottom Navigation */}
