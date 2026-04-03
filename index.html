@@ -805,21 +805,31 @@
 
         // ============ MAIN COMPONENTS ============
 
-        const ExpenseRow = ({ expense, onDelete, onUpdate, onReconcile, showReconcile, isLocked, onEdit, hideAccount = false }) => {
+        const ExpenseRow = ({ expense, onDelete, onUpdate, onReconcile, showReconcile, isLocked, onEdit, hideAccount = false, showDateSeparator = false }) => {
             const category = getCategoryById(expense.category);
             const account = getAccountById(expense.account);
-            const isInflow = expense.txnType === 'deposit' || expense.txnType === 'credit_refund';
+            const isPaymentOrTransfer = expense.category === 'card_payment' || expense.category === 'transfer';
+            const isInflow = !isPaymentOrTransfer && (expense.txnType === 'deposit' || expense.txnType === 'credit_refund');
 
             return (
+                <>
+                {showDateSeparator && (
+                    <div className="bg-gray-50 px-3 py-1.5 border-b-2 border-gray-200">
+                        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">{expense.date || expense.timestamp}</span>
+                    </div>
+                )}
                 <div className="flex items-center gap-2.5 py-2.5 px-3 border-b border-gray-100 hover:bg-gray-50 group cursor-pointer" onClick={() => onEdit && onEdit(expense)}>
                     <div className="text-xl flex-shrink-0">{category?.emoji || '📦'}</div>
                     <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-1.5">
                             <span className="font-medium text-sm truncate">{expense.merchant}</span>
-                            {expense.txnType === 'deposit' && (
+                            {isPaymentOrTransfer && (
+                                <span className="text-[10px] bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded flex-shrink-0 leading-none">{expense.category === 'card_payment' ? 'Payment' : 'Transfer'}</span>
+                            )}
+                            {!isPaymentOrTransfer && expense.txnType === 'deposit' && (
                                 <span className="text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded flex-shrink-0 leading-none">Income</span>
                             )}
-                            {expense.txnType === 'credit_refund' && (
+                            {!isPaymentOrTransfer && expense.txnType === 'credit_refund' && (
                                 <span className="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded flex-shrink-0 leading-none">Refund</span>
                             )}
                         </div>
@@ -829,8 +839,8 @@
                         </div>
                     </div>
                     <div className="text-right flex-shrink-0">
-                        <span className={`font-semibold text-sm ${isInflow ? 'text-green-600' : 'text-red-600'}`}>
-                            {isInflow ? '+' : '-'}${Math.abs(expense.amount).toFixed(2)}
+                        <span className={`font-semibold text-sm ${isPaymentOrTransfer ? 'text-gray-500' : isInflow ? 'text-green-600' : 'text-red-600'}`}>
+                            {isPaymentOrTransfer ? '' : isInflow ? '+' : '-'}${Math.abs(expense.amount).toFixed(2)}
                         </span>
                     </div>
                     {(() => {
@@ -877,6 +887,7 @@
                         <Trash2Icon size={16} className="text-red-400 hover:text-red-600" />
                     </button>
                 </div>
+                </>
             );
         };
 
@@ -896,6 +907,11 @@
             const parsed = new Date(dateStr);
             if (!isNaN(parsed)) return parsed.toISOString().split('T')[0];
             return new Date().toISOString().split('T')[0];
+        };
+
+        // Helper: get date key for grouping
+        const getDateKey = (expense) => {
+            return parseDateToISO(expense.date || expense.timestamp);
         };
 
         const AddExpenseModal = ({ isOpen, onClose, onAdd, onUpdate, editExpense, token, userName }) => {
@@ -1169,12 +1185,14 @@
                                             </div>
                                         ) : driveFileId ? (
                                             <div className="bg-gray-50">
+                                                <a href={receipt} target="_blank" rel="noopener noreferrer" className="block cursor-pointer">
                                                 <img
                                                     src={`https://drive.google.com/thumbnail?id=${driveFileId}&sz=w400`}
                                                     alt="Receipt preview"
-                                                    className="w-full max-h-48 object-contain"
-                                                    onError={(e) => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'flex'; }}
+                                                    className="w-full max-h-48 object-contain hover:opacity-80 transition-opacity"
+                                                    onError={(e) => { e.target.style.display = 'none'; e.target.parentElement.nextSibling.style.display = 'flex'; }}
                                                 />
+                                                </a>
                                                 <div className="items-center gap-3 p-3" style={{ display: 'none' }}>
                                                     <div className="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center flex-shrink-0">
                                                         <ExternalLinkIcon size={16} className="text-blue-500" />
@@ -1428,7 +1446,7 @@
                         {filteredExpenses.length === 0 ? (
                             <div className="p-4 text-center text-gray-500">No expenses</div>
                         ) : (
-                            filteredExpenses.map(expense => (
+                            filteredExpenses.map((expense, idx) => (
                                 <ExpenseRow
                                     key={expense.rowIndex}
                                     expense={expense}
@@ -1439,6 +1457,7 @@
                                     showReconcile={true}
                                     isLocked={isLocked}
                                     hideAccount={true}
+                                    showDateSeparator={idx === 0 || getDateKey(expense) !== getDateKey(filteredExpenses[idx - 1])}
                                 />
                             ))
                         )}
@@ -1506,14 +1525,22 @@
 
             const recent = expenses.slice(0, 5);
 
+            const totalCCBalance = Object.values(creditCardTotals).reduce((sum, c) => sum + c.total, 0);
+            const totalBankBalance = Object.values(bankTotals).reduce((sum, b) => sum + b.total, 0);
+
             return (
                 <div className="space-y-4 pb-20">
-                    <div className="bg-gradient-to-r from-blue-600 to-blue-700 text-white p-5 rounded-lg">
-                        <p className="text-xs opacity-75 uppercase tracking-wide">Total Spent</p>
-                        <p className="text-3xl font-bold mt-0.5">${totalSpent.toFixed(2)}</p>
-                        {totalIncome > 0 && (
-                            <p className="text-sm opacity-80 mt-1">+${totalIncome.toFixed(2)} income</p>
-                        )}
+                    <div className="flex gap-3">
+                        <div className="flex-1 bg-gradient-to-r from-red-500 to-red-600 text-white p-4 rounded-lg">
+                            <p className="text-[10px] opacity-80 uppercase tracking-wide">Credit Cards</p>
+                            <p className="text-xl font-bold mt-0.5">${Math.abs(totalCCBalance).toFixed(2)}</p>
+                            <p className="text-[10px] opacity-70 mt-0.5">{totalCCBalance > 0 ? 'owed' : 'credit'}</p>
+                        </div>
+                        <div className="flex-1 bg-gradient-to-r from-emerald-500 to-emerald-600 text-white p-4 rounded-lg">
+                            <p className="text-[10px] opacity-80 uppercase tracking-wide">Bank Accounts</p>
+                            <p className="text-xl font-bold mt-0.5">${Math.abs(totalBankBalance).toFixed(2)}</p>
+                            <p className="text-[10px] opacity-70 mt-0.5">{totalBankBalance >= 0 ? 'balance' : 'overdrawn'}</p>
+                        </div>
                     </div>
 
                     <div>
@@ -1594,7 +1621,7 @@
                         <div>
                             <h3 className="font-bold text-lg mb-2">Recent</h3>
                             <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-                                {recent.map(expense => (
+                                {recent.map((expense, idx) => (
                                     <ExpenseRow
                                         key={expense.rowIndex}
                                         expense={expense}
@@ -1602,6 +1629,7 @@
                                         onUpdate={() => {}}
                                         onEdit={onEdit}
                                         showReconcile={false}
+                                        showDateSeparator={idx === 0 || getDateKey(expense) !== getDateKey(recent[idx - 1])}
                                     />
                                 ))}
                             </div>
@@ -1635,7 +1663,7 @@
                         {filtered.length === 0 ? (
                             <div className="p-4 text-center text-gray-500">No expenses</div>
                         ) : (
-                            filtered.map(expense => (
+                            filtered.map((expense, idx) => (
                                 <ExpenseRow
                                     key={expense.rowIndex}
                                     expense={expense}
@@ -1643,6 +1671,7 @@
                                     onUpdate={(updated) => onUpdate(updated.rowIndex, updated)}
                                     onEdit={onEdit}
                                     showReconcile={false}
+                                    showDateSeparator={idx === 0 || getDateKey(expense) !== getDateKey(filtered[idx - 1])}
                                 />
                             ))
                         )}
