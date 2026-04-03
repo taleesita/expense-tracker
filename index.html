@@ -1470,27 +1470,49 @@
         };
 
         const HomeTab = ({ expenses, onEdit }) => {
-            const [chartMonth, setChartMonth] = useState('');  // '' = all time
+            const [chartFilter, setChartFilter] = useState('');  // '' = all, 'YYYY' = year, 'YYYY-MM' = month, 'YYYY-Q1' etc
             const [hoveredSlice, setHoveredSlice] = useState(null);
 
-            // Get available months from expenses
-            const months = useMemo(() => {
-                const m = new Set();
+            // Get available years and months from expenses
+            const { years, monthsByYear } = useMemo(() => {
+                const ySet = new Set();
+                const mMap = {};
                 expenses.forEach(e => {
                     const d = parseDateToISO(e.date || e.timestamp);
-                    if (d) m.add(d.substring(0, 7)); // YYYY-MM
+                    if (d) {
+                        const y = d.substring(0, 4);
+                        const m = d.substring(0, 7);
+                        ySet.add(y);
+                        if (!mMap[y]) mMap[y] = new Set();
+                        mMap[y].add(m);
+                    }
                 });
-                return Array.from(m).sort().reverse();
+                const years = Array.from(ySet).sort().reverse();
+                const monthsByYear = {};
+                years.forEach(y => { monthsByYear[y] = Array.from(mMap[y]).sort(); });
+                return { years, monthsByYear };
             }, [expenses]);
 
-            // Filter expenses by selected month
+            // Filter expenses by selected filter
             const filteredExpenses = useMemo(() => {
-                if (!chartMonth) return expenses;
+                if (!chartFilter) return expenses;
+                // Quarter filter: YYYY-Q1, YYYY-Q2, etc.
+                const qMatch = chartFilter.match(/^(\d{4})-Q(\d)$/);
+                if (qMatch) {
+                    const [, yr, q] = qMatch;
+                    const startMonth = (parseInt(q) - 1) * 3 + 1;
+                    const months = [startMonth, startMonth + 1, startMonth + 2].map(m => `${yr}-${String(m).padStart(2, '0')}`);
+                    return expenses.filter(e => {
+                        const d = parseDateToISO(e.date || e.timestamp);
+                        return d && months.some(m => d.startsWith(m));
+                    });
+                }
+                // Year or month filter
                 return expenses.filter(e => {
                     const d = parseDateToISO(e.date || e.timestamp);
-                    return d && d.startsWith(chartMonth);
+                    return d && d.startsWith(chartFilter);
                 });
-            }, [expenses, chartMonth]);
+            }, [expenses, chartFilter]);
 
             const byCategory = {};
             CATEGORIES.forEach(cat => {
@@ -1575,7 +1597,7 @@
                                                 <p className="text-xs text-gray-400">···{card.last4}</p>
                                             </div>
                                         </div>
-                                        <span className={`font-bold ${card.total < 0 ? 'text-green-600' : ''}`}>{card.total < 0 ? '-' : ''}${fmt(card.total)}</span>
+                                        <span className={`font-bold ${card.total > 0 ? 'text-red-600' : card.total < 0 ? 'text-green-600' : 'text-gray-500'}`}>{card.total < 0 ? '-' : ''}${fmt(card.total)}</span>
                                     </div>
                                 ))}
                             </div>
@@ -1607,16 +1629,25 @@
                             <div className="flex items-center justify-between mb-3">
                                 <h3 className="font-bold text-lg">Spending by Category</h3>
                                 <select
-                                    value={chartMonth}
-                                    onChange={(e) => setChartMonth(e.target.value)}
+                                    value={chartFilter}
+                                    onChange={(e) => { setChartFilter(e.target.value); setHoveredSlice(null); }}
                                     className="text-sm border border-gray-200 rounded-lg px-2 py-1 bg-white"
                                 >
                                     <option value="">All Time</option>
-                                    {months.map(m => {
-                                        const [y, mo] = m.split('-');
-                                        const label = new Date(y, parseInt(mo) - 1).toLocaleString('en-US', { month: 'short', year: 'numeric' });
-                                        return <option key={m} value={m}>{label}</option>;
-                                    })}
+                                    {years.map(y => (
+                                        <React.Fragment key={y}>
+                                            <option value={y}>{y} (Full Year)</option>
+                                            <option value={`${y}-Q1`}>&nbsp;&nbsp;Q1 (Jan–Mar)</option>
+                                            <option value={`${y}-Q2`}>&nbsp;&nbsp;Q2 (Apr–Jun)</option>
+                                            <option value={`${y}-Q3`}>&nbsp;&nbsp;Q3 (Jul–Sep)</option>
+                                            <option value={`${y}-Q4`}>&nbsp;&nbsp;Q4 (Oct–Dec)</option>
+                                            {(monthsByYear[y] || []).map(m => {
+                                                const mo = parseInt(m.split('-')[1]);
+                                                const label = new Date(y, mo - 1).toLocaleString('en-US', { month: 'short' });
+                                                return <option key={m} value={m}>&nbsp;&nbsp;&nbsp;&nbsp;{label} {y}</option>;
+                                            })}
+                                        </React.Fragment>
+                                    ))}
                                 </select>
                             </div>
                             <div className="bg-white p-4 rounded-lg border border-gray-200">
