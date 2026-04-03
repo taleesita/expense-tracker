@@ -282,11 +282,87 @@
             return 'other';
         };
 
-        const getAccountById = (id) => {
-            return [...CREDIT_CARDS, ...BANK_ACCOUNTS].find(a => a.id === id);
+        const ALL_ACCOUNTS = [...CREDIT_CARDS, ...BANK_ACCOUNTS];
+        const getAccountById = (id) => ALL_ACCOUNTS.find(a => a.id === id);
+        const getCategoryById = (id) => CATEGORIES.find(c => c.id === id);
+
+        // Map sheet card names (partial match) to account IDs
+        const matchAccountFromSheet = (cardText) => {
+            if (!cardText) return '';
+            const lower = cardText.toLowerCase();
+            if (lower.includes('reserve')) return 'reserve_chase';
+            if (lower.includes('amazon') && lower.includes('chase')) return 'amazon_chase';
+            if (lower.includes('united') || lower.includes('explorer')) return 'united_chase';
+            if (lower.includes('carecredit')) return 'carecredit';
+            if (lower.includes('cap1') && lower.includes('credit')) return 'cap1_cc';
+            if (lower.includes('cap1 jcheck') || lower.includes('cap1jcheck') || (lower.includes('cap1') && lower.includes('jcheck'))) return 'cap1_jcheck';
+            if (lower.includes('cap1 tsav') || lower.includes('cap1tsav') || (lower.includes('cap1') && lower.includes('tsav'))) return 'cap1_tsaving';
+            if (lower.includes('joint hy') || lower.includes('cap1 joint')) return 'cap1_joint_hy';
+            if (lower.includes('noa hy') || lower.includes('cap1 noa')) return 'cap1_noa_hy';
+            if (lower.includes('mercury') && lower.includes('treat')) return 'mercury_treatteek';
+            if (lower.includes('mercury') && lower.includes('matiteyahu')) return 'mercury_matiteyahu';
+            if (lower.includes('td sav')) return 'td_savings';
+            // Fallback: try matching by short name
+            for (const acct of ALL_ACCOUNTS) {
+                if (lower.includes(acct.shortName.toLowerCase()) || lower.includes(acct.name.toLowerCase())) return acct.id;
+            }
+            return '';
         };
 
-        const getCategoryById = (id) => CATEGORIES.find(c => c.id === id);
+        // Map sheet category names (partial match) to category IDs
+        const matchCategoryFromSheet = (catText) => {
+            if (!catText) return 'other';
+            const lower = catText.toLowerCase();
+            if (lower.includes('groceries')) return 'groceries';
+            if (lower.includes('dining')) return 'dining';
+            if (lower.includes('shopping')) return 'shopping';
+            if (lower.includes('home goods')) return 'home_goods';
+            if (lower.includes('nutbear') || lower.includes('nutbear')) return 'nutbear';
+            if (lower.includes('pets') || lower.includes('pet')) return 'pets';
+            if (lower.includes('personal care')) return 'personal_care';
+            if (lower.includes('car') && (lower.includes('gas') || lower.includes('parking'))) return 'car_gas';
+            if (lower.includes('public transport') || lower.includes('transit')) return 'transit';
+            if (lower.includes('ride') || lower.includes('uber') || lower.includes('lyft')) return 'rides';
+            if (lower.includes('home services') || lower.includes('utilit')) return 'utilities';
+            if (lower.includes('renovation')) return 'renovation';
+            if (lower.includes('home own') || lower.includes('ownership') || lower.includes('mortgage')) return 'home_own';
+            if (lower.includes('loan')) return 'loan';
+            if (lower.includes('entertainment') || lower.includes('fun')) return 'fun';
+            if (lower.includes('donat')) return 'donate';
+            if (lower.includes('health') || lower.includes('medical')) return 'health';
+            if (lower.includes('fitness') || lower.includes('gym') || lower.includes('athletic')) return 'fitness';
+            if (lower.includes('travel')) return 'travel';
+            if (lower.includes('blink')) return 'blink';
+            if (lower.includes('treatteek') || lower.includes('treat teek')) return 'treatteek';
+            if (lower.includes('cash') || lower.includes('withdrawal')) return 'cash';
+            if (lower.includes('invest')) return 'invest';
+            if (lower.includes('work income') || lower.includes('income') || lower.includes('transfer')) return 'other';
+            if (lower.includes('card payment')) return 'other';
+            return 'other';
+        };
+
+        // Reverse: get sheet-friendly card name from account ID
+        const getSheetCardName = (accountId) => {
+            const acct = getAccountById(accountId);
+            return acct ? acct.name : accountId;
+        };
+
+        // Reverse: get sheet-friendly category name from category ID
+        const getSheetCategoryName = (catId) => {
+            const map = {
+                'groceries': 'Groceries', 'dining': 'Dining Out', 'shopping': 'Shopping',
+                'home_goods': 'Home Goods', 'nutbear': 'Nutbear', 'pets': 'Pets',
+                'personal_care': 'Personal Care', 'car_gas': 'Car, Parking, Gas',
+                'transit': 'Public Transportation', 'rides': 'Ride Hailing',
+                'utilities': 'Home Services (Utilities)', 'renovation': 'Home Renovation',
+                'home_own': 'Home Ownership', 'loan': 'Loan Payment',
+                'fun': 'Entertainment', 'donate': 'Donations',
+                'health': 'Health/Medical', 'fitness': 'Fitness & Wellness',
+                'travel': 'Travel', 'blink': 'Blink', 'treatteek': 'TreatTeek Expense',
+                'cash': 'Cash Withdrawal', 'invest': 'Investment', 'other': 'Other',
+            };
+            return map[catId] || catId;
+        };
 
         const formatCurrency = (value, currency = 'USD') => {
             if (currency === 'USD') return `$${value.toFixed(2)}`;
@@ -392,12 +468,14 @@
             const [expenses, setExpenses] = useState([]);
             const [loading, setLoading] = useState(false);
 
+            // Sheet columns: A=Timestamp, B=Purchase Date, C=Card, D=Store/Transaction,
+            // E=Charge/Debit, F=Deposit, G=Fee, H=Category, I=Receipt
             const fetchExpenses = useCallback(async () => {
                 if (!token) return;
                 setLoading(true);
                 try {
                     const resp = await fetch(
-                        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(SHEET_TAB)}!A:M`,
+                        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(SHEET_TAB)}!A:I`,
                         { headers: { 'Authorization': `Bearer ${token}` } }
                     );
                     const data = await resp.json();
@@ -406,23 +484,37 @@
                     for (let i = 1; i < rows.length; i++) {
                         const row = rows[i];
                         if (!row || !row[0]) continue;
+                        const charge = parseFloat(row[4]) || 0;  // E: Charge/Debit
+                        const deposit = parseFloat(row[5]) || 0;  // F: Deposit
+                        const isDeposit = deposit > 0 && charge === 0;
+                        const amount = isDeposit ? deposit : charge;
                         parsed.push({
                             rowIndex: i + 1,
-                            timestamp: row[0],
-                            merchant: row[1] || '',
-                            amount: parseFloat(row[2]) || 0,
-                            category: row[3] || 'other',
-                            account: row[4] || '',
-                            notes: row[5] || '',
-                            receipt: row[6] || '',
-                            originalCurrency: row[7] || 'USD',
-                            originalAmount: parseFloat(row[8]) || 0,
-                            isCredit: row[9] === 'yes',
-                            reconciled: row[10] === 'yes',
-                            reconciledLocked: row[11] === 'yes',
-                            person: row[12] || '',
+                            timestamp: row[0] || '',                    // A: Timestamp
+                            date: row[1] || '',                         // B: Purchase Date
+                            merchant: row[3] || '',                     // D: Store/Transaction
+                            amount: amount,
+                            category: matchCategoryFromSheet(row[7]),    // H: Category
+                            categoryRaw: row[7] || '',                  // Keep original for writing back
+                            account: matchAccountFromSheet(row[2]),      // C: Card
+                            accountRaw: row[2] || '',                   // Keep original for writing back
+                            receipt: row[8] || '',                      // I: Receipt
+                            fee: parseFloat(row[6]) || 0,              // G: Fee
+                            isCredit: isDeposit,
+                            originalCurrency: 'USD',
+                            originalAmount: amount,
+                            reconciled: false,
+                            reconciledLocked: false,
+                            notes: '',
+                            person: '',
                         });
                     }
+                    // Sort newest first
+                    parsed.sort((a, b) => {
+                        const dateA = a.date || a.timestamp;
+                        const dateB = b.date || b.timestamp;
+                        return new Date(dateB) - new Date(dateA) || b.rowIndex - a.rowIndex;
+                    });
                     setExpenses(parsed);
                 } catch (err) {
                     console.error('Failed to fetch expenses:', err);
@@ -434,23 +526,23 @@
             const appendExpense = useCallback(async (expense) => {
                 if (!token) return;
                 try {
+                    // Sheet columns: A=Timestamp, B=Purchase Date, C=Card, D=Store/Transaction,
+                    // E=Charge/Debit, F=Deposit, G=Fee, H=Category, I=Receipt
+                    const chargeAmt = expense.isCredit ? '' : expense.amount;
+                    const depositAmt = expense.isCredit ? expense.amount : '';
                     const row = [
-                        getCurrentTimestamp(),
-                        expense.merchant,
-                        expense.amount,
-                        expense.category,
-                        expense.account,
-                        expense.notes,
-                        expense.receipt,
-                        expense.originalCurrency || 'USD',
-                        expense.originalAmount || expense.amount,
-                        expense.isCredit ? 'yes' : '',
-                        '',
-                        '',
-                        expense.person,
+                        getCurrentTimestamp(),                              // A: Timestamp
+                        expense.date || new Date().toLocaleDateString('en-US'), // B: Purchase Date
+                        getSheetCardName(expense.account),                  // C: Card
+                        expense.merchant,                                   // D: Store/Transaction
+                        chargeAmt,                                         // E: Charge/Debit
+                        depositAmt,                                        // F: Deposit
+                        '',                                                // G: Fee
+                        getSheetCategoryName(expense.category),            // H: Category
+                        expense.receipt || '',                             // I: Receipt
                     ];
                     await fetch(
-                        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(SHEET_TAB)}!A:A:append?valueInputOption=USER_ENTERED`,
+                        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(SHEET_TAB)}!A:I:append?valueInputOption=USER_ENTERED`,
                         {
                             method: 'POST',
                             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -466,23 +558,22 @@
             const updateExpense = useCallback(async (rowIndex, expense) => {
                 if (!token) return;
                 try {
+                    // Sheet: A=Timestamp, B=Purchase Date, C=Card, D=Store, E=Charge, F=Deposit, G=Fee, H=Category, I=Receipt
+                    const chargeAmt = expense.isCredit ? '' : expense.amount;
+                    const depositAmt = expense.isCredit ? expense.amount : '';
                     const row = [
-                        expense.timestamp,
-                        expense.merchant,
-                        expense.amount,
-                        expense.category,
-                        expense.account,
-                        expense.notes,
-                        expense.receipt,
-                        expense.originalCurrency || 'USD',
-                        expense.originalAmount || expense.amount,
-                        expense.isCredit ? 'yes' : '',
-                        expense.reconciled ? 'yes' : '',
-                        expense.reconciledLocked ? 'yes' : '',
-                        expense.person,
+                        expense.timestamp,                                      // A
+                        expense.date || '',                                     // B
+                        expense.accountRaw || getSheetCardName(expense.account), // C
+                        expense.merchant,                                       // D
+                        chargeAmt,                                             // E
+                        depositAmt,                                            // F
+                        expense.fee || '',                                     // G
+                        expense.categoryRaw || getSheetCategoryName(expense.category), // H
+                        expense.receipt || '',                                 // I
                     ];
                     await fetch(
-                        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(SHEET_TAB)}!A${rowIndex}:M${rowIndex}?valueInputOption=USER_ENTERED`,
+                        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(SHEET_TAB)}!A${rowIndex}:I${rowIndex}?valueInputOption=USER_ENTERED`,
                         {
                             method: 'PUT',
                             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -499,7 +590,7 @@
                 if (!token) return;
                 try {
                     await fetch(
-                        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(SHEET_TAB)}!A${rowIndex}:M${rowIndex}?valueInputOption=USER_ENTERED`,
+                        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(SHEET_TAB)}!A${rowIndex}:I${rowIndex}?valueInputOption=USER_ENTERED`,
                         {
                             method: 'PUT',
                             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -693,7 +784,7 @@
                             )}
                         </div>
                         <div className="text-xs text-gray-500 flex items-center gap-2 mt-1 flex-wrap">
-                            <span>{expense.timestamp}</span>
+                            <span>{expense.date || expense.timestamp}</span>
                             {account && <span className="text-xs font-medium" style={{ color: account.color }}>{account.shortName}</span>}
                             {expense.receipt && (
                                 <a href={expense.receipt} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
@@ -1272,15 +1363,16 @@
                         <h3 className="font-bold text-lg mb-2">Credit Cards</h3>
                         <div className="space-y-2">
                             {Object.values(creditCardTotals).map(card => (
-                                card.total > 0 && (
-                                    <div key={card.id} className="bg-white p-3 rounded-lg border border-gray-200 flex items-center justify-between">
-                                        <div className="flex items-center gap-2">
-                                            <CreditCardIcon size={18} style={{ color: card.color }} />
+                                <div key={card.id} className="bg-white p-3 rounded-lg border border-gray-200 flex items-center justify-between">
+                                    <div className="flex items-center gap-2">
+                                        <div className="w-2 h-8 rounded-full" style={{ backgroundColor: card.color }} />
+                                        <div>
                                             <span className="font-medium text-sm">{card.shortName}</span>
+                                            <p className="text-xs text-gray-400">···{card.last4}</p>
                                         </div>
-                                        <span className="font-bold">${card.total.toFixed(2)}</span>
                                     </div>
-                                )
+                                    <span className="font-bold">${card.total.toFixed(2)}</span>
+                                </div>
                             ))}
                         </div>
                     </div>
@@ -1289,15 +1381,16 @@
                         <h3 className="font-bold text-lg mb-2">Bank Accounts</h3>
                         <div className="space-y-2">
                             {Object.values(bankTotals).map(bank => (
-                                bank.total > 0 && (
-                                    <div key={bank.id} className="bg-white p-3 rounded-lg border border-gray-200 flex items-center justify-between">
-                                        <div className="flex items-center gap-2">
-                                            <WalletIcon size={18} style={{ color: bank.color }} />
+                                <div key={bank.id} className="bg-white p-3 rounded-lg border border-gray-200 flex items-center justify-between">
+                                    <div className="flex items-center gap-2">
+                                        <div className="w-2 h-8 rounded-full" style={{ backgroundColor: bank.color }} />
+                                        <div>
                                             <span className="font-medium text-sm">{bank.shortName}</span>
+                                            <p className="text-xs text-gray-400">···{bank.last4}</p>
                                         </div>
-                                        <span className="font-bold">${bank.total.toFixed(2)}</span>
                                     </div>
-                                )
+                                    <span className="font-bold">${bank.total.toFixed(2)}</span>
+                                </div>
                             ))}
                         </div>
                     </div>
