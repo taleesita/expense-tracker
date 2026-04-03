@@ -791,8 +791,8 @@
                         </div>
                     </div>
                     <div className="text-right flex-shrink-0">
-                        <span className={`font-semibold text-sm ${isInflow ? 'text-green-600' : ''}`}>
-                            {isInflow ? '+' : ''}${Math.abs(expense.amount).toFixed(2)}
+                        <span className={`font-semibold text-sm ${isInflow ? 'text-green-600' : 'text-red-600'}`}>
+                            {isInflow ? '+' : '-'}${Math.abs(expense.amount).toFixed(2)}
                         </span>
                     </div>
                     {showReconcile && !isLocked && (
@@ -818,7 +818,7 @@
                             className="p-1 hover:scale-110 transition-transform"
                             title="Edit"
                         >
-                            <span style={{ fontSize: '14px' }}>✏️</span>
+                            <span style={{ fontSize: '14px', display: 'inline-block', transform: 'scaleX(-1)' }}>✏️</span>
                         </button>
                     )}
                     <button
@@ -1099,22 +1099,66 @@
                                 className="w-full border rounded-lg px-4 py-2.5 h-16 resize-none text-sm"
                             />
 
-                            {receipt && (
-                                <div className="bg-green-50 p-3 rounded-lg">
-                                    <div className="flex items-center gap-2 text-green-700 mb-2">
-                                        <CheckIcon size={16} />
-                                        <span className="text-sm font-medium">Receipt attached</span>
+                            {receipt && (() => {
+                                // Extract Google Drive file ID for thumbnail
+                                const driveMatch = receipt.match(/(?:id=|\/d\/)([a-zA-Z0-9_-]+)/);
+                                const driveFileId = driveMatch ? driveMatch[1] : null;
+                                const isImage = receipt.startsWith('blob:') || /\.(jpg|jpeg|png|gif|webp)$/i.test(receipt);
+                                return (
+                                    <div className="rounded-xl border border-gray-200 overflow-hidden">
+                                        {isImage ? (
+                                            <div className="relative bg-gray-50">
+                                                <img src={receipt} alt="Receipt" className="w-full max-h-48 object-contain" />
+                                                <div className="absolute top-2 right-2 flex gap-1">
+                                                    <a href={receipt} target="_blank" rel="noopener noreferrer" className="p-1.5 bg-white rounded-lg shadow text-gray-600 hover:text-blue-600">
+                                                        <ExternalLinkIcon size={14} />
+                                                    </a>
+                                                    <button type="button" onClick={() => setReceipt('')} className="p-1.5 bg-white rounded-lg shadow text-gray-400 hover:text-red-500">
+                                                        <XIcon size={14} />
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        ) : driveFileId ? (
+                                            <div className="bg-gray-50">
+                                                <img
+                                                    src={`https://drive.google.com/thumbnail?id=${driveFileId}&sz=w400`}
+                                                    alt="Receipt preview"
+                                                    className="w-full max-h-48 object-contain"
+                                                    onError={(e) => { e.target.style.display = 'none'; e.target.nextSibling.style.display = 'flex'; }}
+                                                />
+                                                <div className="items-center gap-3 p-3" style={{ display: 'none' }}>
+                                                    <div className="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center flex-shrink-0">
+                                                        <ExternalLinkIcon size={16} className="text-blue-500" />
+                                                    </div>
+                                                    <a href={receipt} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 hover:underline truncate">
+                                                        Google Drive receipt
+                                                    </a>
+                                                </div>
+                                                <div className="flex items-center justify-between px-3 py-2 border-t border-gray-100">
+                                                    <a href={receipt} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 hover:underline flex items-center gap-1">
+                                                        <ExternalLinkIcon size={11} /> Open in Drive
+                                                    </a>
+                                                    <button type="button" onClick={() => setReceipt('')} className="text-xs text-gray-400 hover:text-red-500">Remove</button>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div className="flex items-center gap-3 p-3 bg-gray-50">
+                                                <div className="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center flex-shrink-0">
+                                                    <ExternalLinkIcon size={16} className="text-blue-500" />
+                                                </div>
+                                                <div className="flex-1 min-w-0">
+                                                    <a href={receipt} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 hover:underline flex items-center gap-1">
+                                                        <ExternalLinkIcon size={11} /> {receipt.length > 45 ? receipt.substring(0, 45) + '...' : receipt}
+                                                    </a>
+                                                </div>
+                                                <button type="button" onClick={() => setReceipt('')} className="text-gray-400 hover:text-red-500">
+                                                    <XIcon size={14} />
+                                                </button>
+                                            </div>
+                                        )}
                                     </div>
-                                    {receipt.startsWith('blob:') || /\.(jpg|jpeg|png|gif|webp)$/i.test(receipt) ? (
-                                        <img src={receipt} alt="receipt" className="max-w-full max-h-48 rounded ml-6" />
-                                    ) : (
-                                        <a href={receipt} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 hover:underline flex items-center gap-1 ml-6 truncate">
-                                            <ExternalLinkIcon size={12} className="flex-shrink-0" />
-                                            <span className="truncate">{receipt.length > 50 ? receipt.substring(0, 50) + '...' : receipt}</span>
-                                        </a>
-                                    )}
-                                </div>
-                            )}
+                                );
+                            })()}
 
                             <div className="flex gap-2 pt-4">
                                 <button
@@ -1257,8 +1301,21 @@
                 e.merchant.toLowerCase().includes(searchTerm.toLowerCase())
             );
 
-            const total = accountExpenses.reduce((sum, e) => sum + e.amount, 0);
-            const reconciledTotal = reconciledExpenses.reduce((sum, e) => sum + e.amount, 0);
+            const isCreditCard = CREDIT_CARDS.some(c => c.id === accountId);
+            const total = accountExpenses.reduce((sum, e) => {
+                if (isCreditCard) {
+                    return e.txnType === 'charge' ? sum + e.amount : sum - e.amount;
+                } else {
+                    return (e.txnType === 'deposit' || e.txnType === 'credit_refund') ? sum + e.amount : sum - e.amount;
+                }
+            }, 0);
+            const reconciledTotal = reconciledExpenses.reduce((sum, e) => {
+                if (isCreditCard) {
+                    return e.txnType === 'charge' ? sum + e.amount : sum - e.amount;
+                } else {
+                    return (e.txnType === 'deposit' || e.txnType === 'credit_refund') ? sum + e.amount : sum - e.amount;
+                }
+            }, 0);
             const progress = total > 0 ? (reconciledTotal / total) * 100 : 0;
 
             const handleClearUnlocked = () => {
@@ -1283,7 +1340,7 @@
                                 <LockIcon size={16} /> {isLocked ? 'Locked' : 'Unlocked'}
                             </button>
                         </div>
-                        <div className="text-2xl font-bold mb-3">${total.toFixed(2)}</div>
+                        <div className="text-2xl font-bold mb-3">{total < 0 ? '-' : ''}${Math.abs(total).toFixed(2)}</div>
                         <div className="w-full bg-gray-200 rounded-full h-2 mb-2">
                             <div
                                 className={`h-2 rounded-full transition-all ${isLocked ? 'bg-amber-500' : ''}`}
@@ -1372,7 +1429,11 @@
                 const cardExpenses = expenses.filter(e => e.account === card.id);
                 creditCardTotals[card.id] = {
                     ...card,
-                    total: cardExpenses.reduce((sum, e) => sum + e.amount, 0)
+                    total: cardExpenses.reduce((sum, e) => {
+                        // Charges add to balance owed, deposits/credits/payments reduce it
+                        if (e.txnType === 'charge') return sum + e.amount;
+                        return sum - e.amount;
+                    }, 0)
                 };
             });
 
@@ -1381,7 +1442,11 @@
                 const bankExpenses = expenses.filter(e => e.account === bank.id);
                 bankTotals[bank.id] = {
                     ...bank,
-                    total: bankExpenses.reduce((sum, e) => sum + e.amount, 0)
+                    total: bankExpenses.reduce((sum, e) => {
+                        // Deposits/income add to bank balance, charges/debits reduce it
+                        if (e.txnType === 'deposit' || e.txnType === 'credit_refund') return sum + e.amount;
+                        return sum - e.amount;
+                    }, 0)
                 };
             });
 
@@ -1409,7 +1474,7 @@
                                             <p className="text-xs text-gray-400">···{card.last4}</p>
                                         </div>
                                     </div>
-                                    <span className="font-bold">${card.total.toFixed(2)}</span>
+                                    <span className={`font-bold ${card.total < 0 ? 'text-green-600' : ''}`}>{card.total < 0 ? '-' : ''}${Math.abs(card.total).toFixed(2)}</span>
                                 </div>
                             ))}
                         </div>
@@ -1427,7 +1492,7 @@
                                             <p className="text-xs text-gray-400">···{bank.last4}</p>
                                         </div>
                                     </div>
-                                    <span className="font-bold">${bank.total.toFixed(2)}</span>
+                                    <span className={`font-bold ${bank.total < 0 ? 'text-red-600' : ''}`}>{bank.total < 0 ? '-' : ''}${Math.abs(bank.total).toFixed(2)}</span>
                                 </div>
                             ))}
                         </div>
