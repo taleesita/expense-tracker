@@ -360,6 +360,31 @@
             'BRL': 0.20,
         };
 
+        // ============ QUARTERLY REVIEW CONSTANTS ============
+        const QR_SHEET_TAB = '📝QBreakdown';
+        const HOME_VALUE = 1180000; // Current home value for equity calculation
+        // Mapping: quarterly sheet account name → expense tracker account ID
+        const QR_ACCOUNT_MAP = {
+            'TD Bank': 'td_savings',
+            'Capital One - HY Savings (Savings)': 'cap1_joint_hy',
+            'Capital One - Joint Checking': 'cap1_jcheck',
+            'Capital One - Taly Savings': 'cap1_tsaving',
+            'Mercury - Matiteyahu LLC': 'mercury_matiteyahu',
+            'Mercury - TreatTeek': 'mercury_treatteek',
+        };
+        // Account groupings for display
+        const QR_CATEGORIES = [
+            { id: 'liquid', label: 'Liquid', types: ['Liquid'] },
+            { id: 'stock', label: 'Stocks', types: ['Stock'] },
+            { id: 'illiquid', label: 'Retirement & Illiquid', types: ['Illiquid'] },
+            { id: 'debt', label: 'Debt', types: ['Debt'] },
+            { id: 'other', label: 'Other', types: [''] },
+        ];
+        // Special rows that are not accounts (summary rows)
+        const QR_SUMMARY_ROWS = ['STOCK', 'LIQUID', 'NOT LIQUID', 'TOTAL', 'DIFFERENCE'];
+        // Fidelity section starts at this row label
+        const QR_FIDELITY_LABEL = 'Fidelity Investment Account Summary';
+
         // ============ ICON COMPONENTS ============
         const HomeIcon = ({ size = 24, className = '' }) => (
             <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
@@ -481,6 +506,13 @@
             <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
                 <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
                 <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+            </svg>
+        );
+        const BarChartIcon = ({ size = 24, className = '' }) => (
+            <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+                <line x1="12" y1="20" x2="12" y2="10"></line>
+                <line x1="18" y1="20" x2="18" y2="4"></line>
+                <line x1="6" y1="20" x2="6" y2="16"></line>
             </svg>
         );
         const Undo2Icon = ({ size = 24, className = '' }) => (
@@ -2210,6 +2242,413 @@
             );
         };
 
+        // ============ QUARTERLY REVIEW ============
+        const QuarterlyReview = ({ token, expenses }) => {
+            const [loading, setLoading] = useState(false);
+            const [qrData, setQrData] = useState(null); // { accounts, quarters, summaries }
+            const [currentValues, setCurrentValues] = useState({}); // accountName -> edited value
+            const [showPct, setShowPct] = useState(false);
+            const [lockedQuarters, setLockedQuarters] = useState(() => {
+                try { return JSON.parse(localStorage.getItem('qr_locked') || '[]'); } catch { return []; }
+            });
+            const [phase, setPhase] = useState('entry'); // 'entry' | 'review'
+            const [expandDormant, setExpandDormant] = useState(false);
+
+            // Fetch quarterly data from sheet
+            const fetchQRData = useCallback(async () => {
+                if (!token) return;
+                setLoading(true);
+                try {
+                    const sheetId = getSheetId();
+                    const resp = await fetch(
+                        `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(QR_SHEET_TAB)}?key=&valueRenderOption=UNFORMATTED_VALUE`,
+                        { headers: { 'Authorization': `Bearer ${token}` } }
+                    );
+                    const data = await resp.json();
+                    const rows = data.values || [];
+                    if (rows.length < 2) { setLoading(false); return; }
+
+                    // Parse header to find quarter columns
+                    const header = rows[0];
+                    const quarters = [];
+                    for (let c = 4; c < header.length; c += 3) {
+                        const label = header[c] || '';
+                        // Quarter columns have labels like "2025.03" or are unlabeled (current WIP)
+                        quarters.push({
+                            colIdx: c,
+                            label: label || 'Current',
+                            isLabeled: !!label,
+                        });
+                    }
+
+                    // Parse account rows (stop at summary rows or Fidelity section)
+                    const accounts = [];
+                    const summaries = {};
+                    for (let r = 1; r < rows.length; r++) {
+                        const row = rows[r];
+                        const name = (row[1] || '').trim();
+                        const liquidity = (row[2] || '').trim();
+                        if (!name) continue;
+                        if (QR_SUMMARY_ROWS.includes(name)) {
+                            // Parse summary values per quarter
+                            summaries[name] = {};
+                            quarters.forEach(q => {
+                                const val = row[q.colIdx];
+                                summaries[name][q.label] = typeof val === 'number' ? val : parseFloat(String(val || '').replace(/[$,()]/g, '')) || 0;
+                                if (String(val || '').includes('(')) summaries[name][q.label] *= -1;
+                            });
+                            continue;
+                        }
+                        if (name === QR_FIDELITY_LABEL) break; // Stop before Fidelity section
+
+                        // Determine category
+                        let category = 'other';
+                        const liq = liquidity.toLowerCase();
+                        if (liq === 'liquid') category = 'liquid';
+                        else if (liq === 'stock') category = 'stock';
+                        else if (liq === 'illiquid') category = 'illiquid';
+                        // Student loan is debt
+                        if (name.toLowerCase().includes('student loan') || name.toLowerCase().includes('mortgage')) category = 'debt';
+
+                        // Parse values for each quarter
+                        const values = {};
+                        quarters.forEach(q => {
+                            const raw = row[q.colIdx];
+                            let val = 0;
+                            if (typeof raw === 'number') {
+                                val = raw;
+                            } else if (raw) {
+                                const str = String(raw).replace(/[$,\s]/g, '');
+                                const isNeg = str.includes('(') || str.includes('-');
+                                val = parseFloat(str.replace(/[()]/g, '')) || 0;
+                                if (isNeg) val = -val;
+                            }
+                            values[q.label] = val;
+                            // Also grab the percentage
+                            const pctRaw = row[q.colIdx + 1];
+                            if (pctRaw) {
+                                const pctVal = typeof pctRaw === 'number' ? pctRaw : parseFloat(String(pctRaw).replace('%', '')) / 100;
+                                values[q.label + '_pct'] = pctVal;
+                            }
+                        });
+
+                        const trackerAcctId = QR_ACCOUNT_MAP[name] || null;
+                        accounts.push({
+                            name,
+                            liquidity,
+                            category,
+                            values,
+                            trackerAcctId,
+                            sheetRow: r + 1, // 1-indexed
+                        });
+                    }
+
+                    setQrData({ accounts, quarters, summaries });
+
+                    // Pre-fill current values: auto-fill from tracker where possible
+                    const prefill = {};
+                    accounts.forEach(acct => {
+                        if (acct.trackerAcctId && expenses.length > 0) {
+                            const acctExpenses = expenses.filter(e => e.account === acct.trackerAcctId);
+                            const bal = calcAccountBalance(acctExpenses, acct.trackerAcctId);
+                            prefill[acct.name] = bal;
+                        }
+                        // Home equity auto-compute if mortgage value exists
+                        if (acct.name === 'Home Equity' && prefill['Mortgage']) {
+                            prefill['Home Equity'] = HOME_VALUE - Math.abs(prefill['Mortgage'] || 0);
+                        }
+                    });
+                    setCurrentValues(prefill);
+                } catch (err) {
+                    console.error('Failed to fetch quarterly data:', err);
+                } finally {
+                    setLoading(false);
+                }
+            }, [token, expenses]);
+
+            useEffect(() => { fetchQRData(); }, [fetchQRData]);
+
+            if (loading) return (
+                <div className="flex justify-center items-center py-20">
+                    <div className="inline-block animate-spin text-2xl">⏳</div>
+                </div>
+            );
+            if (!qrData) return (
+                <div className="p-4 text-center text-gray-500">No quarterly data found</div>
+            );
+
+            const { accounts, quarters, summaries } = qrData;
+            const prevQuarter = quarters.find(q => q.isLabeled) || quarters[1];
+            const prevLabel = prevQuarter?.label || '';
+
+            // Group accounts by category
+            const grouped = {};
+            QR_CATEGORIES.forEach(cat => { grouped[cat.id] = []; });
+            accounts.forEach(acct => {
+                const g = grouped[acct.category] || grouped['other'];
+                g.push(acct);
+            });
+
+            // Determine dormant accounts (last 2 quarters = $0 or missing)
+            const isDormant = (acct) => {
+                const recent = quarters.filter(q => q.isLabeled).slice(0, 2);
+                return recent.every(q => !acct.values[q.label] || acct.values[q.label] === 0);
+            };
+
+            // Get current value for an account (edited or auto-filled or last quarter)
+            const getCurrentVal = (acct) => {
+                if (currentValues[acct.name] !== undefined) return currentValues[acct.name];
+                return null;
+            };
+
+            const setVal = (name, val) => {
+                setCurrentValues(prev => {
+                    const next = { ...prev, [name]: val };
+                    // Auto-compute home equity when mortgage changes
+                    if (name.toLowerCase().includes('mortgage') || name === 'Student Loan Balance') {
+                        // Don't auto-compute for student loan
+                    }
+                    const mortgage = accounts.find(a => a.name.toLowerCase().includes('mortgage'));
+                    if (mortgage && name === mortgage.name) {
+                        next['Home Equity'] = HOME_VALUE - Math.abs(val || 0);
+                    }
+                    return next;
+                });
+            };
+
+            // Calculate totals for current entry
+            const currentTotal = accounts.reduce((sum, acct) => {
+                const v = getCurrentVal(acct);
+                if (v === null) return sum + (acct.values[prevLabel] || 0);
+                // Student loan / mortgage are negative
+                if (acct.category === 'debt') return sum - Math.abs(v);
+                return sum + v;
+            }, 0);
+
+            const prevTotal = summaries['TOTAL']?.[prevLabel] || 0;
+            const totalDelta = currentTotal - prevTotal;
+
+            // Current quarter label
+            const now = new Date();
+            const currentQLabel = `${now.getFullYear()}.${String(now.getMonth() + 1).padStart(2, '0')}`;
+            const isLocked = lockedQuarters.includes(currentQLabel);
+
+            const handleLockQuarter = () => {
+                if (confirm(`Lock ${currentQLabel}? Values will be saved to the sheet.`)) {
+                    const updated = [...lockedQuarters, currentQLabel];
+                    setLockedQuarters(updated);
+                    try { localStorage.setItem('qr_locked', JSON.stringify(updated)); } catch {}
+                    // TODO: Write back to sheet (Phase 3)
+                    alert('Quarter locked! (Sheet write-back coming soon)');
+                }
+            };
+
+            const renderAccountRow = (acct) => {
+                const prevVal = acct.values[prevLabel] || 0;
+                const curVal = getCurrentVal(acct);
+                const displayVal = curVal !== null ? curVal : '';
+                const delta = curVal !== null ? curVal - prevVal : null;
+                const isAutoFilled = acct.trackerAcctId && curVal !== null && !currentValues.hasOwnProperty(acct.name + '_manual');
+                const dormant = isDormant(acct);
+
+                return (
+                    <div key={acct.name} className={`flex items-center gap-2 py-2 px-3 border-b border-gray-50 ${dormant && !expandDormant ? 'hidden' : ''}`}>
+                        <div className="flex-1 min-w-0">
+                            <div className="text-sm font-medium truncate">{acct.name}</div>
+                            <div className="text-[11px] text-gray-400">
+                                Last: ${fmt(Math.abs(prevVal))}
+                                {showPct && acct.values[prevLabel + '_pct'] !== undefined && (
+                                    <span className="ml-1">({(acct.values[prevLabel + '_pct'] * 100).toFixed(1)}%)</span>
+                                )}
+                            </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                            {isLocked ? (
+                                <span className="text-sm font-semibold">${fmt(Math.abs(curVal || prevVal))}</span>
+                            ) : (
+                                <input
+                                    type="number"
+                                    step="0.01"
+                                    placeholder={fmt(Math.abs(prevVal))}
+                                    value={displayVal !== '' ? Math.abs(displayVal) : ''}
+                                    onChange={(e) => {
+                                        const v = parseFloat(e.target.value) || 0;
+                                        setVal(acct.name, acct.category === 'debt' ? -v : v);
+                                    }}
+                                    className={`w-28 text-right text-sm border rounded-lg px-2 py-1.5 ${isAutoFilled ? 'bg-blue-50 border-blue-200' : 'border-gray-200'}`}
+                                />
+                            )}
+                            {delta !== null && (
+                                <span className={`text-xs font-medium w-16 text-right ${delta > 0 ? 'text-green-600' : delta < 0 ? 'text-red-600' : 'text-gray-400'}`}>
+                                    {delta > 0 ? '+' : ''}{delta !== 0 ? `$${fmt(Math.abs(delta))}` : '—'}
+                                </span>
+                            )}
+                        </div>
+                    </div>
+                );
+            };
+
+            return (
+                <div className="space-y-4 pb-24">
+                    {/* Header */}
+                    <div className="bg-gradient-to-r from-indigo-600 to-purple-600 text-white p-4 rounded-lg">
+                        <div className="flex justify-between items-start mb-1">
+                            <div>
+                                <p className="text-xs opacity-80 uppercase tracking-wide">Net Worth</p>
+                                <p className="text-2xl font-bold">${fmt(Math.abs(currentTotal))}</p>
+                            </div>
+                            <div className="text-right">
+                                <p className="text-xs opacity-80">vs {prevLabel}</p>
+                                <p className={`text-lg font-bold ${totalDelta >= 0 ? 'text-green-300' : 'text-red-300'}`}>
+                                    {totalDelta >= 0 ? '+' : '-'}${fmt(Math.abs(totalDelta))}
+                                </p>
+                            </div>
+                        </div>
+                        {isLocked && (
+                            <div className="mt-2 bg-white/20 rounded px-2 py-1 text-xs inline-block">
+                                🔒 {currentQLabel} Locked
+                            </div>
+                        )}
+                    </div>
+
+                    {/* Controls */}
+                    <div className="flex items-center gap-2">
+                        <button
+                            onClick={() => setShowPct(!showPct)}
+                            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${showPct ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-600'}`}
+                        >
+                            % of Portfolio
+                        </button>
+                        {!isLocked && (
+                            <button
+                                onClick={handleLockQuarter}
+                                className="px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-100 text-amber-700 ml-auto"
+                            >
+                                <LockIcon size={12} className="inline mr-1" />
+                                Lock {currentQLabel}
+                            </button>
+                        )}
+                    </div>
+
+                    {/* Account Groups */}
+                    {QR_CATEGORIES.map(cat => {
+                        const catAccounts = grouped[cat.id] || [];
+                        if (catAccounts.length === 0) return null;
+                        const activeAccounts = catAccounts.filter(a => !isDormant(a));
+                        const dormantAccounts = catAccounts.filter(a => isDormant(a));
+                        const catTotal = catAccounts.reduce((sum, a) => {
+                            const v = getCurrentVal(a);
+                            const val = v !== null ? v : (a.values[prevLabel] || 0);
+                            return sum + val;
+                        }, 0);
+
+                        return (
+                            <div key={cat.id} className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+                                <div className="flex justify-between items-center px-3 py-2 bg-gray-50 border-b border-gray-200">
+                                    <h3 className="font-bold text-sm text-gray-700">{cat.label}</h3>
+                                    <span className={`text-sm font-semibold ${cat.id === 'debt' ? 'text-red-600' : 'text-gray-700'}`}>
+                                        {cat.id === 'debt' ? '-' : ''}${fmt(Math.abs(catTotal))}
+                                    </span>
+                                </div>
+                                {activeAccounts.map(renderAccountRow)}
+                                {dormantAccounts.length > 0 && (
+                                    <button
+                                        onClick={() => setExpandDormant(!expandDormant)}
+                                        className="w-full text-xs text-gray-400 py-2 hover:bg-gray-50 border-t border-gray-100"
+                                    >
+                                        {expandDormant ? 'Hide' : 'Show'} {dormantAccounts.length} dormant account{dormantAccounts.length !== 1 ? 's' : ''}
+                                    </button>
+                                )}
+                                {expandDormant && dormantAccounts.map(acct => (
+                                    <div key={acct.name} className="flex items-center gap-2 py-2 px-3 border-b border-gray-50 opacity-50">
+                                        <div className="flex-1 min-w-0">
+                                            <div className="text-sm font-medium truncate">{acct.name}</div>
+                                            <div className="text-[11px] text-gray-400">Last: ${fmt(Math.abs(acct.values[prevLabel] || 0))}</div>
+                                        </div>
+                                        {!isLocked && (
+                                            <input
+                                                type="number"
+                                                step="0.01"
+                                                placeholder="0.00"
+                                                value={getCurrentVal(acct) !== null ? Math.abs(getCurrentVal(acct)) : ''}
+                                                onChange={(e) => setVal(acct.name, parseFloat(e.target.value) || 0)}
+                                                className="w-28 text-right text-sm border border-gray-200 rounded-lg px-2 py-1.5"
+                                            />
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        );
+                    })}
+
+                    {/* Insights Section */}
+                    {phase === 'review' || Object.keys(currentValues).length > 3 ? (() => {
+                        // Find biggest movers
+                        const movers = accounts
+                            .map(a => {
+                                const cur = getCurrentVal(a);
+                                if (cur === null) return null;
+                                const prev = a.values[prevLabel] || 0;
+                                return { name: a.name, delta: cur - prev, cur, prev };
+                            })
+                            .filter(m => m && Math.abs(m.delta) > 100)
+                            .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
+                            .slice(0, 5);
+
+                        if (movers.length === 0) return null;
+
+                        return (
+                            <div className="bg-white rounded-lg border border-gray-200 p-3">
+                                <h3 className="font-bold text-sm text-gray-700 mb-2">Biggest Movers</h3>
+                                {movers.map(m => (
+                                    <div key={m.name} className="flex justify-between items-center py-1.5">
+                                        <span className="text-sm text-gray-600 truncate flex-1">{m.name}</span>
+                                        <span className={`text-sm font-semibold ${m.delta > 0 ? 'text-green-600' : 'text-red-600'}`}>
+                                            {m.delta > 0 ? '+' : '-'}${fmt(Math.abs(m.delta))}
+                                        </span>
+                                    </div>
+                                ))}
+                            </div>
+                        );
+                    })() : null}
+
+                    {/* Liquidity Breakdown */}
+                    {(() => {
+                        const liquidTotal = (grouped['liquid'] || []).reduce((s, a) => s + (getCurrentVal(a) ?? a.values[prevLabel] ?? 0), 0);
+                        const illiquidTotal = (grouped['illiquid'] || []).concat(grouped['stock'] || []).reduce((s, a) => s + (getCurrentVal(a) ?? a.values[prevLabel] ?? 0), 0);
+                        const debtTotal = (grouped['debt'] || []).reduce((s, a) => s + Math.abs(getCurrentVal(a) ?? a.values[prevLabel] ?? 0), 0);
+                        const total = liquidTotal + illiquidTotal;
+                        const liquidPct = total > 0 ? (liquidTotal / total * 100).toFixed(1) : '0.0';
+                        const illiquidPct = total > 0 ? (illiquidTotal / total * 100).toFixed(1) : '0.0';
+
+                        return (
+                            <div className="bg-white rounded-lg border border-gray-200 p-3">
+                                <h3 className="font-bold text-sm text-gray-700 mb-2">Breakdown</h3>
+                                <div className="space-y-2">
+                                    <div className="flex justify-between text-sm">
+                                        <span className="text-gray-600">Liquid</span>
+                                        <span className="font-medium">${fmt(liquidTotal)} <span className="text-gray-400">({liquidPct}%)</span></span>
+                                    </div>
+                                    <div className="flex justify-between text-sm">
+                                        <span className="text-gray-600">Illiquid + Stocks</span>
+                                        <span className="font-medium">${fmt(illiquidTotal)} <span className="text-gray-400">({illiquidPct}%)</span></span>
+                                    </div>
+                                    <div className="flex justify-between text-sm">
+                                        <span className="text-gray-600">Debt</span>
+                                        <span className="font-medium text-red-600">-${fmt(debtTotal)}</span>
+                                    </div>
+                                    <div className="border-t border-gray-100 pt-2 flex justify-between text-sm font-bold">
+                                        <span>Net</span>
+                                        <span>${fmt(Math.abs(currentTotal))}</span>
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                    })()}
+                </div>
+            );
+        };
+
         const HomeTab = ({ expenses, onEdit, onNavigateToCard, onNavigateToBank }) => {
             const now = new Date();
             const [chartYear, setChartYear] = useState(String(now.getFullYear()));
@@ -3010,6 +3449,12 @@
                                         />
                                     </div>
                                 )}
+
+                                {activeTab === 'review' && (
+                                    <div className="pb-24 p-4">
+                                        <QuarterlyReview token={token} expenses={expenses} />
+                                    </div>
+                                )}
                             </>
                         )}
                     </div>
@@ -3033,6 +3478,7 @@
                             { id: 'all', icon: ListIcon, label: 'All' },
                             { id: 'cards', icon: CreditCardIcon, label: 'Cards' },
                             { id: 'banks', icon: WalletIcon, label: 'Banks' },
+                            { id: 'review', icon: BarChartIcon, label: 'Review' },
                         ].map(tab => (
                             <button
                                 key={tab.id}
