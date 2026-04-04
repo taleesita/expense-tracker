@@ -3,7 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Expenses</title>
+    <title>💸 Expenses</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💸</text></svg>">
+    <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💸</text></svg>">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="💸 Expenses">
     <script src="https://accounts.google.com/gsi/client" async defer></script>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -839,7 +843,7 @@
                             originalCurrency: 'USD',
                             originalAmount: amount,
                             reconciled: (() => { try { return JSON.parse(localStorage.getItem('rec_' + (i + 1))) || false; } catch { return false; } })(),
-                            reconciledLocked: false,
+                            reconciledLocked: (() => { try { return JSON.parse(localStorage.getItem('rec_locked_' + (i + 1))) || false; } catch { return false; } })(),
                             notes: '',
                             person: '',
                         });
@@ -1129,6 +1133,17 @@
                     }
                     merchant = merchant || 'Unknown';
 
+                    // Amazon order number detection: pattern ###-#######-#######
+                    const amazonOrderRe = /(\d{3}-\d{7}-\d{7})/;
+                    const amazonOrderMatch = text.match(amazonOrderRe);
+                    const isAmazon = /amazon/i.test(text);
+                    if (amazonOrderMatch && isAmazon) {
+                        merchant = `Amazon - ${amazonOrderMatch[1]}`;
+                    } else if (isAmazon && !amazonOrderMatch) {
+                        // Amazon receipt but couldn't extract order number — still label it Amazon
+                        if (!/amazon/i.test(merchant)) merchant = 'Amazon';
+                    }
+
                     // Look for total/amount — try labeled totals first, then largest dollar amount
                     // Money regex: handles $1,234.56 / $1234.56 / $12.34 / $1,234,567.89
                     const moneyRe = '(\\d{1,3}(?:,\\d{3})*\\.\\d{2}|\\d+\\.\\d{2}|\\d{1,3}(?:,\\d{3})+)';
@@ -1214,7 +1229,7 @@
 
         // ============ MAIN COMPONENTS ============
 
-        const ExpenseRow = ({ expense, onDelete, onUpdate, onReconcile, showReconcile, isLocked, onEdit, hideAccount = false, showDateSeparator = false }) => {
+        const ExpenseRow = ({ expense, onDelete, onUpdate, onReconcile, showReconcile, onEdit, hideAccount = false, showDateSeparator = false }) => {
             const category = getCategoryById(expense.category);
             const account = getAccountById(expense.account);
             const isPaymentOrTransfer = expense.category === 'card_payment' || expense.category === 'transfer';
@@ -1253,31 +1268,32 @@
                         </span>
                     </div>
                     {(() => {
+                        if (!showReconcile) return null;
                         const dateISO = parseDateToISO(expense.date);
                         const isPre2026 = dateISO < '2026-01-01';
-                        if (isPre2026 && showReconcile) {
+                        if (isPre2026) {
                             return <div className="ml-1 flex-shrink-0"><CircleIcon size={18} className="text-gray-200" /></div>;
                         }
+                        // Locked = cemented reconciliation, can't be toggled
+                        if (expense.reconciledLocked) {
+                            return (
+                                <div className="ml-1 flex-shrink-0" title="Locked">
+                                    <CheckCircleIcon size={18} className="text-amber-600" />
+                                </div>
+                            );
+                        }
+                        // Unlocked = can toggle
                         return (
-                            <>
-                                {showReconcile && !isLocked && (
-                                    <button
-                                        onClick={(e) => { e.stopPropagation(); onReconcile(expense.rowIndex, !expense.reconciled); }}
-                                        className="ml-1 flex-shrink-0"
-                                    >
-                                        {expense.reconciled ? (
-                                            <CheckCircleIcon size={18} className="text-green-600" />
-                                        ) : (
-                                            <CircleIcon size={18} className="text-gray-300" />
-                                        )}
-                                    </button>
+                            <button
+                                onClick={(e) => { e.stopPropagation(); onReconcile(expense.rowIndex, !expense.reconciled); }}
+                                className="ml-1 flex-shrink-0"
+                            >
+                                {expense.reconciled ? (
+                                    <CheckCircleIcon size={18} className="text-green-600" />
+                                ) : (
+                                    <CircleIcon size={18} className="text-gray-300" />
                                 )}
-                                {showReconcile && isLocked && expense.reconciled && (
-                                    <div className="ml-1 flex-shrink-0">
-                                        <CheckCircleIcon size={18} className="text-amber-600" />
-                                    </div>
-                                )}
-                            </>
+                            </button>
                         );
                     })()}
                     {onEdit && (
@@ -1397,12 +1413,16 @@
                 const result = await scanReceipt(file);
                 setShowOCRSpinner(false);
                 if (result) {
-                    const knownNames = [...new Set((allExpenses || []).map(e => e.merchant).filter(Boolean))];
-                    const corrected = fuzzyMatchMerchant(result.merchant, knownNames);
-                    setMerchant(corrected);
+                    const isAmazonOrder = /^Amazon - \d{3}-\d{7}-\d{7}$/.test(result.merchant);
+                    let finalMerchant = result.merchant;
+                    if (!isAmazonOrder) {
+                        const knownNames = [...new Set((allExpenses || []).map(e => e.merchant).filter(Boolean))];
+                        finalMerchant = fuzzyMatchMerchant(result.merchant, knownNames);
+                    }
+                    setMerchant(finalMerchant);
                     setAmount(result.amount.toString());
                     setDate(result.date);
-                    setCategory(result.category || suggestCategory(corrected));
+                    setCategory(result.category || suggestCategory(finalMerchant));
                 }
             };
 
@@ -1420,8 +1440,12 @@
                     // Autofill empty fields from OCR, with fuzzy merchant matching
                     if (ocrResult) {
                         if (!merchant && ocrResult.merchant) {
-                            const knownNames = [...new Set((allExpenses || []).map(e => e.merchant).filter(Boolean))];
-                            const corrected = fuzzyMatchMerchant(ocrResult.merchant, knownNames);
+                            const isAmazonOrder = /^Amazon - \d{3}-\d{7}-\d{7}$/.test(ocrResult.merchant);
+                            let corrected = ocrResult.merchant;
+                            if (!isAmazonOrder) {
+                                const knownNames = [...new Set((allExpenses || []).map(e => e.merchant).filter(Boolean))];
+                                corrected = fuzzyMatchMerchant(ocrResult.merchant, knownNames);
+                            }
                             setMerchant(corrected);
                             if (!isEdit) setCategory(suggestCategory(corrected));
                         }
@@ -2027,10 +2051,9 @@
             );
         };
 
-        const AccountTabView = ({ accountId, expenses, onUpdate, onReconcile, onDelete, onEdit }) => {
+        const AccountTabView = ({ accountId, expenses, onUpdate, onReconcile, onDelete, onEdit, onLockItems, onClearUnlocked }) => {
             const account = getAccountById(accountId);
             const accountExpenses = expenses.filter(e => e.account === accountId);
-            const [isLocked, setIsLocked] = useState(false);
             const [searchTerm, setSearchTerm] = useState('');
 
             // Only count 2026+ expenses for reconciliation progress
@@ -2039,8 +2062,10 @@
                 return d >= '2026-01-01';
             };
             const recentExpenses = accountExpenses.filter(isRecent);
-            const reconciledExpenses = recentExpenses.filter(e => e.reconciled);
-            const unlockedExpenses = recentExpenses.filter(e => !e.reconciledLocked && !e.reconciled);
+            const lockedExpenses = recentExpenses.filter(e => e.reconciledLocked);
+            const unlockedReconciled = recentExpenses.filter(e => e.reconciled && !e.reconciledLocked);
+            const unlockedUnreconciled = recentExpenses.filter(e => !e.reconciled && !e.reconciledLocked);
+            const totalReconciled = lockedExpenses.length + unlockedReconciled.length;
 
             const filteredExpenses = accountExpenses.filter(e =>
                 e.merchant.toLowerCase().includes(searchTerm.toLowerCase())
@@ -2048,15 +2073,19 @@
 
             const isCreditCard = CREDIT_CARDS.some(c => c.id === accountId);
             const total = calcAccountBalance(accountExpenses);
-            const reconciledTotal = calcAccountBalance(reconciledExpenses);
-            const recentTotal = calcAccountBalance(recentExpenses);
-            const progress = recentExpenses.length > 0 ? (reconciledExpenses.length / recentExpenses.length) * 100 : 0;
+            const progress = recentExpenses.length > 0 ? (totalReconciled / recentExpenses.length) * 100 : 0;
 
-            const handleClearReconciled = () => {
-                if (confirm(`Reset ${reconciledExpenses.length} reconciled items back to unreconciled?`)) {
-                    reconciledExpenses.forEach(e => {
-                        onReconcile(e.rowIndex, false);
-                    });
+            const handleLock = () => {
+                if (unlockedReconciled.length === 0) return;
+                if (confirm(`Lock ${unlockedReconciled.length} reconciled item${unlockedReconciled.length === 1 ? '' : 's'}? They won't be clearable after this.`)) {
+                    onLockItems(unlockedReconciled.map(e => e.rowIndex));
+                }
+            };
+
+            const handleClear = () => {
+                if (unlockedReconciled.length === 0) return;
+                if (confirm(`Clear ${unlockedReconciled.length} unlocked reconciliation${unlockedReconciled.length === 1 ? '' : 's'}?`)) {
+                    onClearUnlocked(unlockedReconciled.map(e => e.rowIndex));
                 }
             };
 
@@ -2067,31 +2096,44 @@
                     <div className="bg-white p-4 rounded-lg border border-gray-200">
                         <div className="flex justify-between items-center mb-2">
                             <h3 className="font-bold text-lg">{account.name}</h3>
-                            <button
-                                onClick={() => setIsLocked(!isLocked)}
-                                className={`flex items-center gap-1 px-3 py-1 rounded-lg font-medium text-sm transition ${isLocked ? 'bg-amber-100 text-amber-700' : 'bg-gray-200 text-gray-700'}`}
-                            >
-                                <LockIcon size={16} /> {isLocked ? 'Locked' : 'Unlocked'}
-                            </button>
                         </div>
                         <div className={`text-2xl font-bold mb-3 ${isCreditCard ? (total < 0 ? 'text-red-600' : 'text-green-600') : (total >= 0 ? 'text-green-600' : 'text-red-600')}`}>${fmt(total)}</div>
                         <div className="w-full bg-gray-200 rounded-full h-2 mb-2">
                             <div
-                                className={`h-2 rounded-full transition-all ${isLocked ? 'bg-amber-500' : ''}`}
+                                className="h-2 rounded-full transition-all"
                                 style={{
                                     width: `${progress}%`,
-                                    backgroundColor: isLocked ? '#D97706' : (account.color || '#3B82F6')
+                                    background: lockedExpenses.length > 0 && unlockedReconciled.length > 0
+                                        ? `linear-gradient(to right, #D97706 ${(lockedExpenses.length / recentExpenses.length) * 100}%, ${account.color || '#3B82F6'} ${(lockedExpenses.length / recentExpenses.length) * 100}%)`
+                                        : lockedExpenses.length > 0 ? '#D97706' : (account.color || '#3B82F6')
                                 }}
                             />
                         </div>
-                        <div className="text-sm text-gray-600 mb-3">{reconciledExpenses.length} of {recentExpenses.length} reconciled (2026)</div>
-                        {!isLocked && reconciledExpenses.length > 0 && (
-                            <button
-                                onClick={handleClearReconciled}
-                                className="w-full bg-red-100 text-red-700 py-2 rounded-lg font-medium hover:bg-red-200 text-sm"
-                            >
-                                Clear {reconciledExpenses.length} Reconciled
-                            </button>
+                        <div className="text-sm text-gray-600 mb-1">
+                            {totalReconciled} of {recentExpenses.length} reconciled (2026)
+                        </div>
+                        {(lockedExpenses.length > 0 || unlockedReconciled.length > 0) && (
+                            <div className="text-xs text-gray-400 mb-3">
+                                {lockedExpenses.length > 0 && <span className="text-amber-600">{lockedExpenses.length} locked</span>}
+                                {lockedExpenses.length > 0 && unlockedReconciled.length > 0 && <span> · </span>}
+                                {unlockedReconciled.length > 0 && <span className="text-green-600">{unlockedReconciled.length} unlocked</span>}
+                            </div>
+                        )}
+                        {unlockedReconciled.length > 0 && (
+                            <div className="flex gap-2">
+                                <button
+                                    onClick={handleLock}
+                                    className="flex-1 bg-amber-100 text-amber-700 py-2 rounded-lg font-medium hover:bg-amber-200 text-sm flex items-center justify-center gap-1.5"
+                                >
+                                    <LockIcon size={14} /> Lock {unlockedReconciled.length}
+                                </button>
+                                <button
+                                    onClick={handleClear}
+                                    className="flex-1 bg-red-100 text-red-700 py-2 rounded-lg font-medium hover:bg-red-200 text-sm"
+                                >
+                                    Clear {unlockedReconciled.length}
+                                </button>
+                            </div>
                         )}
                     </div>
 
@@ -2119,7 +2161,6 @@
                                     onReconcile={onReconcile}
                                     onEdit={onEdit}
                                     showReconcile={true}
-                                    isLocked={isLocked}
                                     hideAccount={true}
                                     showDateSeparator={idx === 0 || getDateKey(expense) !== getDateKey(filteredExpenses[idx - 1])}
                                 />
@@ -2740,6 +2781,24 @@
                 }
             };
 
+            // Lock (cement) a batch of reconciled items so they can't be cleared
+            const handleLockItems = (rowIndexes) => {
+                pushUndo(expenses);
+                rowIndexes.forEach(ri => {
+                    try { localStorage.setItem('rec_locked_' + ri, JSON.stringify(true)); } catch {}
+                });
+                setExpenses(prev => prev.map(e => rowIndexes.includes(e.rowIndex) ? { ...e, reconciledLocked: true } : e));
+            };
+
+            // Clear only unlocked reconciled items
+            const handleClearUnlocked = (rowIndexes) => {
+                pushUndo(expenses);
+                rowIndexes.forEach(ri => {
+                    try { localStorage.setItem('rec_' + ri, JSON.stringify(false)); } catch {}
+                });
+                setExpenses(prev => prev.map(e => rowIndexes.includes(e.rowIndex) ? { ...e, reconciled: false } : e));
+            };
+
             const handleUndo = async () => {
                 const previousState = undoAction();
                 if (previousState) {
@@ -2866,6 +2925,8 @@
                                             onReconcile={handleReconcile}
                                             onDelete={handleDeleteExpense}
                                             onEdit={handleEditExpense}
+                                            onLockItems={handleLockItems}
+                                            onClearUnlocked={handleClearUnlocked}
                                         />
                                     </div>
                                 )}
@@ -2890,6 +2951,8 @@
                                             onReconcile={handleReconcile}
                                             onDelete={handleDeleteExpense}
                                             onEdit={handleEditExpense}
+                                            onLockItems={handleLockItems}
+                                            onClearUnlocked={handleClearUnlocked}
                                         />
                                     </div>
                                 )}
