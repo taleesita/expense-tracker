@@ -267,12 +267,43 @@
             return bestMatch || ocrName;
         };
 
+        // Date parser (needed early for balance anchors)
+        const parseDateToISO = (dateStr) => {
+            if (!dateStr) return new Date().toISOString().split('T')[0];
+            if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return dateStr;
+            const mdyMatch = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+            if (mdyMatch) {
+                const [, m, d, y] = mdyMatch;
+                const fullYear = y.length === 2 ? '20' + y : y;
+                return `${fullYear}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+            }
+            const parsed = new Date(dateStr);
+            if (!isNaN(parsed)) return parsed.toISOString().split('T')[0];
+            return new Date().toISOString().split('T')[0];
+        };
+
+        // Balance anchors: one-time zero-out points per account
+        // afterDate = only count transactions with purchase date AFTER this date
+        // startingBalance = balance at the anchor point (usually 0)
+        const BALANCE_ANCHORS = {
+            'united_chase': { afterDate: '2026-03-20', startingBalance: 0 },
+            'cap1_cc': { afterDate: '2026-03-20', startingBalance: 0 },
+        };
+
         // Calculate account balance from raw sheet columns
-        // Matches user's sheet formula: =SUM(F:F)-SUM(E:E)-SUM(J:J)
-        // Result is positive for bank accounts (deposits > charges = money you have)
-        // Result is negative for credit cards (charges > deposits = money you owe)
-        const calcAccountBalance = (accountExpenses) => {
-            return accountExpenses.reduce((sum, e) => {
+        // If an anchor exists, only count transactions after the anchor date
+        const calcAccountBalance = (accountExpenses, accountId) => {
+            const anchor = accountId ? BALANCE_ANCHORS[accountId] : null;
+            let expenses = accountExpenses;
+            let starting = 0;
+            if (anchor) {
+                starting = anchor.startingBalance;
+                expenses = accountExpenses.filter(e => {
+                    const d = parseDateToISO(e.date || e.timestamp);
+                    return d > anchor.afterDate;
+                });
+            }
+            return starting + expenses.reduce((sum, e) => {
                 return sum + (e.rawDeposit || 0) - (e.rawCharge || 0) - (e.rawJ || 0);
             }, 0);
         };
@@ -1342,24 +1373,6 @@
             );
         };
 
-        // Helper: parse various date formats to YYYY-MM-DD for input[type=date]
-        const parseDateToISO = (dateStr) => {
-            if (!dateStr) return new Date().toISOString().split('T')[0];
-            // Already YYYY-MM-DD?
-            if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return dateStr;
-            // Try MM/DD/YYYY or M/D/YYYY
-            const mdyMatch = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
-            if (mdyMatch) {
-                const [, m, d, y] = mdyMatch;
-                const fullYear = y.length === 2 ? '20' + y : y;
-                return `${fullYear}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
-            }
-            // Try Date.parse as fallback
-            const parsed = new Date(dateStr);
-            if (!isNaN(parsed)) return parsed.toISOString().split('T')[0];
-            return new Date().toISOString().split('T')[0];
-        };
-
         // Helper: get date key for grouping
         const getDateKey = (expense) => {
             return parseDateToISO(expense.date || expense.timestamp);
@@ -2098,7 +2111,7 @@
             );
 
             const isCreditCard = CREDIT_CARDS.some(c => c.id === accountId);
-            const total = calcAccountBalance(accountExpenses);
+            const total = calcAccountBalance(accountExpenses, accountId);
             const progress = recentExpenses.length > 0 ? (totalReconciled / recentExpenses.length) * 100 : 0;
 
             const handleLock = () => {
@@ -2274,12 +2287,12 @@
             const ccBalances = {};
             CREDIT_CARDS.forEach(card => {
                 const acctExp = expenses.filter(e => e.account === card.id);
-                ccBalances[card.id] = { ...card, total: calcAccountBalance(acctExp) };
+                ccBalances[card.id] = { ...card, total: calcAccountBalance(acctExp, card.id) };
             });
             const bankBalances = {};
             BANK_ACCOUNTS.forEach(bank => {
                 const acctExp = expenses.filter(e => e.account === bank.id);
-                bankBalances[bank.id] = { ...bank, total: calcAccountBalance(acctExp) };
+                bankBalances[bank.id] = { ...bank, total: calcAccountBalance(acctExp, bank.id) };
             });
             const totalCCBalance = Object.values(ccBalances).reduce((sum, c) => sum + c.total, 0);
             const totalBankBalance = Object.values(bankBalances).reduce((sum, b) => sum + b.total, 0);
