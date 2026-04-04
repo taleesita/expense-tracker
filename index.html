@@ -2278,25 +2278,38 @@
                     );
                     const data = await resp.json();
                     const rows = data.values || [];
-                    if (rows.length < 2) { setLoading(false); return; }
+                    if (rows.length < 3) { setLoading(false); return; }
 
-                    // Parse header to find quarter columns
-                    const header = rows[0];
+                    // Row 1 (index 0) is empty; row 2 (index 1) has headers
+                    const header = rows[1] || [];
                     const quarters = [];
-                    for (let c = 4; c < header.length; c += 3) {
-                        const label = header[c] || '';
-                        // Quarter columns have labels like "2025.03" or are unlabeled (current WIP)
-                        quarters.push({
-                            colIdx: c,
-                            label: label || 'Current',
-                            isLabeled: !!label,
+
+                    // Scan header for quarter labels (YYYY.MM pattern) at any column
+                    for (let c = 0; c < header.length; c++) {
+                        const label = (header[c] || '').trim();
+                        if (/^\d{4}\.\d{2}$/.test(label)) {
+                            quarters.push({
+                                colIdx: c,
+                                label: label,
+                                isLabeled: true,
+                            });
+                        }
+                    }
+
+                    // Also find the "Variable" column (current working entry)
+                    const varIdx = header.findIndex(h => /variable/i.test(h || ''));
+                    if (varIdx >= 0) {
+                        quarters.unshift({
+                            colIdx: varIdx,
+                            label: 'Current',
+                            isLabeled: false,
                         });
                     }
 
-                    // Parse account rows (stop at summary rows or Fidelity section)
+                    // Parse account rows starting from row 3 (index 2)
                     const accounts = [];
                     const summaries = {};
-                    for (let r = 1; r < rows.length; r++) {
+                    for (let r = 2; r < rows.length; r++) {
                         const row = rows[r];
                         const name = (row[1] || '').trim();
                         const liquidity = (row[2] || '').trim();
