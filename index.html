@@ -3,11 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>💸 Expenses</title>
+    <title>Expenses</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💸</text></svg>">
     <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💸</text></svg>">
     <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-title" content="💸 Expenses">
+    <meta name="apple-mobile-web-app-title" content="Expenses">
     <script src="https://accounts.google.com/gsi/client" async defer></script>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -1018,11 +1018,22 @@
                 try {
                     const match = fileUrl.match(/\/d\/([^/]+)/);
                     if (!match) return;
-                    await fetch(`https://www.googleapis.com/drive/v3/files/${match[1]}`, {
-                        method: 'PATCH',
-                        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ name: newName })
+                    // First get current file info to preserve extension
+                    const infoResp = await fetch(`https://www.googleapis.com/drive/v3/files/${match[1]}?fields=name`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
                     });
+                    if (infoResp.ok) {
+                        const info = await infoResp.json();
+                        const oldName = info.name || '';
+                        const extMatch = oldName.match(/(\.[a-zA-Z0-9]+)$/);
+                        const ext = extMatch ? extMatch[1] : '';
+                        const finalName = newName + ext;
+                        await fetch(`https://www.googleapis.com/drive/v3/files/${match[1]}`, {
+                            method: 'PATCH',
+                            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ name: finalName })
+                        });
+                    }
                 } catch (err) { console.error('Failed to rename file:', err); }
             }, [token]);
 
@@ -2332,7 +2343,7 @@
                         </div>
                     </div>
 
-                    {categoryData.length > 0 && (() => {
+                    {(() => {
                         const totalValue = categoryData.reduce((sum, c) => sum + c.value, 0);
                         return (
                         <div>
@@ -2356,25 +2367,39 @@
                                         onClick={() => { setChartPeriod(''); setHoveredSlice(null); }}
                                         className={`px-2.5 py-0.5 rounded-full text-[11px] font-medium transition ${!chartPeriod ? 'bg-blue-100 text-blue-700' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'}`}
                                     >Full Year</button>
-                                    {['Q1','Q2','Q3','Q4'].map(q => (
-                                        <button
-                                            key={q}
-                                            onClick={() => { setChartPeriod(chartPeriod === q ? '' : q); setHoveredSlice(null); setDrillCategory(null); }}
-                                            className={`px-2.5 py-0.5 rounded-full text-[11px] font-medium transition ${chartPeriod === q ? 'bg-blue-100 text-blue-700' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'}`}
-                                        >{q}</button>
-                                    ))}
+                                    {['Q1','Q2','Q3','Q4'].map(q => {
+                                        const qNum = parseInt(q[1]);
+                                        const qFirstMonth = (qNum - 1) * 3; // 0-indexed
+                                        const isFuture = parseInt(chartYear) > now.getFullYear() || (parseInt(chartYear) === now.getFullYear() && qFirstMonth > now.getMonth());
+                                        return (
+                                            <button
+                                                key={q}
+                                                disabled={isFuture}
+                                                onClick={() => { if (!isFuture) { setChartPeriod(chartPeriod === q ? '' : q); setHoveredSlice(null); setDrillCategory(null); } }}
+                                                className={`px-2.5 py-0.5 rounded-full text-[11px] font-medium transition ${isFuture ? 'bg-gray-50 text-gray-300 cursor-not-allowed' : chartPeriod === q ? 'bg-blue-100 text-blue-700' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'}`}
+                                            >{q}</button>
+                                        );
+                                    })}
                                     {MONTH_LABELS.map((label, i) => {
                                         const mo = String(i + 1).padStart(2, '0');
+                                        const isFuture = parseInt(chartYear) > now.getFullYear() || (parseInt(chartYear) === now.getFullYear() && i > now.getMonth());
                                         return (
                                             <button
                                                 key={mo}
-                                                onClick={() => { setChartPeriod(chartPeriod === mo ? '' : mo); setHoveredSlice(null); setDrillCategory(null); }}
-                                                className={`px-2.5 py-0.5 rounded-full text-[11px] font-medium transition ${chartPeriod === mo ? 'bg-blue-100 text-blue-700' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'}`}
+                                                disabled={isFuture}
+                                                onClick={() => { if (!isFuture) { setChartPeriod(chartPeriod === mo ? '' : mo); setHoveredSlice(null); setDrillCategory(null); } }}
+                                                className={`px-2.5 py-0.5 rounded-full text-[11px] font-medium transition ${isFuture ? 'bg-gray-50 text-gray-300 cursor-not-allowed' : chartPeriod === mo ? 'bg-blue-100 text-blue-700' : 'bg-gray-50 text-gray-500 hover:bg-gray-100'}`}
                                             >{label}</button>
                                         );
                                     })}
                                 </div>
                             )}
+                            {categoryData.length === 0 ? (
+                                <div className="bg-white p-8 rounded-lg border border-gray-200 text-center text-gray-400">
+                                    <p className="text-lg mb-1">No spending data</p>
+                                    <p className="text-sm">Try selecting a different time period</p>
+                                </div>
+                            ) : (
                             <div className="bg-white p-4 rounded-lg border border-gray-200">
                                 <div className="flex flex-col md:flex-row items-center gap-4">
                                     <div className="relative" style={{ width: 200, height: 200, flexShrink: 0 }}>
@@ -2446,6 +2471,7 @@
                                     <span className="text-sm font-bold">${fmt(totalValue)}</span>
                                 </div>
                             </div>
+                            )}
                         </div>
                         );
                     })()}
