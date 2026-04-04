@@ -375,11 +375,14 @@
         };
         // Account groupings for display
         const QR_CATEGORIES = [
-            { id: 'liquid', label: 'Liquid', types: ['Liquid'] },
-            { id: 'stock', label: 'Stocks', types: ['Stock'] },
-            { id: 'illiquid', label: 'Retirement & Illiquid', types: ['Illiquid'] },
-            { id: 'debt', label: 'Debt', types: ['Debt'] },
-            { id: 'other', label: 'Other', types: [''] },
+            { id: 'liquid', label: 'Liquid' },
+            { id: 'business', label: 'Business' },
+            { id: 'stock', label: 'Stocks & Investments' },
+            { id: 'ira', label: 'Roth & IRAs' },
+            { id: '401k', label: '401Ks' },
+            { id: 'property', label: 'Life Insurance & Home' },
+            { id: 'debt', label: 'Debt' },
+            { id: 'other', label: 'Other' },
         ];
         // Special rows that are not accounts (summary rows)
         const QR_SUMMARY_ROWS = ['STOCK', 'LIQUID', 'NOT LIQUID', 'TOTAL', 'DIFFERENCE'];
@@ -2326,14 +2329,30 @@
                         }
                         if (name === QR_FIDELITY_LABEL) break; // Stop before Fidelity section
 
-                        // Determine category
+                        // Determine category by name patterns, then fall back to sheet liquidity
                         let category = 'other';
+                        const nm = name.toLowerCase();
                         const liq = liquidity.toLowerCase();
-                        if (liq === 'liquid') category = 'liquid';
-                        else if (liq === 'stock') category = 'stock';
-                        else if (liq === 'illiquid') category = 'illiquid';
-                        // Student loan is debt
-                        if (name.toLowerCase().includes('student loan') || name.toLowerCase().includes('mortgage')) category = 'debt';
+
+                        if (nm.includes('student loan') || nm.includes('mortgage')) {
+                            category = 'debt';
+                        } else if (nm.includes('401k') || nm.includes('accrue')) {
+                            category = '401k';
+                        } else if (nm.includes('roth') || nm.includes('ira')) {
+                            category = 'ira';
+                        } else if (nm.includes('life insurance') || nm.includes('home equity') || nm.includes('escrow')) {
+                            category = 'property';
+                        } else if (nm.includes('investment account')) {
+                            category = 'stock';
+                        } else if (nm.includes('mercury')) {
+                            category = 'business';
+                        } else if (liq === 'liquid') {
+                            category = 'liquid';
+                        } else if (liq === 'stock') {
+                            category = 'stock';
+                        } else if (liq === 'illiquid') {
+                            category = 'other'; // anything else illiquid goes to other
+                        }
 
                         // Parse values for each quarter
                         const values = {};
@@ -2465,24 +2484,17 @@
                 const isAutoFilled = acct.trackerAcctId && curVal !== null && !currentValues.hasOwnProperty(acct.name + '_manual');
 
                 return (
-                    <div key={acct.name} className={`flex items-center gap-2 py-2 px-3 border-b border-gray-50 ${isDormantRow ? 'opacity-50' : ''}`}>
-                        <div className="flex-1 min-w-0">
-                            <div className="text-sm font-medium truncate">{acct.name}</div>
-                            <div className="text-[11px] text-gray-400">
-                                {prevLabel ? `${prevLabel}: ` : 'Last: '}${fmt(Math.abs(prevVal))}
-                                {showPct && acct.values[prevLabel + '_pct'] !== undefined && (
-                                    <span className="ml-1">({(acct.values[prevLabel + '_pct'] * 100).toFixed(1)}%)</span>
-                                )}
-                            </div>
-                        </div>
+                    <div key={acct.name} className={`py-2.5 px-3 border-b border-gray-50 ${isDormantRow ? 'opacity-50' : ''}`}>
+                        <div className="text-sm font-medium truncate mb-1.5">{acct.name}</div>
                         <div className="flex items-center gap-2">
+                            {/* Entry field */}
                             {isLocked ? (
-                                <span className="text-sm font-semibold">${fmt(Math.abs(curVal || prevVal))}</span>
+                                <span className="text-sm font-semibold w-28 text-right">${fmt(Math.abs(curVal || prevVal))}</span>
                             ) : (
                                 <input
                                     type="number"
                                     step="0.01"
-                                    placeholder={fmt(Math.abs(prevVal))}
+                                    placeholder="0.00"
                                     value={displayVal !== '' ? parseFloat(Math.abs(displayVal).toFixed(2)) : ''}
                                     onChange={(e) => {
                                         const v = parseFloat(e.target.value) || 0;
@@ -2491,10 +2503,18 @@
                                     className={`w-28 text-right text-sm border rounded-lg px-2 py-1.5 ${isAutoFilled ? 'bg-blue-50 border-blue-200' : 'border-gray-200'}`}
                                 />
                             )}
-                            {delta !== null && (
-                                <span className={`text-xs font-medium w-16 text-right ${delta > 0 ? 'text-green-600' : delta < 0 ? 'text-red-600' : 'text-gray-400'}`}>
-                                    {delta > 0 ? '+' : ''}{delta !== 0 ? `$${fmt(Math.abs(delta))}` : '—'}
+                            {/* Last Q value */}
+                            <div className="text-xs text-gray-400 w-20 text-right">
+                                <div className="text-[10px] text-gray-300">{prevLabel || 'Last'}</div>
+                                <div>${fmt(Math.abs(prevVal))}</div>
+                            </div>
+                            {/* Diff */}
+                            {delta !== null ? (
+                                <span className={`text-xs font-semibold w-20 text-right ${delta > 0 ? 'text-green-600' : delta < 0 ? 'text-red-600' : 'text-gray-400'}`}>
+                                    {delta > 0 ? '+' : delta < 0 ? '-' : ''}{delta !== 0 ? `$${fmt(Math.abs(delta))}` : '—'}
                                 </span>
+                            ) : (
+                                <span className="text-xs text-gray-300 w-20 text-right">—</span>
                             )}
                         </div>
                     </div>
@@ -2557,11 +2577,18 @@
 
                         return (
                             <div key={cat.id} className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-                                <div className="flex justify-between items-center px-3 py-2 bg-gray-50 border-b border-gray-200">
-                                    <h3 className="font-bold text-sm text-gray-700">{cat.label}</h3>
-                                    <span className={`text-sm font-semibold ${cat.id === 'debt' ? 'text-red-600' : 'text-gray-700'}`}>
-                                        {cat.id === 'debt' ? '-' : ''}${fmt(Math.abs(catTotal))}
-                                    </span>
+                                <div className="px-3 py-2 bg-gray-50 border-b border-gray-200">
+                                    <div className="flex justify-between items-center">
+                                        <h3 className="font-bold text-sm text-gray-700">{cat.label}</h3>
+                                        <span className={`text-sm font-semibold ${cat.id === 'debt' ? 'text-red-600' : 'text-gray-700'}`}>
+                                            {cat.id === 'debt' ? '-' : ''}${fmt(Math.abs(catTotal))}
+                                        </span>
+                                    </div>
+                                    <div className="flex items-center gap-2 mt-1" style={{ justifyContent: 'flex-end' }}>
+                                        <span className="text-[10px] text-gray-400 uppercase tracking-wide w-28 text-right">Current</span>
+                                        <span className="text-[10px] text-gray-400 uppercase tracking-wide w-20 text-right">{prevLabel || 'Last Q'}</span>
+                                        <span className="text-[10px] text-gray-400 uppercase tracking-wide w-20 text-right">Change</span>
+                                    </div>
                                 </div>
                                 {activeAccounts.map(a => renderAccountRow(a, false))}
                                 {dormantAccounts.length > 0 && (
@@ -2650,39 +2677,64 @@
                             label: q.label,
                             total: summaries['TOTAL']?.[q.label] || 0,
                         }));
-                        const maxVal = Math.max(...totals.map(t => Math.abs(t.total)), 1);
+                        const minVal = Math.min(...totals.map(t => t.total));
+                        const maxVal = Math.max(...totals.map(t => t.total));
+                        const range = maxVal - minVal || 1;
+                        const padding = range * 0.1;
+                        const yMin = minVal - padding;
+                        const yMax = maxVal + padding;
+                        const yRange = yMax - yMin;
                         const chartH = 160;
+                        const leftMargin = 55;
+                        const chartW = totals.length * 55 + leftMargin + 10;
+                        const getY = (val) => chartH - ((val - yMin) / yRange) * (chartH - 10);
+
+                        // Y-axis tick values
+                        const yTicks = [0, 0.25, 0.5, 0.75, 1].map(f => yMin + yRange * f);
+                        const fmtK = (n) => {
+                            const abs = Math.abs(n);
+                            if (abs >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+                            if (abs >= 1000) return (n / 1000).toFixed(0) + 'k';
+                            return n.toFixed(0);
+                        };
 
                         return (
                             <div className="bg-white rounded-lg border border-gray-200 p-3">
                                 <h3 className="font-bold text-sm text-gray-700 mb-3">Net Worth Trend</h3>
-                                <div className="relative" style={{ height: chartH + 30 }}>
-                                    <svg width="100%" height={chartH + 30} viewBox={`0 0 ${totals.length * 60 + 20} ${chartH + 30}`} preserveAspectRatio="none">
-                                        {/* Grid lines */}
-                                        {[0, 0.25, 0.5, 0.75, 1].map((f, i) => (
-                                            <line key={i} x1="0" x2={totals.length * 60 + 20} y1={chartH - chartH * f} y2={chartH - chartH * f} stroke="#f3f4f6" strokeWidth="1" />
+                                <div style={{ overflowX: 'auto' }}>
+                                    <svg width={chartW} height={chartH + 30} viewBox={`0 0 ${chartW} ${chartH + 30}`}>
+                                        {/* Grid lines + Y-axis labels */}
+                                        {yTicks.map((val, i) => (
+                                            <g key={i}>
+                                                <line x1={leftMargin} x2={chartW} y1={getY(val)} y2={getY(val)} stroke="#f3f4f6" strokeWidth="1" />
+                                                <text x={leftMargin - 6} y={getY(val) + 3} textAnchor="end" fontSize="9" fill="#9ca3af">${fmtK(val)}</text>
+                                            </g>
                                         ))}
+                                        {/* Area fill */}
+                                        <polygon
+                                            fill="rgba(99,102,241,0.08)"
+                                            points={`${leftMargin + 25},${chartH} ${totals.map((t, i) => `${i * 55 + leftMargin + 25},${getY(t.total)}`).join(' ')} ${(totals.length - 1) * 55 + leftMargin + 25},${chartH}`}
+                                        />
                                         {/* Line */}
                                         <polyline
                                             fill="none"
                                             stroke="#6366f1"
                                             strokeWidth="2.5"
                                             strokeLinejoin="round"
-                                            points={totals.map((t, i) => `${i * 60 + 30},${chartH - (t.total / maxVal) * (chartH - 10)}`).join(' ')}
+                                            points={totals.map((t, i) => `${i * 55 + leftMargin + 25},${getY(t.total)}`).join(' ')}
                                         />
-                                        {/* Dots */}
+                                        {/* Dots + value labels */}
                                         {totals.map((t, i) => (
-                                            <circle key={i} cx={i * 60 + 30} cy={chartH - (t.total / maxVal) * (chartH - 10)} r="4" fill="#6366f1" />
+                                            <g key={i}>
+                                                <circle cx={i * 55 + leftMargin + 25} cy={getY(t.total)} r="3.5" fill="#6366f1" />
+                                                <text x={i * 55 + leftMargin + 25} y={getY(t.total) - 8} textAnchor="middle" fontSize="8" fill="#6366f1" fontWeight="600">${fmtK(t.total)}</text>
+                                            </g>
                                         ))}
-                                        {/* Labels */}
+                                        {/* X-axis labels */}
                                         {totals.map((t, i) => (
-                                            <text key={i} x={i * 60 + 30} y={chartH + 18} textAnchor="middle" fontSize="9" fill="#9ca3af">{t.label}</text>
+                                            <text key={i} x={i * 55 + leftMargin + 25} y={chartH + 18} textAnchor="middle" fontSize="9" fill="#9ca3af">{t.label}</text>
                                         ))}
                                     </svg>
-                                    {/* Value labels on hover would go here; for now show latest */}
-                                    <div className="absolute top-0 right-2 text-xs text-indigo-600 font-semibold">
-                                        ${fmt(totals[totals.length - 1]?.total || 0)}
-                                    </div>
                                 </div>
                             </div>
                         );
