@@ -1472,8 +1472,7 @@
                 }
                 // Rename Drive file if merchant was updated after upload
                 if (uploadedReceiptUrl.current) {
-                    const now = new Date();
-                    const dateStr = `${now.getFullYear()}.${String(now.getMonth() + 1).padStart(2, '0')}.${String(now.getDate()).padStart(2, '0')}`;
+                    const dateStr = date.replace(/-/g, '.');
                     let fileName;
                     if (isDualEntry && account && secondaryAccount) {
                         const pName = getPaymentName(account);
