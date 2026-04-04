@@ -859,7 +859,7 @@
                 }
             }, [token]);
 
-            const appendExpense = useCallback(async (expense) => {
+            const appendExpense = useCallback(async (expense, { skipRefresh = false } = {}) => {
                 if (!token) return;
                 try {
                     // Sheet columns: A=Timestamp, B=Purchase Date, C=Card, D=Store/Transaction,
@@ -878,7 +878,8 @@
                         getSheetCategoryName(expense.category),            // H: Category
                         expense.receipt || '',                             // I: Receipt
                     ];
-                    await fetch(
+                    console.log('Writing row to sheet:', { merchant: expense.merchant, account: expense.account, txnType: expense.txnType, charge: chargeAmt, deposit: depositAmt });
+                    const resp = await fetch(
                         `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A:I:append?valueInputOption=USER_ENTERED`,
                         {
                             method: 'POST',
@@ -886,7 +887,9 @@
                             body: JSON.stringify({ values: [row] })
                         }
                     );
-                    await fetchExpenses();
+                    const result = await resp.json();
+                    console.log('Sheet append result:', result);
+                    if (!skipRefresh) await fetchExpenses();
                 } catch (err) {
                     console.error('Failed to append expense:', err);
                 }
@@ -1464,11 +1467,22 @@
                     return;
                 }
                 // Rename Drive file if merchant was updated after upload
-                const displayMerchant = isDualEntry ? (primaryMerchantOverride || merchant) : merchant;
-                if (uploadedReceiptUrl.current && displayMerchant && displayMerchant !== 'receipt') {
+                if (uploadedReceiptUrl.current) {
                     const now = new Date();
                     const dateStr = `${now.getFullYear()}.${String(now.getMonth() + 1).padStart(2, '0')}.${String(now.getDate()).padStart(2, '0')}`;
-                    renameFile(uploadedReceiptUrl.current, `${dateStr} - ${displayMerchant} (${userName})`);
+                    let fileName;
+                    if (isDualEntry && account && secondaryAccount) {
+                        const pName = getPaymentName(account);
+                        const sName = getPaymentName(secondaryAccount);
+                        if (txnType === 'card_payment') {
+                            fileName = `${dateStr} - Payment of ${pName} Card from ${sName} (${userName})`;
+                        } else {
+                            fileName = `${dateStr} - Transfer from ${pName} to ${sName} (${userName})`;
+                        }
+                    } else {
+                        fileName = `${dateStr} - ${merchant || 'receipt'} (${userName})`;
+                    }
+                    renameFile(uploadedReceiptUrl.current, fileName);
                     uploadedReceiptUrl.current = null;
                 }
 
@@ -2684,9 +2698,11 @@
             const handleAddExpense = async (expenseData) => {
                 pushUndo(expenses);
                 if (expenseData._dual) {
-                    // Dual-entry: write both rows
-                    for (const entry of expenseData.entries) {
-                        await appendExpense(entry);
+                    // Dual-entry: write both rows, skip refresh until the last one
+                    const entries = expenseData.entries;
+                    for (let i = 0; i < entries.length; i++) {
+                        const isLast = i === entries.length - 1;
+                        await appendExpense(entries[i], { skipRefresh: !isLast });
                     }
                     setToast('Both entries added');
                 } else {
