@@ -1149,20 +1149,35 @@
                     const moneyRe = '(\\d{1,3}(?:,\\d{3})*\\.\\d{2}|\\d+\\.\\d{2}|\\d{1,3}(?:,\\d{3})+)';
                     const parseMoney = (s) => parseFloat(s.replace(/,/g, ''));
                     const totalPatterns = [
+                        // Payment confirmations: "scheduled a $401.00 payment", "payment of $401.00", "authorize...payment of $401.00"
+                        new RegExp('scheduled\\s+a?\\s*\\$?\\s*' + moneyRe + '\\s*payment', 'i'),
+                        new RegExp('payment\\s+of\\s+\\$?\\s*' + moneyRe, 'i'),
+                        new RegExp('authorize[\\s\\S]{0,60}payment\\s+of\\s+\\$?\\s*' + moneyRe, 'i'),
+                        // Standard receipt totals
                         new RegExp('(?:grand\\s*total|total\\s*due|amount\\s*due|balance\\s*due|total\\s*charged?)[\\s:]*\\$?\\s*' + moneyRe, 'i'),
                         new RegExp('(?:total)[\\s:]*\\$?\\s*' + moneyRe, 'i'),
                         new RegExp('(?:amount|subtotal|sub\\s*total)[\\s:]*\\$?\\s*' + moneyRe, 'i'),
+                        // "Amount" on one line, "$X" on next line (common in payment UIs)
+                        new RegExp('amount[\\s\\n]*\\$?\\s*' + moneyRe, 'im'),
                     ];
                     for (const pat of totalPatterns) {
                         const m = text.match(pat);
                         if (m) { amount = parseMoney(m[1]); break; }
                     }
-                    // Fallback: find all dollar amounts and pick the largest
+                    // Fallback: find all dollar amounts and pick the most frequent, then largest
                     if (!amount) {
                         const allAmounts = [...text.matchAll(new RegExp('\\$\\s*' + moneyRe, 'g'))];
                         if (allAmounts.length) {
                             const nums = allAmounts.map(m => parseMoney(m[1])).filter(n => n > 0);
-                            if (nums.length) amount = Math.max(...nums);
+                            if (nums.length) {
+                                // Count frequency — the transaction amount often appears multiple times
+                                const freq = {};
+                                nums.forEach(n => { freq[n] = (freq[n] || 0) + 1; });
+                                const maxFreq = Math.max(...Object.values(freq));
+                                const mostFrequent = Object.entries(freq).filter(([, c]) => c === maxFreq).map(([n]) => parseFloat(n));
+                                // If one amount appears more than others, use it; otherwise pick largest
+                                amount = mostFrequent.length === 1 && maxFreq > 1 ? mostFrequent[0] : Math.max(...nums);
+                            }
                         }
                     }
 
