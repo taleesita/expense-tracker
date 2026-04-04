@@ -27,9 +27,103 @@
 
         // ============ CONSTANTS ============
         const CLIENT_ID = '211316299457-pbc8r12gbc1ds3urktklckq7a2an35kq.apps.googleusercontent.com';
-        const SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
+        const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
         const SHEET_TAB = '💸';
-        const DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
+        const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
+        const TEST_PARENT_FOLDER_ID = '1LJ57lHUhuLigB1NKuko39saGCRVqs8Ya';
+
+        // Test mode state — persisted in localStorage
+        let _testMode = (() => { try { return localStorage.getItem('expense_test_mode') === 'true'; } catch { return false; } })();
+        let _testSheetId = (() => { try { return localStorage.getItem('expense_test_sheet_id') || ''; } catch { return ''; } })();
+        let _testFolderId = (() => { try { return localStorage.getItem('expense_test_folder_id') || ''; } catch { return ''; } })();
+
+        // Dynamic getters — all code uses these instead of constants
+        const getSheetId = () => _testMode && _testSheetId ? _testSheetId : REAL_SHEET_ID;
+        const getDriveFolderId = () => _testMode && _testFolderId ? _testFolderId : REAL_DRIVE_FOLDER_ID;
+
+        // Setup test mode: copy real sheet + create test upload folder
+        const setupTestMode = async (token) => {
+            // 1. Copy the real sheet if we don't already have a test sheet
+            if (!_testSheetId) {
+                try {
+                    const copyResp = await fetch(`https://www.googleapis.com/drive/v3/files/${REAL_SHEET_ID}/copy`, {
+                        method: 'POST',
+                        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            name: '[DUPE FOR TESTING] 💸',
+                            parents: [TEST_PARENT_FOLDER_ID]
+                        })
+                    });
+                    const copyData = await copyResp.json();
+                    if (copyData.id) {
+                        _testSheetId = copyData.id;
+                        localStorage.setItem('expense_test_sheet_id', _testSheetId);
+                    } else {
+                        throw new Error('Failed to copy sheet: ' + JSON.stringify(copyData));
+                    }
+                } catch (err) {
+                    console.error('Test mode sheet copy failed:', err);
+                    alert('Failed to create test sheet. Make sure you have access to the target folder.');
+                    return false;
+                }
+            }
+            // 2. Create test upload folder if we don't have one
+            if (!_testFolderId) {
+                try {
+                    const folderResp = await fetch('https://www.googleapis.com/drive/v3/files', {
+                        method: 'POST',
+                        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            name: '[DUPE FOR TEST MODE] Order Processing',
+                            mimeType: 'application/vnd.google-apps.folder',
+                            parents: [TEST_PARENT_FOLDER_ID]
+                        })
+                    });
+                    const folderData = await folderResp.json();
+                    if (folderData.id) {
+                        _testFolderId = folderData.id;
+                        localStorage.setItem('expense_test_folder_id', _testFolderId);
+                    } else {
+                        throw new Error('Failed to create folder: ' + JSON.stringify(folderData));
+                    }
+                } catch (err) {
+                    console.error('Test mode folder creation failed:', err);
+                    // Non-fatal — uploads will just go to real folder
+                }
+            }
+            return true;
+        };
+
+        // Refresh test sheet: re-copy from real sheet (replaces existing test sheet data)
+        const refreshTestSheet = async (token) => {
+            if (!_testSheetId) return false;
+            try {
+                // Delete old test sheet
+                await fetch(`https://www.googleapis.com/drive/v3/files/${_testSheetId}`, {
+                    method: 'DELETE',
+                    headers: { 'Authorization': `Bearer ${token}` }
+                });
+                // Copy fresh
+                const copyResp = await fetch(`https://www.googleapis.com/drive/v3/files/${REAL_SHEET_ID}/copy`, {
+                    method: 'POST',
+                    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        name: '[DUPE FOR TESTING] 💸',
+                        parents: [TEST_PARENT_FOLDER_ID]
+                    })
+                });
+                const copyData = await copyResp.json();
+                if (copyData.id) {
+                    _testSheetId = copyData.id;
+                    localStorage.setItem('expense_test_sheet_id', _testSheetId);
+                    return true;
+                }
+            } catch (err) {
+                console.error('Test sheet refresh failed:', err);
+            }
+            return false;
+        };
+
         const ALLOWED_EMAILS = ['taly.matiteyahu@gmail.com', 'doug.pickard@gmail.com'];
         const EMAIL_TO_NAME = {
             'taly.matiteyahu@gmail.com': 'Taly',
@@ -554,13 +648,35 @@
                 });
             }, [saveSession]);
 
+            // Validate token by making a lightweight API call
+            const validateToken = useCallback(async (tkn) => {
+                if (!tkn) return false;
+                try {
+                    const resp = await fetch(`https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=${tkn}`);
+                    if (resp.ok) {
+                        const data = await resp.json();
+                        return data.expires_in > 60; // valid if more than 60s left
+                    }
+                    return false;
+                } catch { return false; }
+            }, []);
+
             useEffect(() => {
-                const tryInit = () => {
+                const tryInit = async () => {
                     if (!window.google) return false;
                     initTokenClient();
-                    // If we have a saved user but token is expired or expiring, auto re-auth
+
+                    const savedTkn = localStorage.getItem('expense_token');
                     const savedEmail = (() => { try { const u = JSON.parse(localStorage.getItem('expense_user')); return u?.email; } catch { return null; } })();
-                    if (savedEmail && (!token || !tokenExpiryRef.current || Date.now() > tokenExpiryRef.current - 5 * 60 * 1000)) {
+
+                    if (savedTkn && savedEmail) {
+                        // Check if saved token is still valid before doing anything
+                        const isValid = await validateToken(savedTkn);
+                        if (isValid) {
+                            // Token is still good — no need to re-auth
+                            return true;
+                        }
+                        // Token expired — try silent refresh
                         setTimeout(() => {
                             if (tokenClientRef.current) {
                                 tokenClientRef.current.requestAccessToken({ prompt: '', login_hint: savedEmail });
@@ -569,14 +685,23 @@
                     }
                     return true;
                 };
-                if (!tryInit()) {
-                    // GIS script not loaded yet — wait for it
-                    const interval = setInterval(() => {
-                        if (tryInit()) clearInterval(interval);
-                    }, 300);
-                    return () => clearInterval(interval);
-                }
-            }, [initTokenClient]);
+
+                let cancelled = false;
+                const init = async () => {
+                    if (window.google) {
+                        await tryInit();
+                    } else {
+                        const interval = setInterval(async () => {
+                            if (window.google && !cancelled) {
+                                clearInterval(interval);
+                                await tryInit();
+                            }
+                        }, 300);
+                        return () => { cancelled = true; clearInterval(interval); };
+                    }
+                };
+                init();
+            }, [initTokenClient, validateToken]);
 
             const login = useCallback(() => {
                 if (tokenClientRef.current) {
@@ -585,8 +710,13 @@
             }, []);
 
             const silentRefresh = useCallback(async () => {
-                if (tokenClientRef.current && tokenExpiryRef.current && Date.now() > tokenExpiryRef.current - 5 * 60 * 1000) {
-                    tokenClientRef.current.requestAccessToken({ prompt: '' });
+                if (!tokenClientRef.current || !tokenExpiryRef.current) return;
+                // Only attempt refresh if token is actually expiring soon
+                if (Date.now() > tokenExpiryRef.current - 5 * 60 * 1000) {
+                    const savedEmail = (() => { try { const u = JSON.parse(localStorage.getItem('expense_user')); return u?.email; } catch { return null; } })();
+                    if (savedEmail) {
+                        tokenClientRef.current.requestAccessToken({ prompt: '', login_hint: savedEmail });
+                    }
                 }
             }, []);
 
@@ -618,7 +748,7 @@
                 if (!silent) setLoading(true);
                 try {
                     const resp = await fetch(
-                        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(SHEET_TAB)}!A:J`,
+                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A:J`,
                         { headers: { 'Authorization': `Bearer ${token}` } }
                     );
                     const data = await resp.json();
@@ -706,7 +836,7 @@
                         expense.receipt || '',                             // I: Receipt
                     ];
                     await fetch(
-                        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(SHEET_TAB)}!A:I:append?valueInputOption=USER_ENTERED`,
+                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A:I:append?valueInputOption=USER_ENTERED`,
                         {
                             method: 'POST',
                             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -738,7 +868,7 @@
                         expense.receipt || '',                                 // I
                     ];
                     await fetch(
-                        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(SHEET_TAB)}!A${rowIndex}:I${rowIndex}?valueInputOption=USER_ENTERED`,
+                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A${rowIndex}:I${rowIndex}?valueInputOption=USER_ENTERED`,
                         {
                             method: 'PUT',
                             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -755,7 +885,7 @@
                 if (!token) return;
                 try {
                     await fetch(
-                        `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(SHEET_TAB)}!A${rowIndex}:I${rowIndex}?valueInputOption=USER_ENTERED`,
+                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A${rowIndex}:I${rowIndex}?valueInputOption=USER_ENTERED`,
                         {
                             method: 'PUT',
                             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -790,7 +920,7 @@
                     const metadata = {
                         name: filename,
                         mimeType: file.type,
-                        parents: [DRIVE_FOLDER_ID]
+                        parents: [getDriveFolderId()]
                     };
 
                     const formData = new FormData();
@@ -2190,8 +2320,10 @@
             );
         };
 
-        const SettingsDropdown = ({ user, onLogout }) => {
+        const SettingsDropdown = ({ user, onLogout, testMode, onToggleTestMode, onRefreshTestData }) => {
             const [open, setOpen] = useState(false);
+            const [toggling, setToggling] = useState(false);
+            const [refreshing, setRefreshing] = useState(false);
 
             return (
                 <div className="relative">
@@ -2202,7 +2334,7 @@
                         <span style={{ fontSize: '16px' }}>⚙️</span>
                     </button>
                     {open && (
-                        <div className="absolute right-0 mt-2 bg-white border border-gray-200 rounded-lg shadow-lg overflow-hidden z-20">
+                        <div className="absolute right-0 mt-2 bg-white border border-gray-200 rounded-lg shadow-lg overflow-hidden z-20 min-w-[220px]">
                             <div className="px-4 py-3 border-b border-gray-200">
                                 <div className="flex items-center gap-2">
                                     {user?.picture && <img src={user.picture} alt="" className="w-8 h-8 rounded-full" />}
@@ -2213,11 +2345,43 @@
                                 </div>
                             </div>
                             <button
+                                onClick={async () => {
+                                    setToggling(true);
+                                    await onToggleTestMode();
+                                    setToggling(false);
+                                    setOpen(false);
+                                }}
+                                disabled={toggling}
+                                className="w-full px-4 py-2.5 text-left hover:bg-gray-50 flex items-center justify-between border-b border-gray-100"
+                            >
+                                <span className="flex items-center gap-2 text-sm">
+                                    <span>{testMode ? '🧪' : '🔬'}</span>
+                                    <span>{toggling ? 'Switching...' : (testMode ? 'Exit Test Mode' : 'Enter Test Mode')}</span>
+                                </span>
+                                {testMode && <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />}
+                            </button>
+                            {testMode && (
+                                <button
+                                    onClick={async () => {
+                                        if (!confirm('This will replace your test data with a fresh copy of your real sheet. Continue?')) return;
+                                        setRefreshing(true);
+                                        await onRefreshTestData();
+                                        setRefreshing(false);
+                                        setOpen(false);
+                                    }}
+                                    disabled={refreshing}
+                                    className="w-full px-4 py-2.5 text-left hover:bg-gray-50 flex items-center gap-2 text-sm border-b border-gray-100"
+                                >
+                                    <RefreshCwIcon size={14} className={refreshing ? 'animate-spin' : ''} />
+                                    <span>{refreshing ? 'Refreshing...' : 'Refresh Test Data'}</span>
+                                </button>
+                            )}
+                            <button
                                 onClick={() => {
                                     onLogout();
                                     setOpen(false);
                                 }}
-                                className="w-full px-4 py-2 text-left text-red-600 hover:bg-red-50 flex items-center gap-2"
+                                className="w-full px-4 py-2.5 text-left text-red-600 hover:bg-red-50 flex items-center gap-2 text-sm"
                             >
                                 <LogOutIcon size={18} /> Sign Out
                             </button>
@@ -2239,6 +2403,37 @@
             const [selectedCard, setSelectedCard] = useState(CREDIT_CARDS[0]?.id || '');
             const [selectedBank, setSelectedBank] = useState(BANK_ACCOUNTS[0]?.id || '');
             const [toast, setToast] = useState('');
+            const [testMode, setTestMode] = useState(_testMode);
+
+            const handleToggleTestMode = async () => {
+                if (!_testMode) {
+                    // Entering test mode — set up if needed
+                    const ok = await setupTestMode(token);
+                    if (!ok) return;
+                    _testMode = true;
+                    localStorage.setItem('expense_test_mode', 'true');
+                    setTestMode(true);
+                    setToast('Test mode ON — using test data');
+                } else {
+                    // Exiting test mode
+                    _testMode = false;
+                    localStorage.setItem('expense_test_mode', 'false');
+                    setTestMode(false);
+                    setToast('Test mode OFF — back to real data');
+                }
+                // Re-fetch data from the now-active sheet
+                setTimeout(() => fetchExpenses(), 300);
+            };
+
+            const handleRefreshTestData = async () => {
+                const ok = await refreshTestSheet(token);
+                if (ok) {
+                    setToast('Test data refreshed from real sheet');
+                    fetchExpenses();
+                } else {
+                    alert('Failed to refresh test data');
+                }
+            };
 
             const handleEditExpense = (expense) => {
                 setEditExpense(expense);
@@ -2349,10 +2544,16 @@
 
             return (
                 <div className="flex flex-col h-screen bg-gray-50">
+                    {/* Test Mode Banner */}
+                    {testMode && (
+                        <div className="bg-amber-400 text-amber-900 text-center py-1.5 text-xs font-bold tracking-wide z-40 relative">
+                            🧪 TEST MODE — changes won't affect real data
+                        </div>
+                    )}
                     {/* Header */}
-                    <div className="sticky top-0 bg-white border-b border-gray-200 p-4 flex justify-between items-center z-30">
+                    <div className={`sticky top-0 border-b border-gray-200 p-4 flex justify-between items-center z-30 ${testMode ? 'bg-amber-50' : 'bg-white'}`}>
                         <div>
-                            <h1 className="text-xl font-bold">Expenses</h1>
+                            <h1 className="text-xl font-bold">{testMode ? '🧪 Expenses (Test)' : 'Expenses'}</h1>
                             <p className="text-xs text-gray-400">Hi, {user?.name}</p>
                         </div>
                         <div className="flex items-center gap-1.5">
@@ -2384,7 +2585,7 @@
                             >
                                 <PlusCircleIcon size={18} />
                             </button>
-                            <SettingsDropdown user={user} onLogout={logout} />
+                            <SettingsDropdown user={user} onLogout={logout} testMode={testMode} onToggleTestMode={handleToggleTestMode} onRefreshTestData={handleRefreshTestData} />
                         </div>
                     </div>
 
