@@ -55,15 +55,19 @@
                         })
                     });
                     const copyData = await copyResp.json();
+                    console.log('Sheet copy response:', copyResp.status, copyData);
                     if (copyData.id) {
                         _testSheetId = copyData.id;
                         localStorage.setItem('expense_test_sheet_id', _testSheetId);
+                    } else if (copyData.error?.status === 'PERMISSION_DENIED' || copyData.error?.code === 403) {
+                        alert('Permission denied — please sign out and sign back in to grant the updated Drive permissions, then try again.');
+                        return false;
                     } else {
-                        throw new Error('Failed to copy sheet: ' + JSON.stringify(copyData));
+                        throw new Error(JSON.stringify(copyData.error || copyData));
                     }
                 } catch (err) {
                     console.error('Test mode sheet copy failed:', err);
-                    alert('Failed to create test sheet. Make sure you have access to the target folder.');
+                    alert('Failed to create test sheet: ' + err.message);
                     return false;
                 }
             }
@@ -193,11 +197,26 @@
         const ALL_ACCOUNTS = [...CREDIT_CARDS, ...BANK_ACCOUNTS];
 
         // Generate auto-populated merchant names for dual-entry transactions
+        // Friendly names for use in payment/transfer descriptions
+        const ACCT_PAYMENT_NAMES = {
+            'reserve_chase': 'Chase Reserve',
+            'amazon_chase': 'Chase Amazon',
+            'united_chase': 'Chase United MileagePlus',
+            'cap1_cc': 'Capital 1',
+            'carecredit': 'CareCredit',
+            'cap1_jcheck': 'Cap1 Joint Checking',
+            'cap1_tsaving': 'Cap1 TSavings',
+            'cap1_joint_hy': 'Cap1 Joint High Yield Savings',
+            'cap1_noa_hy': 'Cap1 Noa High Yield Savings',
+            'mercury_treatteek': 'TreatTeek Mercury Account',
+            'mercury_matiteyahu': 'Matiteyahu LLC Mercury Account',
+            'td_savings': 'TD Savings',
+        };
+        const getPaymentName = (acctId) => ACCT_PAYMENT_NAMES[acctId] || ALL_ACCOUNTS.find(a => a.id === acctId)?.name || '';
+
         const getDualEntryNames = (txnType, primaryAcctId, secondaryAcctId) => {
-            const primaryAcct = ALL_ACCOUNTS.find(a => a.id === primaryAcctId);
-            const secondaryAcct = ALL_ACCOUNTS.find(a => a.id === secondaryAcctId);
-            const pName = primaryAcct?.name || '';
-            const sName = secondaryAcct?.name || '';
+            const pName = getPaymentName(primaryAcctId);
+            const sName = getPaymentName(secondaryAcctId);
 
             if (txnType === 'card_payment') {
                 // Primary = card being paid, Secondary = account paying
@@ -210,7 +229,6 @@
                 return {
                     primaryMerchant: `Transfer to ${sName}`,            // goes on the from account (charge)
                     secondaryMerchant: `Transfer from ${pName}`,        // goes on the to account (deposit)
-                    // Note: we can also handle "Deposit - Transfer from X" convention
                 };
             }
         };
@@ -1528,7 +1546,7 @@
                 <div className="fixed inset-0 bg-black bg-opacity-50 z-40 flex items-end">
                     <div className="bg-white w-full rounded-t-2xl p-6 max-h-[90vh] overflow-y-auto">
                         <div className="flex justify-between items-center mb-4">
-                            <h2 className="text-2xl font-bold">{isEdit ? 'Edit Expense' : 'Add Expense'}</h2>
+                            <h2 className="text-2xl font-bold">{isEdit ? 'Edit Transaction' : 'Add Transaction'}</h2>
                             <button onClick={handleCancel} className="p-1 hover:bg-gray-200 rounded">
                                 <XIcon size={24} />
                             </button>
@@ -1875,7 +1893,7 @@
                                     onClick={handleAdd}
                                     className="flex-1 bg-blue-600 text-white py-2 rounded-lg font-medium hover:bg-blue-700"
                                 >
-                                    {isEdit ? 'Save Changes' : 'Add Expense'}
+                                    {isEdit ? 'Save Changes' : 'Save'}
                                 </button>
                             </div>
                         </div>
