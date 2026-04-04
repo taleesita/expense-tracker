@@ -187,7 +187,33 @@
             { id: 'charge', label: 'Charge', desc: 'Expense / debit', color: '#EF4444' },
             { id: 'deposit', label: 'Deposit', desc: 'Income / inflow', color: '#10B981' },
             { id: 'credit_refund', label: 'Refund', desc: 'Return / refund', color: '#3B82F6' },
+            { id: 'card_payment', label: 'CC Payment', desc: 'Pay off credit card', color: '#374151' },
+            { id: 'transfer', label: 'Transfer', desc: 'Between accounts', color: '#7C3AED' },
         ];
+        const ALL_ACCOUNTS = [...CREDIT_CARDS, ...BANK_ACCOUNTS];
+
+        // Generate auto-populated merchant names for dual-entry transactions
+        const getDualEntryNames = (txnType, primaryAcctId, secondaryAcctId) => {
+            const primaryAcct = ALL_ACCOUNTS.find(a => a.id === primaryAcctId);
+            const secondaryAcct = ALL_ACCOUNTS.find(a => a.id === secondaryAcctId);
+            const pName = primaryAcct?.name || '';
+            const sName = secondaryAcct?.name || '';
+
+            if (txnType === 'card_payment') {
+                // Primary = card being paid, Secondary = account paying
+                return {
+                    primaryMerchant: `Payment from ${sName}`,           // goes on the CC (deposit)
+                    secondaryMerchant: `Debit - ${pName} Card Payment`, // goes on the bank (charge)
+                };
+            } else {
+                // transfer: Primary = from account, Secondary = to account
+                return {
+                    primaryMerchant: `Transfer to ${sName}`,            // goes on the from account (charge)
+                    secondaryMerchant: `Transfer from ${pName}`,        // goes on the to account (deposit)
+                    // Note: we can also handle "Deposit - Transfer from X" convention
+                };
+            }
+        };
 
         // Format money with commas
         const fmt = (n) => Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -467,7 +493,6 @@
             return 'other';
         };
 
-        const ALL_ACCOUNTS = [...CREDIT_CARDS, ...BANK_ACCOUNTS];
         const getAccountById = (id) => ALL_ACCOUNTS.find(a => a.id === id);
         const getCategoryById = (id) => CATEGORIES.find(c => c.id === id);
 
@@ -614,7 +639,7 @@
                 if (!window.google) return;
                 tokenClientRef.current = window.google.accounts.oauth2.initTokenClient({
                     client_id: CLIENT_ID,
-                    scope: 'openid email profile https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.file',
+                    scope: 'openid email profile https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive',
                     callback: async (resp) => {
                         if (resp.access_token) {
                             const expiry = Date.now() + 50 * 60 * 1000;
@@ -1284,6 +1309,11 @@
             const [receipt, setReceipt] = useState('');
             const [txnType, setTxnType] = useState('charge');
             const [originalCurrency, setOriginalCurrency] = useState('USD');
+            // Dual-entry state for card payments / transfers
+            const [secondaryAccount, setSecondaryAccount] = useState('');
+            const [primaryMerchantOverride, setPrimaryMerchantOverride] = useState('');
+            const [secondaryMerchantOverride, setSecondaryMerchantOverride] = useState('');
+            const isDualEntry = txnType === 'card_payment' || txnType === 'transfer';
             const [originalAmount, setOriginalAmount] = useState('');
 
             // Pre-fill when editing
@@ -1310,6 +1340,9 @@
                     setTxnType('charge');
                     setOriginalCurrency('USD');
                     setOriginalAmount('');
+                    setSecondaryAccount('');
+                    setPrimaryMerchantOverride('');
+                    setSecondaryMerchantOverride('');
                 }
             }, [editExpense, isOpen]);
             const [showScanner, setShowScanner] = useState(false);
@@ -1398,22 +1431,75 @@
             const handleAdd = () => {
                 const missing = [];
                 if (!account) missing.push('account');
-                if (!merchant) missing.push('merchant');
                 if (!amount) missing.push('amount');
                 if (!date) missing.push('date');
-                if (!category || category === 'other') missing.push('category');
                 if (!txnType) missing.push('transaction type');
+                if (isDualEntry) {
+                    if (!secondaryAccount) missing.push(txnType === 'card_payment' ? 'paying from account' : 'transfer to account');
+                    if (account === secondaryAccount) { alert('Cannot transfer to the same account'); return; }
+                } else {
+                    if (!merchant) missing.push('merchant');
+                    if (!category || category === 'other') missing.push('category');
+                }
                 if (missing.length) {
                     alert('Please fill in: ' + missing.join(', '));
                     return;
                 }
                 // Rename Drive file if merchant was updated after upload
-                if (uploadedReceiptUrl.current && merchant && merchant !== 'receipt') {
+                const displayMerchant = isDualEntry ? (primaryMerchantOverride || merchant) : merchant;
+                if (uploadedReceiptUrl.current && displayMerchant && displayMerchant !== 'receipt') {
                     const now = new Date();
                     const dateStr = `${now.getFullYear()}.${String(now.getMonth() + 1).padStart(2, '0')}.${String(now.getDate()).padStart(2, '0')}`;
-                    renameFile(uploadedReceiptUrl.current, `${dateStr} - ${merchant} (${userName})`);
+                    renameFile(uploadedReceiptUrl.current, `${dateStr} - ${displayMerchant} (${userName})`);
                     uploadedReceiptUrl.current = null;
                 }
+
+                if (isDualEntry && !isEdit) {
+                    // Auto-generate merchant names if not overridden
+                    const autoNames = getDualEntryNames(txnType, account, secondaryAccount);
+                    const priMerch = primaryMerchantOverride || autoNames.primaryMerchant;
+                    const secMerch = secondaryMerchantOverride || autoNames.secondaryMerchant;
+                    const amt = parseFloat(amount);
+
+                    if (txnType === 'card_payment') {
+                        // Card payment: primary = card being paid (gets deposit), secondary = account paying (gets charge)
+                        onAdd({
+                            _dual: true,
+                            entries: [
+                                {
+                                    merchant: priMerch, amount: amt, category: 'card_payment', account,
+                                    txnType: 'deposit', isCredit: true, receipt: receipt || '',
+                                    notes, originalCurrency, originalAmount: amt, person: userName, date,
+                                },
+                                {
+                                    merchant: secMerch, amount: amt, category: 'card_payment', account: secondaryAccount,
+                                    txnType: 'charge', isCredit: false, receipt: receipt || '',
+                                    notes, originalCurrency, originalAmount: amt, person: userName, date,
+                                },
+                            ]
+                        });
+                    } else {
+                        // Transfer: primary = from account (gets charge), secondary = to account (gets deposit)
+                        onAdd({
+                            _dual: true,
+                            entries: [
+                                {
+                                    merchant: priMerch, amount: amt, category: 'transfer', account,
+                                    txnType: 'charge', isCredit: false, receipt: receipt || '',
+                                    notes, originalCurrency, originalAmount: amt, person: userName, date,
+                                },
+                                {
+                                    merchant: secMerch, amount: amt, category: 'transfer', account: secondaryAccount,
+                                    txnType: 'deposit', isCredit: true, receipt: receipt || '',
+                                    notes, originalCurrency, originalAmount: amt, person: userName, date,
+                                },
+                            ]
+                        });
+                    }
+                    onClose();
+                    return;
+                }
+
                 const data = {
                     merchant,
                     amount: parseFloat(amount),
@@ -1487,76 +1573,14 @@
                         </div>
 
                         <div className="space-y-3">
-                            <div className="relative">
-                                <select
-                                    value={account}
-                                    onChange={(e) => setAccount(e.target.value)}
-                                    className="w-full border rounded-lg px-4 py-2.5 pr-8 appearance-none bg-white"
-                                    style={{ appearance: 'none', backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236B7280' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E\")", backgroundRepeat: 'no-repeat', backgroundPosition: 'right 12px center' }}
-                                >
-                                    <option value="">Select Account</option>
-                                    <optgroup label="Credit Cards">
-                                        {CREDIT_CARDS.map(card => (
-                                            <option key={card.id} value={card.id}>{card.name}</option>
-                                        ))}
-                                    </optgroup>
-                                    <optgroup label="Bank Accounts">
-                                        {BANK_ACCOUNTS.map(bank => (
-                                            <option key={bank.id} value={bank.id}>{bank.name}</option>
-                                        ))}
-                                    </optgroup>
-                                </select>
-                            </div>
-
-                            <div className="relative">
-                                <input
-                                    type="text"
-                                    placeholder="Merchant name"
-                                    value={merchant}
-                                    onChange={(e) => { setMerchant(e.target.value); setShowSuggestions(true); }}
-                                    onFocus={() => setShowSuggestions(true)}
-                                    onBlur={() => { setTimeout(() => setShowSuggestions(false), 200); if (!isEdit) setCategory(suggestCategory(merchant)); }}
-                                    className="w-full border rounded-lg px-4 py-2.5"
-                                />
-                                {showSuggestions && merchant.length >= 2 && (() => {
-                                    const matches = frequentMerchants.filter(m => m.toLowerCase().includes(merchant.toLowerCase()) && m.toLowerCase() !== merchant.toLowerCase());
-                                    return matches.length > 0 ? (
-                                        <div className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-40 overflow-y-auto">
-                                            {matches.slice(0, 6).map((m, i) => (
-                                                <button key={i} type="button"
-                                                    onMouseDown={(e) => { e.preventDefault(); setMerchant(m); setShowSuggestions(false); if (!isEdit) setCategory(suggestCategory(m)); }}
-                                                    className="w-full text-left px-4 py-2.5 text-sm hover:bg-blue-50 border-b border-gray-100 last:border-0"
-                                                >{m}</button>
-                                            ))}
-                                        </div>
-                                    ) : null;
-                                })()}
-                            </div>
-
-                            <div className="flex gap-2">
-                                <input
-                                    type="number"
-                                    placeholder="Amount"
-                                    step="0.01"
-                                    value={amount}
-                                    onChange={(e) => setAmount(e.target.value)}
-                                    className="flex-1 border rounded-lg px-4 py-2.5"
-                                />
-                                <input
-                                    type="date"
-                                    value={date}
-                                    onChange={(e) => setDate(e.target.value)}
-                                    className="flex-1 border rounded-lg px-4 py-2.5"
-                                />
-                            </div>
-
+                            {/* Transaction Type — first so form adapts */}
                             <div>
                                 <label className="block text-xs font-medium text-gray-500 mb-1.5">Transaction Type</label>
                                 <div className="flex gap-1.5">
                                     {TXN_TYPES.map(t => (
                                         <button
                                             key={t.id}
-                                            onClick={() => setTxnType(t.id)}
+                                            onClick={() => { setTxnType(t.id); if (t.id === 'card_payment' || t.id === 'transfer') { setCategory(t.id); } }}
                                             className={`flex-1 py-2 rounded-lg text-xs font-medium border-2 transition ${txnType === t.id ? 'border-current' : 'border-gray-200 bg-gray-50'}`}
                                             style={txnType === t.id ? { color: t.color, backgroundColor: t.color + '15', borderColor: t.color } : {}}
                                         >
@@ -1566,43 +1590,209 @@
                                 </div>
                             </div>
 
-                            {originalCurrency !== 'USD' && (
-                                <input
-                                    type="number"
-                                    placeholder="Original amount"
-                                    step="0.01"
-                                    value={originalAmount}
-                                    onChange={(e) => setOriginalAmount(e.target.value)}
-                                    className="w-full border rounded-lg px-4 py-2.5"
-                                />
+                            {isDualEntry ? (
+                                /* ===== DUAL ENTRY: Card Payment / Transfer ===== */
+                                <div className="space-y-3">
+                                    <div className={`p-3 rounded-lg border-2 ${txnType === 'card_payment' ? 'border-gray-300 bg-gray-50' : 'border-purple-200 bg-purple-50'}`}>
+                                        <label className="block text-[10px] uppercase tracking-wider font-bold mb-1.5" style={{ color: txnType === 'card_payment' ? '#374151' : '#7C3AED' }}>
+                                            {txnType === 'card_payment' ? '💳 Card Being Paid' : '📤 Transfer From'}
+                                        </label>
+                                        <select
+                                            value={account}
+                                            onChange={(e) => { setAccount(e.target.value); setPrimaryMerchantOverride(''); setSecondaryMerchantOverride(''); }}
+                                            className="w-full border rounded-lg px-3 py-2 text-sm appearance-none bg-white"
+                                            style={{ backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236B7280' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E\")", backgroundRepeat: 'no-repeat', backgroundPosition: 'right 12px center' }}
+                                        >
+                                            <option value="">{txnType === 'card_payment' ? 'Select card to pay off' : 'Select account to transfer from'}</option>
+                                            {txnType === 'card_payment' ? (
+                                                <optgroup label="Credit Cards">
+                                                    {CREDIT_CARDS.map(card => <option key={card.id} value={card.id}>{card.name}</option>)}
+                                                </optgroup>
+                                            ) : (
+                                                <>
+                                                    <optgroup label="Bank Accounts">
+                                                        {BANK_ACCOUNTS.filter(b => b.id !== secondaryAccount).map(bank => <option key={bank.id} value={bank.id}>{bank.name}</option>)}
+                                                    </optgroup>
+                                                    <optgroup label="Credit Cards">
+                                                        {CREDIT_CARDS.filter(c => c.id !== secondaryAccount).map(card => <option key={card.id} value={card.id}>{card.name}</option>)}
+                                                    </optgroup>
+                                                </>
+                                            )}
+                                        </select>
+                                        {account && secondaryAccount && (
+                                            <input
+                                                type="text"
+                                                value={primaryMerchantOverride || getDualEntryNames(txnType, account, secondaryAccount).primaryMerchant}
+                                                onChange={(e) => setPrimaryMerchantOverride(e.target.value)}
+                                                className="w-full border rounded-lg px-3 py-2 text-sm mt-2 text-gray-600"
+                                                placeholder="Entry name for this account"
+                                            />
+                                        )}
+                                    </div>
+
+                                    <div className="flex justify-center">
+                                        <div className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-gray-400">
+                                            ↕
+                                        </div>
+                                    </div>
+
+                                    <div className={`p-3 rounded-lg border-2 ${txnType === 'card_payment' ? 'border-gray-300 bg-gray-50' : 'border-purple-200 bg-purple-50'}`}>
+                                        <label className="block text-[10px] uppercase tracking-wider font-bold mb-1.5" style={{ color: txnType === 'card_payment' ? '#374151' : '#7C3AED' }}>
+                                            {txnType === 'card_payment' ? '🏦 Paying From' : '📥 Transfer To'}
+                                        </label>
+                                        <select
+                                            value={secondaryAccount}
+                                            onChange={(e) => { setSecondaryAccount(e.target.value); setPrimaryMerchantOverride(''); setSecondaryMerchantOverride(''); }}
+                                            className="w-full border rounded-lg px-3 py-2 text-sm appearance-none bg-white"
+                                            style={{ backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236B7280' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E\")", backgroundRepeat: 'no-repeat', backgroundPosition: 'right 12px center' }}
+                                        >
+                                            <option value="">{txnType === 'card_payment' ? 'Select account paying from' : 'Select account to transfer to'}</option>
+                                            <optgroup label="Bank Accounts">
+                                                {BANK_ACCOUNTS.filter(b => b.id !== account).map(bank => <option key={bank.id} value={bank.id}>{bank.name}</option>)}
+                                            </optgroup>
+                                            {txnType === 'transfer' && (
+                                                <optgroup label="Credit Cards">
+                                                    {CREDIT_CARDS.filter(c => c.id !== account).map(card => <option key={card.id} value={card.id}>{card.name}</option>)}
+                                                </optgroup>
+                                            )}
+                                        </select>
+                                        {account && secondaryAccount && (
+                                            <input
+                                                type="text"
+                                                value={secondaryMerchantOverride || getDualEntryNames(txnType, account, secondaryAccount).secondaryMerchant}
+                                                onChange={(e) => setSecondaryMerchantOverride(e.target.value)}
+                                                className="w-full border rounded-lg px-3 py-2 text-sm mt-2 text-gray-600"
+                                                placeholder="Entry name for this account"
+                                            />
+                                        )}
+                                    </div>
+
+                                    <div className="flex gap-2">
+                                        <input
+                                            type="number"
+                                            placeholder="Amount"
+                                            step="0.01"
+                                            value={amount}
+                                            onChange={(e) => setAmount(e.target.value)}
+                                            className="flex-1 border rounded-lg px-4 py-2.5"
+                                        />
+                                        <input
+                                            type="date"
+                                            value={date}
+                                            onChange={(e) => setDate(e.target.value)}
+                                            className="flex-1 border rounded-lg px-4 py-2.5"
+                                        />
+                                    </div>
+                                </div>
+                            ) : (
+                                /* ===== NORMAL ENTRY ===== */
+                                <>
+                                    <div className="relative">
+                                        <select
+                                            value={account}
+                                            onChange={(e) => setAccount(e.target.value)}
+                                            className="w-full border rounded-lg px-4 py-2.5 pr-8 appearance-none bg-white"
+                                            style={{ appearance: 'none', backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236B7280' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E\")", backgroundRepeat: 'no-repeat', backgroundPosition: 'right 12px center' }}
+                                        >
+                                            <option value="">Select Account</option>
+                                            <optgroup label="Credit Cards">
+                                                {CREDIT_CARDS.map(card => (
+                                                    <option key={card.id} value={card.id}>{card.name}</option>
+                                                ))}
+                                            </optgroup>
+                                            <optgroup label="Bank Accounts">
+                                                {BANK_ACCOUNTS.map(bank => (
+                                                    <option key={bank.id} value={bank.id}>{bank.name}</option>
+                                                ))}
+                                            </optgroup>
+                                        </select>
+                                    </div>
+
+                                    <div className="relative">
+                                        <input
+                                            type="text"
+                                            placeholder="Merchant name"
+                                            value={merchant}
+                                            onChange={(e) => { setMerchant(e.target.value); setShowSuggestions(true); }}
+                                            onFocus={() => setShowSuggestions(true)}
+                                            onBlur={() => { setTimeout(() => setShowSuggestions(false), 200); if (!isEdit) setCategory(suggestCategory(merchant)); }}
+                                            className="w-full border rounded-lg px-4 py-2.5"
+                                        />
+                                        {showSuggestions && merchant.length >= 2 && (() => {
+                                            const matches = frequentMerchants.filter(m => m.toLowerCase().includes(merchant.toLowerCase()) && m.toLowerCase() !== merchant.toLowerCase());
+                                            return matches.length > 0 ? (
+                                                <div className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-40 overflow-y-auto">
+                                                    {matches.slice(0, 6).map((m, i) => (
+                                                        <button key={i} type="button"
+                                                            onMouseDown={(e) => { e.preventDefault(); setMerchant(m); setShowSuggestions(false); if (!isEdit) setCategory(suggestCategory(m)); }}
+                                                            className="w-full text-left px-4 py-2.5 text-sm hover:bg-blue-50 border-b border-gray-100 last:border-0"
+                                                        >{m}</button>
+                                                    ))}
+                                                </div>
+                                            ) : null;
+                                        })()}
+                                    </div>
+
+                                    <div className="flex gap-2">
+                                        <input
+                                            type="number"
+                                            placeholder="Amount"
+                                            step="0.01"
+                                            value={amount}
+                                            onChange={(e) => setAmount(e.target.value)}
+                                            className="flex-1 border rounded-lg px-4 py-2.5"
+                                        />
+                                        <input
+                                            type="date"
+                                            value={date}
+                                            onChange={(e) => setDate(e.target.value)}
+                                            className="flex-1 border rounded-lg px-4 py-2.5"
+                                        />
+                                    </div>
+                                </>
                             )}
 
-                            <select
-                                value={originalCurrency}
-                                onChange={(e) => setOriginalCurrency(e.target.value)}
-                                className="w-full border rounded-lg px-4 py-2.5 appearance-none bg-white"
-                                style={{ backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236B7280' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E\")", backgroundRepeat: 'no-repeat', backgroundPosition: 'right 12px center' }}
-                            >
-                                {Object.keys(CURRENCIES).map(curr => (
-                                    <option key={curr} value={curr}>{curr}</option>
-                                ))}
-                            </select>
+                            {!isDualEntry && (
+                                <>
+                                    {originalCurrency !== 'USD' && (
+                                        <input
+                                            type="number"
+                                            placeholder="Original amount"
+                                            step="0.01"
+                                            value={originalAmount}
+                                            onChange={(e) => setOriginalAmount(e.target.value)}
+                                            className="w-full border rounded-lg px-4 py-2.5"
+                                        />
+                                    )}
 
-                            <div>
-                                <label className="block text-xs font-medium text-gray-500 mb-1.5">Category</label>
-                                <div className="grid grid-cols-7 gap-1">
-                                    {CATEGORIES.map(cat => (
-                                        <button
-                                            key={cat.id}
-                                            onClick={() => setCategory(cat.id)}
-                                            className={`flex flex-col items-center p-1 rounded-lg border transition ${category === cat.id ? 'bg-blue-100 border-2 border-blue-600' : 'bg-gray-50 border-gray-200'}`}
-                                        >
-                                            <div className="text-sm">{cat.emoji}</div>
-                                            <div className="text-[6px] font-medium truncate w-full text-center leading-tight mt-0.5">{cat.name}</div>
-                                        </button>
-                                    ))}
-                                </div>
-                            </div>
+                                    <select
+                                        value={originalCurrency}
+                                        onChange={(e) => setOriginalCurrency(e.target.value)}
+                                        className="w-full border rounded-lg px-4 py-2.5 appearance-none bg-white"
+                                        style={{ backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236B7280' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E\")", backgroundRepeat: 'no-repeat', backgroundPosition: 'right 12px center' }}
+                                    >
+                                        {Object.keys(CURRENCIES).map(curr => (
+                                            <option key={curr} value={curr}>{curr}</option>
+                                        ))}
+                                    </select>
+
+                                    <div>
+                                        <label className="block text-xs font-medium text-gray-500 mb-1.5">Category</label>
+                                        <div className="grid grid-cols-7 gap-1">
+                                            {CATEGORIES.map(cat => (
+                                                <button
+                                                    key={cat.id}
+                                                    onClick={() => setCategory(cat.id)}
+                                                    className={`flex flex-col items-center p-1 rounded-lg border transition ${category === cat.id ? 'bg-blue-100 border-2 border-blue-600' : 'bg-gray-50 border-gray-200'}`}
+                                                >
+                                                    <div className="text-sm">{cat.emoji}</div>
+                                                    <div className="text-[6px] font-medium truncate w-full text-center leading-tight mt-0.5">{cat.name}</div>
+                                                </button>
+                                            ))}
+                                        </div>
+                                    </div>
+                                </>
+                            )}
 
                             <textarea
                                 placeholder="Notes (optional)"
@@ -2475,8 +2665,16 @@
 
             const handleAddExpense = async (expenseData) => {
                 pushUndo(expenses);
-                await appendExpense(expenseData);
-                setToast('Expense added');
+                if (expenseData._dual) {
+                    // Dual-entry: write both rows
+                    for (const entry of expenseData.entries) {
+                        await appendExpense(entry);
+                    }
+                    setToast('Both entries added');
+                } else {
+                    await appendExpense(expenseData);
+                    setToast('Expense added');
+                }
                 setTimeout(() => setToast(''), 5000);
             };
 
