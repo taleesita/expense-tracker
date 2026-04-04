@@ -361,6 +361,7 @@
         };
 
         // ============ QUARTERLY REVIEW CONSTANTS ============
+        const QR_SHEET_ID = '17auoyzXlLJDtT7-P7JSdJG6-ozv5-jxKFG55cx7xxP0';
         const QR_SHEET_TAB = '📝QBreakdown';
         const HOME_VALUE = 1180000; // Current home value for equity calculation
         // Mapping: quarterly sheet account name → expense tracker account ID
@@ -2243,25 +2244,36 @@
         };
 
         // ============ QUARTERLY REVIEW ============
+        const parseDollar = (v) => {
+            if (typeof v === 'number') return v;
+            if (!v) return 0;
+            const s = String(v).replace(/[$,\s]/g, '');
+            const neg = s.includes('(') || (s.includes('-') && !s.startsWith('-'));
+            const num = parseFloat(s.replace(/[()]/g, '')) || 0;
+            return neg ? -num : (s.startsWith('-') ? -num : num);
+        };
+        const fmtQ = (n) => {
+            const abs = Math.abs(n);
+            return abs.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        };
+
         const QuarterlyReview = ({ token, expenses }) => {
             const [loading, setLoading] = useState(false);
-            const [qrData, setQrData] = useState(null); // { accounts, quarters, summaries }
-            const [currentValues, setCurrentValues] = useState({}); // accountName -> edited value
+            const [qrData, setQrData] = useState(null);
+            const [currentValues, setCurrentValues] = useState({});
             const [showPct, setShowPct] = useState(false);
             const [lockedQuarters, setLockedQuarters] = useState(() => {
                 try { return JSON.parse(localStorage.getItem('qr_locked') || '[]'); } catch { return []; }
             });
-            const [phase, setPhase] = useState('entry'); // 'entry' | 'review'
-            const [expandDormant, setExpandDormant] = useState(false);
+            const [expandedDormant, setExpandedDormant] = useState({}); // per-category: { liquid: true }
 
             // Fetch quarterly data from sheet
             const fetchQRData = useCallback(async () => {
                 if (!token) return;
                 setLoading(true);
                 try {
-                    const sheetId = getSheetId();
                     const resp = await fetch(
-                        `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(QR_SHEET_TAB)}?key=&valueRenderOption=UNFORMATTED_VALUE`,
+                        `https://sheets.googleapis.com/v4/spreadsheets/${QR_SHEET_ID}/values/${encodeURIComponent(QR_SHEET_TAB)}?valueRenderOption=FORMATTED_VALUE`,
                         { headers: { 'Authorization': `Bearer ${token}` } }
                     );
                     const data = await resp.json();
@@ -2313,22 +2325,11 @@
                         // Parse values for each quarter
                         const values = {};
                         quarters.forEach(q => {
-                            const raw = row[q.colIdx];
-                            let val = 0;
-                            if (typeof raw === 'number') {
-                                val = raw;
-                            } else if (raw) {
-                                const str = String(raw).replace(/[$,\s]/g, '');
-                                const isNeg = str.includes('(') || str.includes('-');
-                                val = parseFloat(str.replace(/[()]/g, '')) || 0;
-                                if (isNeg) val = -val;
-                            }
-                            values[q.label] = val;
-                            // Also grab the percentage
+                            values[q.label] = parseDollar(row[q.colIdx]);
                             const pctRaw = row[q.colIdx + 1];
                             if (pctRaw) {
-                                const pctVal = typeof pctRaw === 'number' ? pctRaw : parseFloat(String(pctRaw).replace('%', '')) / 100;
-                                values[q.label + '_pct'] = pctVal;
+                                const pctStr = String(pctRaw).replace('%', '');
+                                values[q.label + '_pct'] = parseFloat(pctStr) / 100 || 0;
                             }
                         });
 
@@ -2443,20 +2444,19 @@
                 }
             };
 
-            const renderAccountRow = (acct) => {
+            const renderAccountRow = (acct, isDormantRow) => {
                 const prevVal = acct.values[prevLabel] || 0;
                 const curVal = getCurrentVal(acct);
                 const displayVal = curVal !== null ? curVal : '';
                 const delta = curVal !== null ? curVal - prevVal : null;
                 const isAutoFilled = acct.trackerAcctId && curVal !== null && !currentValues.hasOwnProperty(acct.name + '_manual');
-                const dormant = isDormant(acct);
 
                 return (
-                    <div key={acct.name} className={`flex items-center gap-2 py-2 px-3 border-b border-gray-50 ${dormant && !expandDormant ? 'hidden' : ''}`}>
+                    <div key={acct.name} className={`flex items-center gap-2 py-2 px-3 border-b border-gray-50 ${isDormantRow ? 'opacity-50' : ''}`}>
                         <div className="flex-1 min-w-0">
                             <div className="text-sm font-medium truncate">{acct.name}</div>
                             <div className="text-[11px] text-gray-400">
-                                Last: ${fmt(Math.abs(prevVal))}
+                                {prevLabel ? `${prevLabel}: ` : 'Last: '}${fmt(Math.abs(prevVal))}
                                 {showPct && acct.values[prevLabel + '_pct'] !== undefined && (
                                     <span className="ml-1">({(acct.values[prevLabel + '_pct'] * 100).toFixed(1)}%)</span>
                                 )}
@@ -2470,7 +2470,7 @@
                                     type="number"
                                     step="0.01"
                                     placeholder={fmt(Math.abs(prevVal))}
-                                    value={displayVal !== '' ? Math.abs(displayVal) : ''}
+                                    value={displayVal !== '' ? parseFloat(Math.abs(displayVal).toFixed(2)) : ''}
                                     onChange={(e) => {
                                         const v = parseFloat(e.target.value) || 0;
                                         setVal(acct.name, acct.category === 'debt' ? -v : v);
@@ -2498,7 +2498,7 @@
                                 <p className="text-2xl font-bold">${fmt(Math.abs(currentTotal))}</p>
                             </div>
                             <div className="text-right">
-                                <p className="text-xs opacity-80">vs {prevLabel}</p>
+                                <p className="text-xs opacity-80">vs {prevLabel || 'last'}</p>
                                 <p className={`text-lg font-bold ${totalDelta >= 0 ? 'text-green-300' : 'text-red-300'}`}>
                                     {totalDelta >= 0 ? '+' : '-'}${fmt(Math.abs(totalDelta))}
                                 </p>
@@ -2550,39 +2550,22 @@
                                         {cat.id === 'debt' ? '-' : ''}${fmt(Math.abs(catTotal))}
                                     </span>
                                 </div>
-                                {activeAccounts.map(renderAccountRow)}
+                                {activeAccounts.map(a => renderAccountRow(a, false))}
                                 {dormantAccounts.length > 0 && (
                                     <button
-                                        onClick={() => setExpandDormant(!expandDormant)}
+                                        onClick={() => setExpandedDormant(prev => ({ ...prev, [cat.id]: !prev[cat.id] }))}
                                         className="w-full text-xs text-gray-400 py-2 hover:bg-gray-50 border-t border-gray-100"
                                     >
-                                        {expandDormant ? 'Hide' : 'Show'} {dormantAccounts.length} dormant account{dormantAccounts.length !== 1 ? 's' : ''}
+                                        {expandedDormant[cat.id] ? 'Hide' : 'Show'} {dormantAccounts.length} dormant account{dormantAccounts.length !== 1 ? 's' : ''}
                                     </button>
                                 )}
-                                {expandDormant && dormantAccounts.map(acct => (
-                                    <div key={acct.name} className="flex items-center gap-2 py-2 px-3 border-b border-gray-50 opacity-50">
-                                        <div className="flex-1 min-w-0">
-                                            <div className="text-sm font-medium truncate">{acct.name}</div>
-                                            <div className="text-[11px] text-gray-400">Last: ${fmt(Math.abs(acct.values[prevLabel] || 0))}</div>
-                                        </div>
-                                        {!isLocked && (
-                                            <input
-                                                type="number"
-                                                step="0.01"
-                                                placeholder="0.00"
-                                                value={getCurrentVal(acct) !== null ? Math.abs(getCurrentVal(acct)) : ''}
-                                                onChange={(e) => setVal(acct.name, parseFloat(e.target.value) || 0)}
-                                                className="w-28 text-right text-sm border border-gray-200 rounded-lg px-2 py-1.5"
-                                            />
-                                        )}
-                                    </div>
-                                ))}
+                                {expandedDormant[cat.id] && dormantAccounts.map(a => renderAccountRow(a, true))}
                             </div>
                         );
                     })}
 
                     {/* Insights Section */}
-                    {phase === 'review' || Object.keys(currentValues).length > 3 ? (() => {
+                    {Object.keys(currentValues).length > 3 ? (() => {
                         // Find biggest movers
                         const movers = accounts
                             .map(a => {
@@ -2640,6 +2623,52 @@
                                     <div className="border-t border-gray-100 pt-2 flex justify-between text-sm font-bold">
                                         <span>Net</span>
                                         <span>${fmt(Math.abs(currentTotal))}</span>
+                                    </div>
+                                </div>
+                            </div>
+                        );
+                    })()}
+
+                    {/* Net Worth Trend Chart */}
+                    {(() => {
+                        const labeledQ = quarters.filter(q => q.isLabeled).reverse(); // oldest first
+                        if (labeledQ.length < 2) return null;
+                        const totals = labeledQ.map(q => ({
+                            label: q.label,
+                            total: summaries['TOTAL']?.[q.label] || 0,
+                        }));
+                        const maxVal = Math.max(...totals.map(t => Math.abs(t.total)), 1);
+                        const chartH = 160;
+
+                        return (
+                            <div className="bg-white rounded-lg border border-gray-200 p-3">
+                                <h3 className="font-bold text-sm text-gray-700 mb-3">Net Worth Trend</h3>
+                                <div className="relative" style={{ height: chartH + 30 }}>
+                                    <svg width="100%" height={chartH + 30} viewBox={`0 0 ${totals.length * 60 + 20} ${chartH + 30}`} preserveAspectRatio="none">
+                                        {/* Grid lines */}
+                                        {[0, 0.25, 0.5, 0.75, 1].map((f, i) => (
+                                            <line key={i} x1="0" x2={totals.length * 60 + 20} y1={chartH - chartH * f} y2={chartH - chartH * f} stroke="#f3f4f6" strokeWidth="1" />
+                                        ))}
+                                        {/* Line */}
+                                        <polyline
+                                            fill="none"
+                                            stroke="#6366f1"
+                                            strokeWidth="2.5"
+                                            strokeLinejoin="round"
+                                            points={totals.map((t, i) => `${i * 60 + 30},${chartH - (t.total / maxVal) * (chartH - 10)}`).join(' ')}
+                                        />
+                                        {/* Dots */}
+                                        {totals.map((t, i) => (
+                                            <circle key={i} cx={i * 60 + 30} cy={chartH - (t.total / maxVal) * (chartH - 10)} r="4" fill="#6366f1" />
+                                        ))}
+                                        {/* Labels */}
+                                        {totals.map((t, i) => (
+                                            <text key={i} x={i * 60 + 30} y={chartH + 18} textAnchor="middle" fontSize="9" fill="#9ca3af">{t.label}</text>
+                                        ))}
+                                    </svg>
+                                    {/* Value labels on hover would go here; for now show latest */}
+                                    <div className="absolute top-0 right-2 text-xs text-indigo-600 font-semibold">
+                                        ${fmt(totals[totals.length - 1]?.total || 0)}
                                     </div>
                                 </div>
                             </div>
