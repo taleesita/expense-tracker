@@ -1130,20 +1130,23 @@
                     merchant = merchant || 'Unknown';
 
                     // Look for total/amount — try labeled totals first, then largest dollar amount
+                    // Money regex: handles $1,234.56 / $1234.56 / $12.34 / $1,234,567.89
+                    const moneyRe = '(\\d{1,3}(?:,\\d{3})*\\.\\d{2}|\\d+\\.\\d{2}|\\d{1,3}(?:,\\d{3})+)';
+                    const parseMoney = (s) => parseFloat(s.replace(/,/g, ''));
                     const totalPatterns = [
-                        /(?:grand\s*total|total\s*due|amount\s*due|balance\s*due|total\s*charged?)[\s:]*\$?\s*(\d{1,6}[,.]?\d{0,2})/i,
-                        /(?:total)[\s:]*\$?\s*(\d{1,6}[,.]?\d{0,2})/i,
-                        /(?:amount|subtotal|sub\s*total)[\s:]*\$?\s*(\d{1,6}[,.]?\d{0,2})/i,
+                        new RegExp('(?:grand\\s*total|total\\s*due|amount\\s*due|balance\\s*due|total\\s*charged?)[\\s:]*\\$?\\s*' + moneyRe, 'i'),
+                        new RegExp('(?:total)[\\s:]*\\$?\\s*' + moneyRe, 'i'),
+                        new RegExp('(?:amount|subtotal|sub\\s*total)[\\s:]*\\$?\\s*' + moneyRe, 'i'),
                     ];
                     for (const pat of totalPatterns) {
                         const m = text.match(pat);
-                        if (m) { amount = parseFloat(m[1].replace(',', '')); break; }
+                        if (m) { amount = parseMoney(m[1]); break; }
                     }
                     // Fallback: find all dollar amounts and pick the largest
                     if (!amount) {
-                        const allAmounts = [...text.matchAll(/\$\s*(\d{1,6}[,.]?\d{0,2})/g)];
+                        const allAmounts = [...text.matchAll(new RegExp('\\$\\s*' + moneyRe, 'g'))];
                         if (allAmounts.length) {
-                            const nums = allAmounts.map(m => parseFloat(m[1].replace(',', ''))).filter(n => n > 0);
+                            const nums = allAmounts.map(m => parseMoney(m[1])).filter(n => n > 0);
                             if (nums.length) amount = Math.max(...nums);
                         }
                     }
