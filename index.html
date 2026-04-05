@@ -587,13 +587,6 @@
         const getAccountById = (id) => ALL_ACCOUNTS.find(a => a.id === id);
         const getCategoryById = (id) => CATEGORIES.find(c => c.id === id);
 
-        // Map sheet card names (partial match) to account IDs
-        // Build reverse lookup: exact sheet dropdown value → account ID
-        const SHEET_CARD_TO_ID = {};
-        Object.entries(SHEET_CARD_NAMES).forEach(([id, sheetName]) => {
-            SHEET_CARD_TO_ID[sheetName.toLowerCase()] = id;
-        });
-
         const matchAccountFromSheet = (cardText) => {
             if (!cardText) return '';
             const trimmed = cardText.trim();
@@ -676,6 +669,11 @@
             'mercury_matiteyahu': 'Mercury Matiteyahu LLC',
             'td_savings': 'TD Savings',
         };
+        // Build reverse lookup: exact sheet dropdown value → account ID
+        const SHEET_CARD_TO_ID = {};
+        Object.entries(SHEET_CARD_NAMES).forEach(([id, sheetName]) => {
+            SHEET_CARD_TO_ID[sheetName.toLowerCase()] = id;
+        });
         const getSheetCardName = (accountId) => {
             return SHEET_CARD_NAMES[accountId] || (getAccountById(accountId)?.name || accountId);
         };
