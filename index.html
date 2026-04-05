@@ -21,6 +21,8 @@
         [data-testid="recharts-wrapper"] { width: 100% !important; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
         .no-scrollbar::-webkit-scrollbar { display: none; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes shrink { from { width: 100%; } to { width: 0%; } }
     </style>
 </head>
 <body class="bg-white">
@@ -648,9 +650,23 @@
         };
 
         // Reverse: get sheet-friendly card name from account ID
+        // Map account IDs to the exact dropdown values in the Google Sheet column C
+        const SHEET_CARD_NAMES = {
+            'reserve_chase': 'Reserve (Chase - Credit Card)',
+            'amazon_chase': 'Amazon (Chase - Credit Card)',
+            'united_chase': 'United Explorer (Chase - Credit Card)',
+            'cap1_cc': 'Cap1 (Credit Card)',
+            'carecredit': 'CareCredit',
+            'cap1_jcheck': 'Cap1 JCheck',
+            'cap1_tsaving': 'Cap1 TSaving',
+            'cap1_joint_hy': 'Cap1 Joint HY Savings',
+            'cap1_noa_hy': 'Cap1 Noa HY Savings',
+            'mercury_treatteek': 'Mercury TreatTeek Checking',
+            'mercury_matiteyahu': 'Mercury Matiteyahu LLC',
+            'td_savings': 'TD Savings',
+        };
         const getSheetCardName = (accountId) => {
-            const acct = getAccountById(accountId);
-            return acct ? acct.name : accountId;
+            return SHEET_CARD_NAMES[accountId] || (getAccountById(accountId)?.name || accountId);
         };
 
         // Reverse: get sheet-friendly category name from category ID
@@ -909,8 +925,16 @@
                             isCredit: txnType !== 'charge',  // backwards compat for display
                             originalCurrency: 'USD',
                             originalAmount: amount,
-                            reconciled: (() => { try { return JSON.parse(localStorage.getItem('rec_' + (i + 1))) || false; } catch { return false; } })(),
-                            reconciledLocked: (() => { try { return JSON.parse(localStorage.getItem('rec_locked_' + (i + 1))) || false; } catch { return false; } })(),
+                            reconciled: (() => {
+                                // Key by timestamp+merchant for stable identity across row shifts
+                                const recKey = 'rec_' + btoa(unescape(encodeURIComponent((row[0] || '') + '|' + (row[3] || '')))).slice(0, 24);
+                                try { return JSON.parse(localStorage.getItem(recKey)) || false; } catch { return false; }
+                            })(),
+                            reconciledLocked: (() => {
+                                const recKey = 'rec_locked_' + btoa(unescape(encodeURIComponent((row[0] || '') + '|' + (row[3] || '')))).slice(0, 24);
+                                try { return JSON.parse(localStorage.getItem(recKey)) || false; } catch { return false; }
+                            })(),
+                            _recKey: btoa(unescape(encodeURIComponent((row[0] || '') + '|' + (row[3] || '')))).slice(0, 24),
                             notes: '',
                             person: '',
                         });
@@ -949,7 +973,7 @@
                         getSheetCategoryName(expense.category),            // H: Category
                         expense.receipt || '',                             // I: Receipt
                     ];
-                    console.log('Writing row to sheet:', { merchant: expense.merchant, account: expense.account, txnType: expense.txnType, charge: chargeAmt, deposit: depositAmt });
+                    console.log('Writing row to sheet:', { merchant: expense.merchant, account: expense.account, txnType: expense.txnType, charge: chargeAmt, deposit: depositAmt, receipt: expense.receipt || '(none)' });
                     const resp = await fetch(
                         `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A:I:append?valueInputOption=USER_ENTERED`,
                         {
@@ -3564,6 +3588,7 @@
             const [selectedCard, setSelectedCard] = useState(CREDIT_CARDS[0]?.id || '');
             const [selectedBank, setSelectedBank] = useState(BANK_ACCOUNTS[0]?.id || '');
             const [toast, setToast] = useState('');
+            const [confirmationData, setConfirmationData] = useState(null);
             const [testMode, setTestMode] = useState(_testMode);
 
             const handleToggleTestMode = async () => {
@@ -3637,18 +3662,34 @@
             const handleAddExpense = async (expenseData) => {
                 pushUndo(expenses);
                 if (expenseData._dual) {
-                    // Dual-entry: write both rows, skip refresh until the last one
                     const entries = expenseData.entries;
                     for (let i = 0; i < entries.length; i++) {
                         const isLast = i === entries.length - 1;
                         await appendExpense(entries[i], { skipRefresh: !isLast });
                     }
-                    setToast('Both entries added');
+                    // Show confirmation for dual entry
+                    setConfirmationData({
+                        isDual: true,
+                        entries: entries,
+                        timestamp: new Date().toLocaleString(),
+                    });
                 } else {
                     await appendExpense(expenseData);
-                    setToast('Expense added');
+                    // Show confirmation summary
+                    setConfirmationData({
+                        isDual: false,
+                        merchant: expenseData.merchant,
+                        amount: expenseData.amount,
+                        category: expenseData.category,
+                        account: expenseData.account,
+                        txnType: expenseData.txnType,
+                        date: expenseData.date,
+                        receipt: expenseData.receipt || null,
+                        person: expenseData.person,
+                        timestamp: new Date().toLocaleString(),
+                    });
                 }
-                setTimeout(() => setToast(''), 5000);
+                setTimeout(() => setConfirmationData(null), 10000);
             };
 
             const handleUpdateExpense = async (rowIndex, updated) => {
@@ -3669,8 +3710,9 @@
                 const expense = expenses.find(e => e.rowIndex === rowIndex);
                 if (expense) {
                     pushUndo(expenses);
-                    // Save reconcile state to localStorage (no sheet column for this)
-                    try { localStorage.setItem('rec_' + rowIndex, JSON.stringify(reconciled)); } catch {}
+                    // Save reconcile state to localStorage keyed by stable identity
+                    const key = expense._recKey;
+                    try { localStorage.setItem('rec_' + key, JSON.stringify(reconciled)); } catch {}
                     // Update in-memory state instantly — no network call needed
                     setExpenses(prev => prev.map(e => e.rowIndex === rowIndex ? { ...e, reconciled } : e));
                 }
@@ -3680,7 +3722,8 @@
             const handleLockItems = (rowIndexes) => {
                 pushUndo(expenses);
                 rowIndexes.forEach(ri => {
-                    try { localStorage.setItem('rec_locked_' + ri, JSON.stringify(true)); } catch {}
+                    const exp = expenses.find(e => e.rowIndex === ri);
+                    if (exp) try { localStorage.setItem('rec_locked_' + exp._recKey, JSON.stringify(true)); } catch {}
                 });
                 setExpenses(prev => prev.map(e => rowIndexes.includes(e.rowIndex) ? { ...e, reconciledLocked: true } : e));
             };
@@ -3689,7 +3732,8 @@
             const handleClearUnlocked = (rowIndexes) => {
                 pushUndo(expenses);
                 rowIndexes.forEach(ri => {
-                    try { localStorage.setItem('rec_' + ri, JSON.stringify(false)); } catch {}
+                    const exp = expenses.find(e => e.rowIndex === ri);
+                    if (exp) try { localStorage.setItem('rec_' + exp._recKey, JSON.stringify(false)); } catch {}
                 });
                 setExpenses(prev => prev.map(e => rowIndexes.includes(e.rowIndex) ? { ...e, reconciled: false } : e));
             };
@@ -3893,20 +3937,95 @@
                         ))}
                     </div>
 
-                    {/* Toast with Undo */}
-                    {toast && (
-                        <div className="fixed bottom-20 left-1/2 transform -translate-x-1/2 bg-gray-900 text-white px-4 py-2.5 rounded-lg z-40 flex items-center gap-3 shadow-lg">
-                            <span className="text-sm">{toast}</span>
-                            {canUndo && (
-                                <button
-                                    onClick={handleUndo}
-                                    className="text-sm font-bold text-blue-300 hover:text-blue-100 uppercase tracking-wide"
-                                >
-                                    Undo
-                                </button>
-                            )}
-                        </div>
-                    )}
+                    {/* Confirmation card after submission */}
+                    {confirmationData && (() => {
+                        const d = confirmationData;
+                        const getCatDisplay = (catId) => {
+                            const cat = CATEGORIES.find(c => c.id === catId);
+                            return cat ? `${cat.emoji} ${cat.name}` : catId;
+                        };
+                        const getAcctDisplay = (acctId) => {
+                            const acct = ALL_ACCOUNTS.find(a => a.id === acctId);
+                            return acct ? acct.name : acctId;
+                        };
+                        const fmtAmt = (v) => parseFloat(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+                        if (d.isDual) {
+                            return (
+                                <div className="fixed bottom-20 left-4 right-4 bg-white rounded-xl shadow-2xl border border-green-200 z-50 p-4 max-w-md mx-auto" style={{ animation: 'fadeIn 0.3s ease' }}>
+                                    <div className="flex items-center justify-between mb-3">
+                                        <div className="flex items-center gap-2">
+                                            <span className="text-green-500 text-lg">✓</span>
+                                            <span className="font-bold text-sm text-gray-800">Dual Entry Added</span>
+                                        </div>
+                                        <button onClick={() => setConfirmationData(null)} className="text-gray-400 hover:text-gray-600 text-xs">✕</button>
+                                    </div>
+                                    {d.entries.map((entry, idx) => (
+                                        <div key={idx} className={`text-xs text-gray-600 py-1.5 ${idx > 0 ? 'border-t border-gray-100 mt-1.5' : ''}`}>
+                                            <div className="flex justify-between"><span className="text-gray-400">Account</span><span className="font-medium">{getAcctDisplay(entry.account)}</span></div>
+                                            <div className="flex justify-between"><span className="text-gray-400">Type</span><span className={entry.txnType === 'deposit' ? 'text-green-600' : 'text-red-600'}>{entry.txnType === 'deposit' ? 'Deposit' : 'Charge'} ${fmtAmt(entry.amount)}</span></div>
+                                        </div>
+                                    ))}
+                                    {canUndo && <button onClick={() => { handleUndo(); setConfirmationData(null); }} className="mt-2 w-full text-center text-xs font-bold text-blue-600 py-1.5 bg-blue-50 rounded-lg">Undo</button>}
+                                    <div className="mt-2 w-full bg-gray-100 rounded-full h-1 overflow-hidden"><div className="bg-green-400 h-full" style={{ animation: 'shrink 10s linear forwards' }}></div></div>
+                                </div>
+                            );
+                        }
+
+                        return (
+                            <div className="fixed bottom-20 left-4 right-4 bg-white rounded-xl shadow-2xl border border-green-200 z-50 p-4 max-w-md mx-auto" style={{ animation: 'fadeIn 0.3s ease' }}>
+                                <div className="flex items-center justify-between mb-3">
+                                    <div className="flex items-center gap-2">
+                                        <span className="text-green-500 text-lg">✓</span>
+                                        <span className="font-bold text-sm text-gray-800">Expense Added</span>
+                                    </div>
+                                    <button onClick={() => setConfirmationData(null)} className="text-gray-400 hover:text-gray-600 text-xs">✕</button>
+                                </div>
+                                <div className="space-y-1.5 text-xs">
+                                    <div className="flex justify-between"><span className="text-gray-400">Merchant</span><span className="font-semibold text-gray-800">{d.merchant}</span></div>
+                                    <div className="flex justify-between"><span className="text-gray-400">Amount</span><span className={`font-semibold ${d.txnType === 'charge' ? 'text-red-600' : 'text-green-600'}`}>${fmtAmt(d.amount)}</span></div>
+                                    <div className="flex justify-between"><span className="text-gray-400">Category</span><span className="text-gray-700">{getCatDisplay(d.category)}</span></div>
+                                    <div className="flex justify-between"><span className="text-gray-400">Account</span><span className="text-gray-700">{getAcctDisplay(d.account)}</span></div>
+                                    <div className="flex justify-between"><span className="text-gray-400">Date</span><span className="text-gray-700">{d.date}</span></div>
+                                    <div className="flex justify-between"><span className="text-gray-400">Type</span><span className="text-gray-700">{d.txnType === 'charge' ? 'Debit' : d.txnType === 'deposit' ? 'Deposit' : d.txnType === 'credit_refund' ? 'Credit/Refund' : d.txnType}</span></div>
+                                    <div className="flex justify-between"><span className="text-gray-400">Sheet Col C</span><span className="text-gray-700 text-[11px]">{SHEET_CARD_NAMES[d.account] || d.account}</span></div>
+                                    {d.receipt && (() => {
+                                        const driveMatch = d.receipt.match(/(?:id=|\/d\/)([a-zA-Z0-9_-]+)/);
+                                        const driveFileId = driveMatch ? driveMatch[1] : null;
+                                        return (
+                                            <div className="pt-2 border-t border-gray-100">
+                                                <div className="flex justify-between items-center mb-1.5">
+                                                    <span className="text-gray-400">Receipt</span>
+                                                    <a href={d.receipt} target="_blank" rel="noopener" className="text-blue-600 font-medium flex items-center gap-1 text-[11px]">
+                                                        📎 Open in Drive
+                                                    </a>
+                                                </div>
+                                                {driveFileId && (
+                                                    <a href={d.receipt} target="_blank" rel="noopener" className="block rounded-lg overflow-hidden border border-gray-100 bg-gray-50">
+                                                        <img
+                                                            src={`https://drive.google.com/thumbnail?id=${driveFileId}&sz=w400`}
+                                                            alt="Receipt"
+                                                            className="w-full max-h-32 object-contain"
+                                                            style={{ minHeight: 60 }}
+                                                            onError={(e) => { e.target.style.display = 'none'; }}
+                                                        />
+                                                    </a>
+                                                )}
+                                            </div>
+                                        );
+                                    })()}
+                                    {!d.receipt && (
+                                        <div className="flex justify-between items-center pt-1 border-t border-gray-100">
+                                            <span className="text-gray-400">Receipt</span>
+                                            <span className="text-orange-500 text-[11px]">⚠ No file attached</span>
+                                        </div>
+                                    )}
+                                </div>
+                                {canUndo && <button onClick={() => { handleUndo(); setConfirmationData(null); }} className="mt-3 w-full text-center text-xs font-bold text-blue-600 py-1.5 bg-blue-50 rounded-lg">Undo</button>}
+                                <div className="mt-2 w-full bg-gray-100 rounded-full h-1 overflow-hidden"><div className="bg-green-400 h-full" style={{ animation: 'shrink 10s linear forwards' }}></div></div>
+                            </div>
+                        );
+                    })()}
                 </div>
             );
         };
