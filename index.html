@@ -305,20 +305,9 @@
                     return d > anchor.afterDate;
                 });
             }
-            const balance = starting + expenses.reduce((sum, e) => {
-                return sum + (e.rawDeposit || 0) - (e.rawCharge || 0);
+            return starting + expenses.reduce((sum, e) => {
+                return sum + (e.rawDeposit || 0) - (e.rawCharge || 0) - (e.fee || 0);
             }, 0);
-            // Debug: log details for problem accounts
-            if (['cap1_jcheck', 'cap1_joint_hy', 'td_savings'].includes(accountId)) {
-                const totalDeposits = expenses.reduce((s, e) => s + (e.rawDeposit || 0), 0);
-                const totalCharges = expenses.reduce((s, e) => s + (e.rawCharge || 0), 0);
-                console.log(`[BALANCE DEBUG] ${accountId}: ${expenses.length} txns, deposits=$${totalDeposits.toFixed(2)}, charges=$${totalCharges.toFixed(2)}, balance=$${balance.toFixed(2)}`);
-                // Log ALL transactions with amounts for full audit
-                expenses.forEach((e, i) => {
-                    console.log(`  [${i}] ${e.date || e.timestamp} | ${e.merchant} | col_c="${e.accountRaw}" | charge=${e.rawCharge} | deposit=${e.rawDeposit}`);
-                });
-            }
-            return balance;
         };
 
         const MERCHANT_TO_CATEGORY = {
@@ -907,7 +896,8 @@
                     const parsed = [];
                     for (let i = 1; i < rows.length; i++) {
                         const row = rows[i];
-                        if (!row || !row[0]) continue;
+                        if (!row || row.length < 3) continue;  // need at least cols A-C
+                        // Skip truly empty rows but keep rows with data even if timestamp (A) is empty
                         const parseNum = (v) => { const n = parseFloat(String(v || '').replace(/[,$]/g, '')); return isNaN(n) ? 0 : n; };
                         const charge = parseNum(row[4]);   // E: Charge/Debit (can be negative for refunds)
                         const deposit = parseNum(row[5]);  // F: Deposit
@@ -939,7 +929,7 @@
                             account: matchAccountFromSheet(row[2]),      // C: Card
                             accountRaw: row[2] || '',                   // Keep original for writing back
                             receipt: row[8] || '',                      // I: Receipt
-                            fee: parseFloat(row[6]) || 0,              // G: Fee
+                            fee: parseNum(row[6]),                      // G: Fee (parseNum strips $ and commas)
                             txnType: txnType,
                             isCredit: txnType !== 'charge',  // backwards compat for display
                             originalCurrency: 'USD',
