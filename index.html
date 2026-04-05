@@ -292,6 +292,183 @@
             'cap1_cc': { afterDate: '2026-03-20', startingBalance: 0 },
         };
 
+        // ============ RECURRING TRANSACTIONS ============
+        // Transactions that should be logged regularly — used for in-app reminders
+        const RECURRING_TRANSACTIONS = [
+            {
+                id: 'doug_paycheck',
+                label: "Doug's Paycheck",
+                merchant: 'Deposit - Doug Disney Paycheck',
+                account: 'cap1_jcheck',
+                category: 'work_income',
+                txnType: 'deposit',
+                frequency: 'weekly',       // checked every 7 days
+                dayHint: 'wednesday',       // typical pay day
+                approxAmount: 2127,
+                matchMerchant: 'doug disney paycheck',
+            },
+            {
+                id: 'taly_paycheck',
+                label: "Taly's Paystub (JCheck)",
+                merchant: 'Paystub - CompanyCam',
+                account: 'cap1_jcheck',
+                category: 'work_income',
+                txnType: 'deposit',
+                frequency: 'biweekly',
+                approxAmount: 3916,
+                matchMerchant: 'paystub - companycam',
+                matchAccount: 'cap1_jcheck',
+            },
+            {
+                id: 'taly_paycheck_tsav',
+                label: "Taly's Paystub (TSaving)",
+                merchant: 'Paystub - CompanyCam',
+                account: 'cap1_tsaving',
+                category: 'work_income',
+                txnType: 'deposit',
+                frequency: 'biweekly',
+                approxAmount: 150,
+                matchMerchant: 'paystub - companycam',
+                matchAccount: 'cap1_tsaving',
+            },
+            {
+                id: 'interest_joint_hy',
+                label: 'Interest — Joint HY',
+                merchant: 'Interest',
+                account: 'cap1_joint_hy',
+                category: 'other',
+                txnType: 'deposit',
+                frequency: 'monthly_eom',  // end of month
+                approxAmount: 120,
+                matchMerchant: 'interest',
+                matchAccount: 'cap1_joint_hy',
+            },
+            {
+                id: 'interest_tsaving',
+                label: 'Interest — TSaving',
+                merchant: 'Interest',
+                account: 'cap1_tsaving',
+                category: 'other',
+                txnType: 'deposit',
+                frequency: 'monthly_eom',
+                approxAmount: 11,
+                matchMerchant: 'interest',
+                matchAccount: 'cap1_tsaving',
+            },
+            {
+                id: 'interest_noa_hy',
+                label: 'Interest — Noa HY',
+                merchant: 'Interest',
+                account: 'cap1_noa_hy',
+                category: 'other',
+                txnType: 'deposit',
+                frequency: 'monthly_eom',
+                approxAmount: 0.5,
+                matchMerchant: 'interest',
+                matchAccount: 'cap1_noa_hy',
+            },
+            {
+                id: 'interest_td',
+                label: 'Interest — TD Savings',
+                merchant: 'Interest',
+                account: 'td_savings',
+                category: 'other',
+                txnType: 'deposit',
+                frequency: 'monthly_eom',
+                approxAmount: 0.5,
+                matchMerchant: 'interest',
+                matchAccount: 'td_savings',
+            },
+        ];
+
+        // Check which recurring transactions are overdue based on existing expenses
+        const getOverdueRecurring = (expenses) => {
+            const now = new Date();
+            const overdue = [];
+            for (const rec of RECURRING_TRANSACTIONS) {
+                // Find the most recent matching transaction
+                const matches = expenses.filter(e => {
+                    const merchantMatch = e.merchant && e.merchant.toLowerCase().includes(rec.matchMerchant);
+                    const accountMatch = !rec.matchAccount || e.account === rec.matchAccount;
+                    return merchantMatch && accountMatch;
+                });
+                // Sort by date descending
+                const sorted = matches.sort((a, b) => {
+                    const da = new Date(a.date || a.timestamp);
+                    const db = new Date(b.date || b.timestamp);
+                    return db - da;
+                });
+                const lastEntry = sorted[0];
+                const lastDate = lastEntry ? new Date(lastEntry.date || lastEntry.timestamp) : null;
+                const daysSince = lastDate ? Math.floor((now - lastDate) / (1000 * 60 * 60 * 24)) : 999;
+
+                let isOverdue = false;
+                let dueLabel = '';
+                if (rec.frequency === 'weekly' && daysSince > 8) {
+                    isOverdue = true;
+                    dueLabel = daysSince > 999 ? 'Never logged' : `Last logged ${daysSince} days ago`;
+                } else if (rec.frequency === 'biweekly' && daysSince > 16) {
+                    isOverdue = true;
+                    dueLabel = daysSince > 999 ? 'Never logged' : `Last logged ${daysSince} days ago`;
+                } else if (rec.frequency === 'monthly_eom') {
+                    // Check if last month's interest has been logged
+                    const lastMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+                    const lastMonthEnd = new Date(now.getFullYear(), now.getMonth(), 0);
+                    const hasLastMonth = matches.some(e => {
+                        const d = new Date(e.date || e.timestamp);
+                        return d >= lastMonth && d <= lastMonthEnd;
+                    });
+                    // Only nag after the 2nd of the new month
+                    if (!hasLastMonth && now.getDate() >= 2) {
+                        isOverdue = true;
+                        const monthName = lastMonth.toLocaleString('en-US', { month: 'short' });
+                        dueLabel = `${monthName} not yet logged`;
+                    }
+                }
+                if (isOverdue) {
+                    overdue.push({ ...rec, dueLabel, lastDate: lastDate ? lastDate.toLocaleDateString() : null, lastAmount: lastEntry ? (lastEntry.rawDeposit || lastEntry.rawCharge || lastEntry.amount) : null });
+                }
+            }
+            return overdue;
+        };
+
+        // ============ MERCHANT → ACCOUNT SUGGESTION ============
+        // Build from historical data at runtime; returns the most common account for a merchant
+        const buildMerchantAccountMap = (expenses) => {
+            const map = {}; // merchant_lower → { accountId: count }
+            for (const e of expenses) {
+                if (!e.merchant || !e.account) continue;
+                const key = e.merchant.toLowerCase().trim();
+                if (!map[key]) map[key] = {};
+                map[key][e.account] = (map[key][e.account] || 0) + 1;
+            }
+            // Resolve to top account per merchant (must have 3+ entries and 70%+ consistency)
+            const result = {};
+            for (const [merchant, accts] of Object.entries(map)) {
+                const total = Object.values(accts).reduce((s, n) => s + n, 0);
+                if (total < 2) continue;
+                const sorted = Object.entries(accts).sort((a, b) => b[1] - a[1]);
+                const [topAcct, topCount] = sorted[0];
+                if (topCount / total >= 0.7) {
+                    result[merchant] = topAcct;
+                }
+            }
+            return result;
+        };
+
+        // Fuzzy-search merchant suggestion: checks if typed text matches any known merchant
+        const suggestAccountForMerchant = (merchantText, merchantAccountMap) => {
+            if (!merchantText || merchantText.length < 3) return null;
+            const lower = merchantText.toLowerCase().trim();
+            // Exact match first
+            if (merchantAccountMap[lower]) return merchantAccountMap[lower];
+            // Partial match: find merchants that contain the typed text
+            for (const [merchant, acct] of Object.entries(merchantAccountMap)) {
+                if (merchant.includes(lower) || lower.includes(merchant)) return acct;
+            }
+            return null;
+        };
+
         // Calculate account balance from raw sheet columns
         // If an anchor exists, only count transactions after the anchor date
         const calcAccountBalance = (accountExpenses, accountId) => {
@@ -1494,7 +1671,7 @@
             return parseDateToISO(expense.date || expense.timestamp);
         };
 
-        const AddExpenseModal = ({ isOpen, onClose, onAdd, onUpdate, editExpense, token, userName, expenses: allExpenses }) => {
+        const AddExpenseModal = ({ isOpen, onClose, onAdd, onUpdate, editExpense, token, userName, expenses: allExpenses, merchantAccountMap }) => {
             const isEdit = !!editExpense;
             const [merchant, setMerchant] = useState('');
             const [amount, setAmount] = useState('');
@@ -1528,6 +1705,21 @@
                     setTxnType(editExpense.txnType || 'charge');
                     setOriginalCurrency(editExpense.originalCurrency || 'USD');
                     setOriginalAmount(editExpense.originalAmount?.toString() || '');
+                } else if (editExpense?._prefill && isOpen) {
+                    // Pre-fill from recurring reminder quick-add
+                    setMerchant(editExpense.merchant || '');
+                    setAmount(editExpense.amount?.toString() || '');
+                    setDate(new Date().toISOString().split('T')[0]);
+                    setCategory(editExpense.category || 'other');
+                    setAccount(editExpense.account || '');
+                    setNotes('');
+                    setReceipt('');
+                    setTxnType(editExpense.txnType || 'charge');
+                    setOriginalCurrency('USD');
+                    setOriginalAmount('');
+                    setSecondaryAccount('');
+                    setPrimaryMerchantOverride('');
+                    setSecondaryMerchantOverride('');
                 } else if (!editExpense && isOpen) {
                     setMerchant('');
                     setAmount('');
@@ -1993,6 +2185,21 @@
                                                 ))}
                                             </optgroup>
                                         </select>
+                                        {/* Account suggestion based on merchant history */}
+                                        {(() => {
+                                            const suggested = !account && merchant.length >= 3 && merchantAccountMap ? suggestAccountForMerchant(merchant, merchantAccountMap) : null;
+                                            const suggestedAcct = suggested ? getAccountById(suggested) : null;
+                                            if (!suggestedAcct) return null;
+                                            return (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => { setAccount(suggested); setValidationErrors(prev => ({...prev, account: false})); }}
+                                                    className="mt-1 px-2.5 py-1 bg-blue-50 border border-blue-200 rounded-full text-xs text-blue-700 hover:bg-blue-100 transition-colors"
+                                                >
+                                                    💡 Usually: <span className="font-semibold">{suggestedAcct.name}</span> — tap to use
+                                                </button>
+                                            );
+                                        })()}
                                     </div>
 
                                     <div className="relative">
@@ -3743,6 +3950,37 @@
             const [toast, setToast] = useState('');
             const [confirmationData, setConfirmationData] = useState(null);
             const [testMode, setTestMode] = useState(_testMode);
+            const [dismissedReminders, setDismissedReminders] = useState(() => {
+                try { return JSON.parse(localStorage.getItem('dismissed_reminders') || '{}'); } catch { return {}; }
+            });
+
+            // Build merchant→account map and overdue recurring list
+            const merchantAccountMap = useMemo(() => buildMerchantAccountMap(expenses), [expenses]);
+            const overdueRecurring = useMemo(() => getOverdueRecurring(expenses), [expenses]);
+            const visibleReminders = overdueRecurring.filter(r => {
+                const dismissedAt = dismissedReminders[r.id];
+                if (!dismissedAt) return true;
+                // Re-show after 24 hours
+                return Date.now() - dismissedAt > 24 * 60 * 60 * 1000;
+            });
+            const dismissReminder = (id) => {
+                const updated = { ...dismissedReminders, [id]: Date.now() };
+                setDismissedReminders(updated);
+                localStorage.setItem('dismissed_reminders', JSON.stringify(updated));
+            };
+
+            // Quick-add from reminder: pre-fill the add modal
+            const handleQuickAdd = (rec) => {
+                setEditExpense({
+                    _prefill: true,
+                    merchant: rec.merchant,
+                    account: rec.account,
+                    category: rec.category,
+                    txnType: rec.txnType,
+                    amount: rec.lastAmount || rec.approxAmount || '',
+                });
+                setShowAddModal(true);
+            };
 
             const handleToggleTestMode = async () => {
                 if (!_testMode) {
@@ -3986,6 +4224,33 @@
                             </div>
                         ) : (
                             <>
+                                {/* Recurring transaction reminders */}
+                                {visibleReminders.length > 0 && activeTab === 'home' && (
+                                    <div className="px-4 pt-2 pb-1 space-y-2">
+                                        {visibleReminders.map(rec => (
+                                            <div key={rec.id} className="flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2.5">
+                                                <span className="text-lg">⏰</span>
+                                                <div className="flex-1 min-w-0">
+                                                    <p className="text-sm font-semibold text-amber-900 truncate">{rec.label}</p>
+                                                    <p className="text-xs text-amber-600">{rec.dueLabel}{rec.lastAmount ? ` · Last: $${Number(rec.lastAmount).toFixed(2)}` : ''}</p>
+                                                </div>
+                                                <button
+                                                    onClick={() => handleQuickAdd(rec)}
+                                                    className="px-3 py-1.5 bg-amber-500 text-white rounded-lg text-xs font-bold hover:bg-amber-600 whitespace-nowrap"
+                                                >
+                                                    + Log
+                                                </button>
+                                                <button
+                                                    onClick={() => dismissReminder(rec.id)}
+                                                    className="p-1 text-amber-400 hover:text-amber-600"
+                                                    title="Dismiss for 24h"
+                                                >
+                                                    ✕
+                                                </button>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
                                 {activeTab === 'home' && <HomeTab expenses={expenses} onEdit={handleEditExpense} onNavigateToCard={(id) => { setSelectedCard(id); setActiveTab('cards'); }} onNavigateToBank={(id) => { setSelectedBank(id); setActiveTab('banks'); }} />}
 
                                 {activeTab === 'all' && (
@@ -4068,6 +4333,7 @@
                         token={token}
                         userName={user?.name}
                         expenses={expenses}
+                        merchantAccountMap={merchantAccountMap}
                     />
 
                     {/* Bottom Navigation */}
