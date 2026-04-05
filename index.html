@@ -984,6 +984,53 @@
                     );
                     const result = await resp.json();
                     console.log('Sheet append result:', result);
+
+                    // Copy data validation (dropdowns) and formatting from row 2 to the new row
+                    try {
+                        const updatedRange = result?.updates?.updatedRange || '';
+                        const rowMatch = updatedRange.match(/!A(\d+):/);
+                        if (rowMatch) {
+                            const newRowNum = parseInt(rowMatch[1]);
+                            // Get the sheetId for the 💸 tab
+                            const metaResp = await fetch(
+                                `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}?fields=sheets(properties)`,
+                                { headers: { 'Authorization': `Bearer ${token}` } }
+                            );
+                            const metaData = await metaResp.json();
+                            const tabSheet = (metaData.sheets || []).find(s => s.properties?.title === SHEET_TAB);
+                            const sheetId = tabSheet?.properties?.sheetId ?? 0;
+
+                            // CopyPaste just data validation from row 2 to new row (cols A-I = 0-8)
+                            await fetch(
+                                `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}:batchUpdate`,
+                                {
+                                    method: 'POST',
+                                    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ requests: [
+                                        {
+                                            copyPaste: {
+                                                source: { sheetId, startRowIndex: 1, endRowIndex: 2, startColumnIndex: 0, endColumnIndex: 9 },
+                                                destination: { sheetId, startRowIndex: newRowNum - 1, endRowIndex: newRowNum, startColumnIndex: 0, endColumnIndex: 9 },
+                                                pasteType: 'PASTE_DATA_VALIDATION'
+                                            }
+                                        },
+                                        // Left-align column I (Receipt link) in the new row
+                                        {
+                                            repeatCell: {
+                                                range: { sheetId, startRowIndex: newRowNum - 1, endRowIndex: newRowNum, startColumnIndex: 8, endColumnIndex: 9 },
+                                                cell: { userEnteredFormat: { horizontalAlignment: 'LEFT' } },
+                                                fields: 'userEnteredFormat.horizontalAlignment'
+                                            }
+                                        }
+                                    ]})
+                                }
+                            );
+                            console.log('Applied data validation & alignment to row', newRowNum);
+                        }
+                    } catch (fmtErr) {
+                        console.warn('Could not apply formatting to new row:', fmtErr);
+                    }
+
                     if (!skipRefresh) await fetchExpenses();
                 } catch (err) {
                     console.error('Failed to append expense:', err);
@@ -1455,6 +1502,9 @@
             const [secondaryMerchantOverride, setSecondaryMerchantOverride] = useState('');
             const isDualEntry = txnType === 'card_payment' || txnType === 'transfer';
             const [originalAmount, setOriginalAmount] = useState('');
+            const [validationErrors, setValidationErrors] = useState({});
+            const [isDragging, setIsDragging] = useState(false);
+            const dragCounter = useRef(0);
 
             // Pre-fill when editing
             useEffect(() => {
@@ -1558,12 +1608,14 @@
                         uploadedReceiptUrl.current = url;
                         setReceipt(url);
                     } else {
-                        alert('Upload failed — please try again');
+                        setValidationErrors(prev => ({...prev, upload: 'Upload failed — please try again'}));
+                        setTimeout(() => setValidationErrors(prev => ({...prev, upload: false})), 5000);
                     }
                 } catch (err) {
                     setShowOCRSpinner(false);
                     console.error('Receipt upload error:', err);
-                    alert('Upload failed: ' + err.message);
+                    setValidationErrors(prev => ({...prev, upload: 'Upload failed: ' + err.message}));
+                    setTimeout(() => setValidationErrors(prev => ({...prev, upload: false})), 5000);
                 }
             };
 
@@ -1577,22 +1629,25 @@
             };
 
             const handleAdd = () => {
-                const missing = [];
-                if (!account) missing.push('account');
-                if (!amount) missing.push('amount');
-                if (!date) missing.push('date');
-                if (!txnType) missing.push('transaction type');
+                const errors = {};
+                if (!account) errors.account = true;
+                if (!amount) errors.amount = true;
+                if (!date) errors.date = true;
+                if (!txnType) errors.txnType = true;
                 if (isDualEntry) {
-                    if (!secondaryAccount) missing.push(txnType === 'card_payment' ? 'paying from account' : 'transfer to account');
-                    if (account === secondaryAccount) { alert('Cannot transfer to the same account'); return; }
+                    if (!secondaryAccount) errors.secondaryAccount = true;
+                    if (account && secondaryAccount && account === secondaryAccount) errors.secondaryAccount = true;
                 } else {
-                    if (!merchant) missing.push('merchant');
-                    if (!category || category === 'other') missing.push('category');
+                    if (!merchant) errors.merchant = true;
+                    if (!category || category === 'other') errors.category = true;
                 }
-                if (missing.length) {
-                    alert('Please fill in: ' + missing.join(', '));
+                if (Object.keys(errors).length) {
+                    setValidationErrors(errors);
+                    // Auto-clear after 4 seconds
+                    setTimeout(() => setValidationErrors({}), 4000);
                     return;
                 }
+                setValidationErrors({});
                 // Rename Drive file if merchant was updated after upload
                 if (uploadedReceiptUrl.current) {
                     const dateStr = date.replace(/-/g, '.');
@@ -1680,11 +1735,76 @@
                 onClose();
             };
 
+            // Check if form has unsaved user input
+            const formHasContent = merchant || amount || receipt || notes || (account && !isEdit) || (isDualEntry && secondaryAccount);
+
+            const handleBackdropClick = (e) => {
+                // Only if clicking directly on the backdrop (not the form)
+                if (e.target === e.currentTarget) {
+                    if (formHasContent && !isEdit) {
+                        if (confirm('You have unsaved changes. Discard?')) {
+                            handleCancel();
+                        }
+                    } else {
+                        handleCancel();
+                    }
+                }
+            };
+
+            // Drag and drop handlers
+            const handleDragEnter = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                dragCounter.current++;
+                if (e.dataTransfer.items && e.dataTransfer.items.length > 0) {
+                    setIsDragging(true);
+                }
+            };
+            const handleDragLeave = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                dragCounter.current--;
+                if (dragCounter.current === 0) setIsDragging(false);
+            };
+            const handleDragOver = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+            };
+            const handleDrop = (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setIsDragging(false);
+                dragCounter.current = 0;
+                const files = e.dataTransfer?.files;
+                if (files && files.length > 0) {
+                    const file = files[0];
+                    if (file.type.startsWith('image/') || file.type === 'application/pdf') {
+                        handleReceiptUpload(file);
+                    }
+                }
+            };
+
             if (!isOpen) return null;
 
             return (
-                <div className="fixed inset-0 bg-black bg-opacity-50 z-40 flex items-end">
-                    <div className="bg-white w-full rounded-t-2xl p-6 max-h-[90vh] overflow-y-auto">
+                <div className="fixed inset-0 bg-black bg-opacity-50 z-40 flex items-end" onClick={handleBackdropClick}>
+                    <div
+                        className="bg-white w-full rounded-t-2xl p-6 max-h-[90vh] overflow-y-auto relative"
+                        onDragEnter={handleDragEnter}
+                        onDragLeave={handleDragLeave}
+                        onDragOver={handleDragOver}
+                        onDrop={handleDrop}
+                    >
+                        {/* Drag overlay */}
+                        {isDragging && (
+                            <div className="absolute inset-0 bg-blue-500 bg-opacity-10 border-4 border-dashed border-blue-400 rounded-t-2xl z-50 flex items-center justify-center pointer-events-none">
+                                <div className="bg-white rounded-xl px-8 py-6 shadow-xl text-center">
+                                    <div className="text-4xl mb-2">📎</div>
+                                    <div className="text-blue-600 font-bold text-lg">Drop receipt here</div>
+                                    <div className="text-gray-400 text-sm mt-1">Image or PDF</div>
+                                </div>
+                            </div>
+                        )}
                         <div className="flex justify-between items-center mb-4">
                             <h2 className="text-2xl font-bold">{isEdit ? 'Edit Transaction' : 'Add Transaction'}</h2>
                             <button onClick={handleCancel} className="p-1 hover:bg-gray-200 rounded">
@@ -1757,8 +1877,8 @@
                                         </label>
                                         <select
                                             value={account}
-                                            onChange={(e) => { setAccount(e.target.value); setPrimaryMerchantOverride(''); setSecondaryMerchantOverride(''); }}
-                                            className="w-full border rounded-lg px-3 py-2 text-sm appearance-none bg-white"
+                                            onChange={(e) => { setAccount(e.target.value); setPrimaryMerchantOverride(''); setSecondaryMerchantOverride(''); setValidationErrors(prev => ({...prev, account: false})); }}
+                                            className={`w-full border rounded-lg px-3 py-2 text-sm appearance-none bg-white ${validationErrors.account ? 'border-red-500 border-2 bg-red-50' : ''}`}
                                             style={{ backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236B7280' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E\")", backgroundRepeat: 'no-repeat', backgroundPosition: 'right 12px center' }}
                                         >
                                             <option value="">{txnType === 'card_payment' ? 'Select card to pay off' : 'Select account to transfer from'}</option>
@@ -1800,8 +1920,8 @@
                                         </label>
                                         <select
                                             value={secondaryAccount}
-                                            onChange={(e) => { setSecondaryAccount(e.target.value); setPrimaryMerchantOverride(''); setSecondaryMerchantOverride(''); }}
-                                            className="w-full border rounded-lg px-3 py-2 text-sm appearance-none bg-white"
+                                            onChange={(e) => { setSecondaryAccount(e.target.value); setPrimaryMerchantOverride(''); setSecondaryMerchantOverride(''); setValidationErrors(prev => ({...prev, secondaryAccount: false})); }}
+                                            className={`w-full border rounded-lg px-3 py-2 text-sm appearance-none bg-white ${validationErrors.secondaryAccount ? 'border-red-500 border-2 bg-red-50' : ''}`}
                                             style={{ backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236B7280' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E\")", backgroundRepeat: 'no-repeat', backgroundPosition: 'right 12px center' }}
                                         >
                                             <option value="">{txnType === 'card_payment' ? 'Select account paying from' : 'Select account to transfer to'}</option>
@@ -1831,14 +1951,14 @@
                                             placeholder="Amount"
                                             step="0.01"
                                             value={amount}
-                                            onChange={(e) => setAmount(e.target.value)}
-                                            className="flex-1 border rounded-lg px-4 py-2.5"
+                                            onChange={(e) => { setAmount(e.target.value); setValidationErrors(prev => ({...prev, amount: false})); }}
+                                            className={`flex-1 border rounded-lg px-4 py-2.5 ${validationErrors.amount ? 'border-red-500 border-2 bg-red-50 placeholder-red-400' : ''}`}
                                         />
                                         <input
                                             type="date"
                                             value={date}
-                                            onChange={(e) => setDate(e.target.value)}
-                                            className="flex-1 border rounded-lg px-4 py-2.5"
+                                            onChange={(e) => { setDate(e.target.value); setValidationErrors(prev => ({...prev, date: false})); }}
+                                            className={`flex-1 border rounded-lg px-4 py-2.5 ${validationErrors.date ? 'border-red-500 border-2 bg-red-50' : ''}`}
                                         />
                                     </div>
                                 </div>
@@ -1848,11 +1968,11 @@
                                     <div className="relative">
                                         <select
                                             value={account}
-                                            onChange={(e) => setAccount(e.target.value)}
-                                            className="w-full border rounded-lg px-4 py-2.5 pr-8 appearance-none bg-white"
+                                            onChange={(e) => { setAccount(e.target.value); setValidationErrors(prev => ({...prev, account: false})); }}
+                                            className={`w-full border rounded-lg px-4 py-2.5 pr-8 appearance-none bg-white ${validationErrors.account ? 'border-red-500 border-2 bg-red-50' : ''}`}
                                             style={{ appearance: 'none', backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236B7280' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E\")", backgroundRepeat: 'no-repeat', backgroundPosition: 'right 12px center' }}
                                         >
-                                            <option value="">Select Account</option>
+                                            <option value="">{validationErrors.account ? '⚠ Select Account' : 'Select Account'}</option>
                                             <optgroup label="Credit Cards">
                                                 {CREDIT_CARDS.map(card => (
                                                     <option key={card.id} value={card.id}>{card.name}</option>
@@ -1869,12 +1989,12 @@
                                     <div className="relative">
                                         <input
                                             type="text"
-                                            placeholder="Merchant name"
+                                            placeholder={validationErrors.merchant ? '⚠ Merchant name required' : 'Merchant name'}
                                             value={merchant}
-                                            onChange={(e) => { setMerchant(e.target.value); setShowSuggestions(true); }}
+                                            onChange={(e) => { setMerchant(e.target.value); setShowSuggestions(true); setValidationErrors(prev => ({...prev, merchant: false})); }}
                                             onFocus={() => setShowSuggestions(true)}
                                             onBlur={() => { setTimeout(() => setShowSuggestions(false), 200); if (!isEdit) setCategory(suggestCategory(merchant)); }}
-                                            className="w-full border rounded-lg px-4 py-2.5"
+                                            className={`w-full border rounded-lg px-4 py-2.5 ${validationErrors.merchant ? 'border-red-500 border-2 bg-red-50 placeholder-red-400' : ''}`}
                                         />
                                         {showSuggestions && merchant.length >= 2 && (() => {
                                             const matches = frequentMerchants.filter(m => m.toLowerCase().includes(merchant.toLowerCase()) && m.toLowerCase() !== merchant.toLowerCase());
@@ -1894,17 +2014,17 @@
                                     <div className="flex gap-2">
                                         <input
                                             type="number"
-                                            placeholder="Amount"
+                                            placeholder={validationErrors.amount ? '⚠ Amount' : 'Amount'}
                                             step="0.01"
                                             value={amount}
-                                            onChange={(e) => setAmount(e.target.value)}
-                                            className="flex-1 border rounded-lg px-4 py-2.5"
+                                            onChange={(e) => { setAmount(e.target.value); setValidationErrors(prev => ({...prev, amount: false})); }}
+                                            className={`flex-1 border rounded-lg px-4 py-2.5 ${validationErrors.amount ? 'border-red-500 border-2 bg-red-50 placeholder-red-400' : ''}`}
                                         />
                                         <input
                                             type="date"
                                             value={date}
-                                            onChange={(e) => setDate(e.target.value)}
-                                            className="flex-1 border rounded-lg px-4 py-2.5"
+                                            onChange={(e) => { setDate(e.target.value); setValidationErrors(prev => ({...prev, date: false})); }}
+                                            className={`flex-1 border rounded-lg px-4 py-2.5 ${validationErrors.date ? 'border-red-500 border-2 bg-red-50' : ''}`}
                                         />
                                     </div>
                                 </>
@@ -1935,12 +2055,12 @@
                                     </select>
 
                                     <div>
-                                        <label className="block text-xs font-medium text-gray-500 mb-1.5">Category</label>
-                                        <div className="grid grid-cols-7 gap-1">
+                                        <label className={`block text-xs font-medium mb-1.5 ${validationErrors.category ? 'text-red-500 font-bold' : 'text-gray-500'}`}>{validationErrors.category ? '⚠ Select a Category' : 'Category'}</label>
+                                        <div className={`grid grid-cols-7 gap-1 ${validationErrors.category ? 'ring-2 ring-red-400 rounded-lg p-0.5' : ''}`}>
                                             {CATEGORIES.map(cat => (
                                                 <button
                                                     key={cat.id}
-                                                    onClick={() => setCategory(cat.id)}
+                                                    onClick={() => { setCategory(cat.id); setValidationErrors(prev => ({...prev, category: false})); }}
                                                     className={`flex flex-col items-center p-1 rounded-lg border transition ${category === cat.id ? 'bg-blue-100 border-2 border-blue-600' : 'bg-gray-50 border-gray-200'}`}
                                                 >
                                                     <div className="text-sm">{cat.emoji}</div>
@@ -1950,6 +2070,12 @@
                                         </div>
                                     </div>
                                 </>
+                            )}
+
+                            {validationErrors.upload && (
+                                <div className="bg-red-50 border border-red-200 text-red-600 text-xs font-medium px-3 py-2 rounded-lg">
+                                    ⚠ {validationErrors.upload}
+                                </div>
                             )}
 
                             <textarea
@@ -2024,7 +2150,7 @@
 
                             <div className="flex gap-2 pt-4">
                                 <button
-                                    onClick={onClose}
+                                    onClick={handleCancel}
                                     className="flex-1 bg-gray-200 text-gray-800 py-2 rounded-lg font-medium hover:bg-gray-300"
                                 >
                                     Cancel
@@ -2294,6 +2420,7 @@
             });
             const [expandedDormant, setExpandedDormant] = useState({}); // per-category: { liquid: true }
             const [selectedQ, setSelectedQ] = useState(null); // clicked quarter label from chart
+            const [showHistoryDormant, setShowHistoryDormant] = useState(false); // show inactive in history table
 
             // Fetch quarterly data from sheet
             const fetchQRData = useCallback(async () => {
@@ -2629,17 +2756,21 @@
                     </div>
 
                     {/* Controls */}
-                    <div className="flex items-center gap-2">
-                        <button
-                            onClick={() => setShowPct(!showPct)}
-                            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${showPct ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-600'}`}
-                        >
-                            % of Portfolio
-                        </button>
+                    <div className="flex items-center gap-2 justify-end">
+                        <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                            <span className="text-xs text-gray-500">% of Portfolio</span>
+                            <div
+                                onClick={() => setShowPct(!showPct)}
+                                className={`relative w-9 h-5 rounded-full transition-colors ${showPct ? 'bg-indigo-500' : 'bg-gray-300'}`}
+                                style={{ cursor: 'pointer' }}
+                            >
+                                <div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${showPct ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                            </div>
+                        </label>
                         {!isLocked && (
                             <button
                                 onClick={handleLockQuarter}
-                                className="px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-100 text-amber-700 ml-auto"
+                                className="px-3 py-1.5 rounded-lg text-xs font-medium bg-amber-100 text-amber-700"
                             >
                                 <LockIcon size={12} className="inline mr-1" />
                                 Lock {currentQLabel}
@@ -2960,10 +3091,21 @@
                             return recent.every(q => !acct.values[q.label] || acct.values[q.label] === 0);
                         };
 
+                        // Count dormant accounts
+                        const dormantCount = activeAccts.filter(a => isInactive(a)).length;
+
                         return (
                             <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-                                <div className="px-3 py-2 bg-gray-50 border-b border-gray-200">
+                                <div className="px-3 py-2 bg-gray-50 border-b border-gray-200 flex items-center justify-between">
                                     <h3 className="font-bold text-sm text-gray-700">Quarter History</h3>
+                                    {dormantCount > 0 && (
+                                        <button
+                                            onClick={() => setShowHistoryDormant(!showHistoryDormant)}
+                                            className="text-[11px] text-gray-400 hover:text-gray-600 transition"
+                                        >
+                                            {showHistoryDormant ? 'Hide' : 'Show'} {dormantCount} inactive
+                                        </button>
+                                    )}
                                 </div>
                                 <div style={{ overflowX: 'auto' }}>
                                     <table style={{ borderCollapse: 'collapse', width: 'max-content', minWidth: '100%' }}>
@@ -2997,11 +3139,13 @@
                                             {QR_CATEGORIES.map(cat => {
                                                 const catAccts = catGroups[cat.id] || [];
                                                 if (catAccts.length === 0) return null;
+                                                const visibleAccts = showHistoryDormant ? catAccts : catAccts.filter(a => !isInactive(a));
+                                                if (visibleAccts.length === 0) return null;
                                                 return [
                                                     <tr key={cat.id + '_hdr'}>
                                                         <td className="text-xs font-bold text-gray-600 py-1.5 px-3 bg-gray-50 border-b border-gray-100 sticky left-0 z-10" colSpan={1}>{cat.label}</td>
                                                         {labeledQ.map(q => {
-                                                            const catSum = catAccts.reduce((s, a) => s + (a.values[q.label] || 0), 0);
+                                                            const catSum = visibleAccts.reduce((s, a) => s + (a.values[q.label] || 0), 0);
                                                             const catPct = qTotals[q.label] > 0 ? (Math.abs(catSum) / qTotals[q.label] * 100) : 0;
                                                             return showPct ? (
                                                                 <React.Fragment key={q.label}>
@@ -3019,7 +3163,7 @@
                                                             );
                                                         })}
                                                     </tr>,
-                                                    ...catAccts.map(a => {
+                                                    ...visibleAccts.map(a => {
                                                         const inactive = isInactive(a);
                                                         return (
                                                             <tr key={a.name} className={`hover:bg-gray-50 ${inactive ? 'opacity-40' : ''}`}>
