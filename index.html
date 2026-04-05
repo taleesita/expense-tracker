@@ -305,9 +305,20 @@
                     return d > anchor.afterDate;
                 });
             }
-            return starting + expenses.reduce((sum, e) => {
+            const balance = starting + expenses.reduce((sum, e) => {
                 return sum + (e.rawDeposit || 0) - (e.rawCharge || 0);
             }, 0);
+            // Debug: log details for problem accounts
+            if (['cap1_jcheck', 'cap1_joint_hy', 'td_savings'].includes(accountId)) {
+                const totalDeposits = expenses.reduce((s, e) => s + (e.rawDeposit || 0), 0);
+                const totalCharges = expenses.reduce((s, e) => s + (e.rawCharge || 0), 0);
+                console.log(`[BALANCE DEBUG] ${accountId}: ${expenses.length} txns, deposits=$${totalDeposits.toFixed(2)}, charges=$${totalCharges.toFixed(2)}, balance=$${balance.toFixed(2)}`);
+                // Log ALL transactions with amounts for full audit
+                expenses.forEach((e, i) => {
+                    console.log(`  [${i}] ${e.date || e.timestamp} | ${e.merchant} | col_c="${e.accountRaw}" | charge=${e.rawCharge} | deposit=${e.rawDeposit}`);
+                });
+            }
+            return balance;
         };
 
         const MERCHANT_TO_CATEGORY = {
@@ -674,6 +685,7 @@
         Object.entries(SHEET_CARD_NAMES).forEach(([id, sheetName]) => {
             SHEET_CARD_TO_ID[sheetName.toLowerCase()] = id;
         });
+        // Legacy/closed accounts intentionally NOT mapped — they are separate accounts
         const getSheetCardName = (accountId) => {
             return SHEET_CARD_NAMES[accountId] || (getAccountById(accountId)?.name || accountId);
         };
