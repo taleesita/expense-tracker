@@ -306,7 +306,7 @@
                 });
             }
             return starting + expenses.reduce((sum, e) => {
-                return sum + (e.rawDeposit || 0) - (e.rawCharge || 0) - (e.rawJ || 0);
+                return sum + (e.rawDeposit || 0) - (e.rawCharge || 0);
             }, 0);
         };
 
@@ -588,24 +588,35 @@
         const getCategoryById = (id) => CATEGORIES.find(c => c.id === id);
 
         // Map sheet card names (partial match) to account IDs
+        // Build reverse lookup: exact sheet dropdown value → account ID
+        const SHEET_CARD_TO_ID = {};
+        Object.entries(SHEET_CARD_NAMES).forEach(([id, sheetName]) => {
+            SHEET_CARD_TO_ID[sheetName.toLowerCase()] = id;
+        });
+
         const matchAccountFromSheet = (cardText) => {
             if (!cardText) return '';
-            const lower = cardText.toLowerCase();
-            if (lower.includes('reserve')) return 'reserve_chase';
+            const trimmed = cardText.trim();
+            // First: exact match against known dropdown values
+            const exactMatch = SHEET_CARD_TO_ID[trimmed.toLowerCase()];
+            if (exactMatch) return exactMatch;
+            // Fallback for legacy/old entries that may use different names
+            const lower = trimmed.toLowerCase();
+            if (lower.includes('reserve') && lower.includes('chase')) return 'reserve_chase';
             if (lower.includes('amazon') && lower.includes('chase')) return 'amazon_chase';
-            if (lower.includes('united') || lower.includes('explorer')) return 'united_chase';
+            if (lower.includes('united') && lower.includes('chase')) return 'united_chase';
             if (lower.includes('carecredit')) return 'carecredit';
             if (lower.includes('cap1') && lower.includes('credit')) return 'cap1_cc';
-            if (lower.includes('cap1 jcheck') || lower.includes('cap1jcheck') || (lower.includes('cap1') && lower.includes('jcheck'))) return 'cap1_jcheck';
-            if (lower.includes('cap1 tsav') || lower.includes('cap1tsav') || (lower.includes('cap1') && lower.includes('tsav'))) return 'cap1_tsaving';
-            if (lower.includes('joint hy') || lower.includes('cap1 joint')) return 'cap1_joint_hy';
-            if (lower.includes('noa hy') || lower.includes('cap1 noa')) return 'cap1_noa_hy';
+            if (lower.includes('cap1') && lower.includes('jcheck')) return 'cap1_jcheck';
+            if (lower.includes('cap1') && lower.includes('tsav')) return 'cap1_tsaving';
+            if (lower.includes('cap1') && lower.includes('joint') && lower.includes('hy')) return 'cap1_joint_hy';
+            if (lower.includes('cap1') && lower.includes('noa') && lower.includes('hy')) return 'cap1_noa_hy';
             if (lower.includes('mercury') && lower.includes('treat')) return 'mercury_treatteek';
             if (lower.includes('mercury') && lower.includes('matiteyahu')) return 'mercury_matiteyahu';
-            if (lower.includes('td sav')) return 'td_savings';
-            // Fallback: try matching by short name
+            if (lower.includes('td') && lower.includes('sav')) return 'td_savings';
+            // Fallback: try matching by name
             for (const acct of ALL_ACCOUNTS) {
-                if (lower.includes(acct.shortName.toLowerCase()) || lower.includes(acct.name.toLowerCase())) return acct.id;
+                if (lower === acct.name.toLowerCase() || lower === acct.shortName.toLowerCase()) return acct.id;
             }
             return '';
         };
@@ -890,7 +901,6 @@
                         const parseNum = (v) => { const n = parseFloat(String(v || '').replace(/[,$]/g, '')); return isNaN(n) ? 0 : n; };
                         const charge = parseNum(row[4]);   // E: Charge/Debit (can be negative for refunds)
                         const deposit = parseNum(row[5]);  // F: Deposit
-                        const colJ = parseNum(row[9]);     // J: extra column in user's balance formula
                         const hasDeposit = deposit > 0;
                         const hasCharge = charge !== 0;     // treat negative charges (refunds) as having a charge
                         const amount = hasDeposit && !hasCharge ? deposit : Math.abs(charge);
@@ -914,7 +924,6 @@
                             amount: amount,
                             rawCharge: charge,                          // E raw (can be negative for refunds)
                             rawDeposit: deposit,                        // F raw
-                            rawJ: colJ,                                 // J raw (extra balance column)
                             category: matchCategoryFromSheet(row[7]),    // H: Category
                             categoryRaw: row[7] || '',                  // Keep original for writing back
                             account: matchAccountFromSheet(row[2]),      // C: Card
