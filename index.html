@@ -2335,7 +2335,9 @@
                         const nm = name.toLowerCase();
                         const liq = liquidity.toLowerCase();
 
-                        if (nm.includes('student loan') || nm.includes('mortgage')) {
+                        if (nm.includes('student loan cushion')) {
+                            category = 'liquid'; // First Republic Student Loan Cushion was a bank account
+                        } else if (nm.includes('student loan') || nm.includes('mortgage')) {
                             category = 'debt';
                         } else if (nm.includes('401k') || nm.includes('accrue')) {
                             category = '401k';
@@ -2462,6 +2464,13 @@
             const prevTotal = summaries['TOTAL']?.[prevLabel] || 0;
             const totalDelta = currentTotal - prevTotal;
 
+            // For % calculations: sum of absolute values of all accounts
+            const currentTotalAbs = accounts.reduce((sum, acct) => {
+                const v = getCurrentVal(acct);
+                return sum + Math.abs(v !== null ? v : (acct.values[prevLabel] || 0));
+            }, 0);
+            const prevTotalAbs = accounts.reduce((sum, acct) => sum + Math.abs(acct.values[prevLabel] || 0), 0);
+
             // Current quarter label
             const now = new Date();
             const currentQLabel = `${now.getFullYear()}.${String(now.getMonth() + 1).padStart(2, '0')}`;
@@ -2528,6 +2537,9 @@
                     );
                 }
 
+                const curPct = currentTotalAbs > 0 ? (Math.abs(curVal ?? prevVal) / currentTotalAbs * 100) : 0;
+                const prevPct = prevTotalAbs > 0 ? (Math.abs(prevVal) / prevTotalAbs * 100) : 0;
+
                 return (
                     <div key={acct.name} className={`flex items-center gap-2 py-2.5 px-3 border-b border-gray-50 ${isDormantRow ? 'opacity-50' : ''}`}>
                         {/* Account name - fills remaining space */}
@@ -2551,10 +2563,12 @@
                                 className={`w-28 text-right text-sm border rounded-lg px-2 py-1.5 flex-shrink-0 ${isAutoFilled ? 'bg-blue-50 border-blue-200' : 'border-gray-200'}`}
                             />
                         )}
+                        {showPct && <span className="text-[10px] text-gray-400 w-12 text-right flex-shrink-0">{curPct.toFixed(1)}%</span>}
                         {/* Last Q value - fixed width */}
                         <div className="text-xs text-gray-400 w-20 text-right flex-shrink-0">
                             ${fmt(Math.abs(prevVal))}
                         </div>
+                        {showPct && <span className="text-[10px] text-gray-400 w-12 text-right flex-shrink-0">{prevPct.toFixed(1)}%</span>}
                         {/* Diff - fixed width */}
                         {delta !== null ? (
                             <span className={`text-xs font-semibold w-20 text-right flex-shrink-0 ${delta > 0 ? 'text-green-600' : delta < 0 ? 'text-red-600' : 'text-gray-400'}`}>
@@ -2627,7 +2641,9 @@
                                     <div className="flex items-center gap-2">
                                         <h3 className="font-bold text-sm text-gray-700 flex-1 min-w-0">{cat.label}</h3>
                                         <span className="text-[10px] text-gray-400 uppercase tracking-wide w-28 text-right flex-shrink-0">Current</span>
+                                        {showPct && <span className="text-[10px] text-gray-400 uppercase tracking-wide w-12 text-right flex-shrink-0">%</span>}
                                         <span className="text-[10px] text-gray-400 uppercase tracking-wide w-20 text-right flex-shrink-0">{prevLabel || 'Last Q'}</span>
+                                        {showPct && <span className="text-[10px] text-gray-400 uppercase tracking-wide w-12 text-right flex-shrink-0">%</span>}
                                         <span className="text-[10px] text-gray-400 uppercase tracking-wide w-20 text-right flex-shrink-0">Change</span>
                                     </div>
                                     <div className="text-right">
@@ -2815,7 +2831,7 @@
 
                                     return (
                                         <div className="mt-3 border-t border-gray-100 pt-3">
-                                            <div className="flex justify-between items-center mb-2">
+                                            <div className="flex justify-between items-center mb-3">
                                                 <span className="text-sm font-bold text-indigo-700">{selQ} Snapshot</span>
                                                 <div className="text-right">
                                                     <span className="text-sm font-bold">${fmt(qTotal)}</span>
@@ -2826,40 +2842,64 @@
                                                     )}
                                                 </div>
                                             </div>
-                                            {QR_CATEGORIES.map(cat => {
-                                                const catAccts = catGroups[cat.id] || [];
-                                                if (catAccts.length === 0) return null;
-                                                const catSum = catAccts.reduce((s, a) => {
-                                                    const v = a.values[selQ] || 0;
-                                                    return s + (a.category === 'debt' ? -Math.abs(v) : v);
-                                                }, 0);
-                                                return (
-                                                    <div key={cat.id} className="mb-2">
-                                                        <div className="flex justify-between text-xs font-semibold text-gray-500 mb-1 px-1">
-                                                            <span>{cat.label}</span>
-                                                            <span className={cat.id === 'debt' ? 'text-red-600' : ''}>{cat.id === 'debt' ? '-' : ''}${fmt(Math.abs(catSum))}</span>
-                                                        </div>
-                                                        {catAccts.map(a => {
+                                            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '12px' }}>
+                                                <thead>
+                                                    <tr style={{ borderBottom: '2px solid #e5e7eb' }}>
+                                                        <th style={{ textAlign: 'left', padding: '4px 8px', color: '#6b7280', fontWeight: 600, width: '50%' }}>Account</th>
+                                                        <th style={{ textAlign: 'right', padding: '4px 8px', color: '#6b7280', fontWeight: 600, width: '25%' }}>Value</th>
+                                                        <th style={{ textAlign: 'right', padding: '4px 8px', color: '#6b7280', fontWeight: 600, width: '25%' }}>QoQ Change</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {QR_CATEGORIES.map(cat => {
+                                                        const catAccts = catGroups[cat.id] || [];
+                                                        if (catAccts.length === 0) return null;
+                                                        const catSum = catAccts.reduce((s, a) => {
                                                             const v = a.values[selQ] || 0;
-                                                            const pv = prevQLabel ? (a.values[prevQLabel] || 0) : null;
-                                                            const d = pv !== null ? v - pv : null;
-                                                            return (
-                                                                <div key={a.name} className="flex justify-between items-center text-xs py-0.5 px-1">
-                                                                    <span className="text-gray-600 truncate flex-1 mr-2">{a.name}</span>
-                                                                    <span className="text-gray-700 font-medium w-20 text-right flex-shrink-0">${fmt(Math.abs(v))}</span>
-                                                                    {d !== null ? (
-                                                                        <span className={`w-16 text-right flex-shrink-0 ${d > 0 ? 'text-green-600' : d < 0 ? 'text-red-600' : 'text-gray-300'}`}>
-                                                                            {d > 0 ? '+' : d < 0 ? '-' : ''}{d !== 0 ? `$${fmt(Math.abs(d))}` : '—'}
-                                                                        </span>
-                                                                    ) : (
-                                                                        <span className="w-16 text-right flex-shrink-0 text-gray-300">—</span>
-                                                                    )}
-                                                                </div>
-                                                            );
-                                                        })}
-                                                    </div>
-                                                );
-                                            })}
+                                                            return s + (a.category === 'debt' ? -Math.abs(v) : v);
+                                                        }, 0);
+                                                        const catPrevSum = prevQLabel ? catAccts.reduce((s, a) => {
+                                                            const v = a.values[prevQLabel] || 0;
+                                                            return s + (a.category === 'debt' ? -Math.abs(v) : v);
+                                                        }, 0) : null;
+                                                        const catDelta = catPrevSum !== null ? catSum - catPrevSum : null;
+                                                        return (
+                                                            <React.Fragment key={cat.id}>
+                                                                <tr style={{ backgroundColor: '#f9fafb', borderTop: '1px solid #e5e7eb' }}>
+                                                                    <td style={{ padding: '5px 8px', fontWeight: 700, color: '#374151' }}>{cat.label}</td>
+                                                                    <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 700, color: cat.id === 'debt' ? '#dc2626' : '#374151' }}>
+                                                                        {cat.id === 'debt' ? '-' : ''}${fmt(Math.abs(catSum))}
+                                                                    </td>
+                                                                    <td style={{ padding: '5px 8px', textAlign: 'right', fontWeight: 600, color: catDelta > 0 ? '#16a34a' : catDelta < 0 ? '#dc2626' : '#9ca3af' }}>
+                                                                        {catDelta !== null ? (catDelta !== 0 ? `${catDelta > 0 ? '+' : '-'}$${fmt(Math.abs(catDelta))}` : '—') : '—'}
+                                                                    </td>
+                                                                </tr>
+                                                                {catAccts.map(a => {
+                                                                    const v = a.values[selQ] || 0;
+                                                                    const pv = prevQLabel ? (a.values[prevQLabel] || 0) : null;
+                                                                    const d = pv !== null ? v - pv : null;
+                                                                    return (
+                                                                        <tr key={a.name} style={{ borderBottom: '1px solid #f3f4f6' }}>
+                                                                            <td style={{ padding: '3px 8px 3px 20px', color: '#6b7280' }}>{a.name}</td>
+                                                                            <td style={{ padding: '3px 8px', textAlign: 'right', color: '#374151', fontWeight: 500 }}>${fmt(Math.abs(v))}</td>
+                                                                            <td style={{ padding: '3px 8px', textAlign: 'right', fontWeight: 500, color: d > 0 ? '#16a34a' : d < 0 ? '#dc2626' : '#9ca3af' }}>
+                                                                                {d !== null ? (d !== 0 ? `${d > 0 ? '+' : '-'}$${fmt(Math.abs(d))}` : '—') : '—'}
+                                                                            </td>
+                                                                        </tr>
+                                                                    );
+                                                                })}
+                                                            </React.Fragment>
+                                                        );
+                                                    })}
+                                                    <tr style={{ borderTop: '2px solid #6366f1', backgroundColor: '#eef2ff' }}>
+                                                        <td style={{ padding: '6px 8px', fontWeight: 800, color: '#4338ca' }}>TOTAL</td>
+                                                        <td style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 800, color: '#4338ca' }}>${fmt(qTotal)}</td>
+                                                        <td style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 700, color: qDelta > 0 ? '#16a34a' : qDelta < 0 ? '#dc2626' : '#9ca3af' }}>
+                                                            {qDelta !== null ? (qDelta !== 0 ? `${qDelta > 0 ? '+' : '-'}$${fmt(Math.abs(qDelta))}` : '—') : '—'}
+                                                        </td>
+                                                    </tr>
+                                                </tbody>
+                                            </table>
                                         </div>
                                     );
                                 })()}
@@ -2882,7 +2922,19 @@
                             const g = catGroups[a.category] || catGroups['other'];
                             g.push(a);
                         });
-                        const colW = 90;
+                        const colW = showPct ? 120 : 90;
+
+                        // Compute per-quarter totals for % calculation
+                        const qTotals = {};
+                        labeledQ.forEach(q => {
+                            qTotals[q.label] = activeAccts.reduce((s, a) => s + Math.abs(a.values[q.label] || 0), 0);
+                        });
+
+                        // Check if account is inactive (no value in most recent 2 quarters)
+                        const isInactive = (acct) => {
+                            const recent = labeledQ.slice(0, 2);
+                            return recent.every(q => !acct.values[q.label] || acct.values[q.label] === 0);
+                        };
 
                         return (
                             <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
@@ -2899,11 +2951,23 @@
                                                         className={`text-right text-xs font-semibold py-2 px-2 border-b border-gray-200 cursor-pointer hover:text-indigo-600 ${selectedQ === q.label ? 'text-indigo-700 bg-indigo-50' : 'text-gray-500'}`}
                                                         style={{ minWidth: colW }}
                                                         onClick={() => setSelectedQ(selectedQ === q.label ? null : q.label)}
+                                                        colSpan={showPct ? 2 : 1}
                                                     >
                                                         {q.label}
                                                     </th>
                                                 ))}
                                             </tr>
+                                            {showPct && (
+                                                <tr>
+                                                    <th className="sticky left-0 bg-white z-10 border-b border-gray-100" style={{ minWidth: 160 }}></th>
+                                                    {labeledQ.map(q => (
+                                                        <React.Fragment key={q.label + '_sub'}>
+                                                            <th className={`text-right text-[10px] text-gray-400 py-1 px-1 border-b border-gray-100 ${selectedQ === q.label ? 'bg-indigo-50' : ''}`} style={{ minWidth: 60 }}>Value</th>
+                                                            <th className={`text-right text-[10px] text-gray-400 py-1 px-1 border-b border-gray-100 ${selectedQ === q.label ? 'bg-indigo-50' : ''}`} style={{ minWidth: 40 }}>%</th>
+                                                        </React.Fragment>
+                                                    ))}
+                                                </tr>
+                                            )}
                                         </thead>
                                         <tbody>
                                             {QR_CATEGORIES.map(cat => {
@@ -2914,32 +2978,64 @@
                                                         <td className="text-xs font-bold text-gray-600 py-1.5 px-3 bg-gray-50 border-b border-gray-100 sticky left-0 z-10" colSpan={1}>{cat.label}</td>
                                                         {labeledQ.map(q => {
                                                             const catSum = catAccts.reduce((s, a) => s + (a.values[q.label] || 0), 0);
-                                                            return (
+                                                            const catPct = qTotals[q.label] > 0 ? (Math.abs(catSum) / qTotals[q.label] * 100) : 0;
+                                                            return showPct ? (
+                                                                <React.Fragment key={q.label}>
+                                                                    <td className={`text-xs font-bold text-right py-1.5 px-2 bg-gray-50 border-b border-gray-100 ${cat.id === 'debt' ? 'text-red-600' : 'text-gray-600'} ${selectedQ === q.label ? 'bg-indigo-50' : ''}`}>
+                                                                        {cat.id === 'debt' && catSum !== 0 ? '-' : ''}${fmt(Math.abs(catSum))}
+                                                                    </td>
+                                                                    <td className={`text-[10px] font-semibold text-right py-1.5 px-1 bg-gray-50 border-b border-gray-100 text-gray-400 ${selectedQ === q.label ? 'bg-indigo-50' : ''}`}>
+                                                                        {catPct.toFixed(1)}%
+                                                                    </td>
+                                                                </React.Fragment>
+                                                            ) : (
                                                                 <td key={q.label} className={`text-xs font-bold text-right py-1.5 px-2 bg-gray-50 border-b border-gray-100 ${cat.id === 'debt' ? 'text-red-600' : 'text-gray-600'} ${selectedQ === q.label ? 'bg-indigo-50' : ''}`}>
                                                                     {cat.id === 'debt' && catSum !== 0 ? '-' : ''}${fmt(Math.abs(catSum))}
                                                                 </td>
                                                             );
                                                         })}
                                                     </tr>,
-                                                    ...catAccts.map(a => (
-                                                        <tr key={a.name} className="hover:bg-gray-50">
-                                                            <td className="text-xs text-gray-600 py-1 px-3 pl-5 border-b border-gray-50 truncate sticky left-0 bg-white z-10" style={{ maxWidth: 200 }}>{a.name}</td>
-                                                            {labeledQ.map(q => {
-                                                                const v = a.values[q.label] || 0;
-                                                                return (
-                                                                    <td key={q.label} className={`text-xs text-right py-1 px-2 border-b border-gray-50 ${v === 0 ? 'text-gray-300' : 'text-gray-700'} ${selectedQ === q.label ? 'bg-indigo-50' : ''}`}>
-                                                                        {v !== 0 ? `$${fmt(Math.abs(v))}` : '—'}
-                                                                    </td>
-                                                                );
-                                                            })}
-                                                        </tr>
-                                                    ))
+                                                    ...catAccts.map(a => {
+                                                        const inactive = isInactive(a);
+                                                        return (
+                                                            <tr key={a.name} className={`hover:bg-gray-50 ${inactive ? 'opacity-40' : ''}`}>
+                                                                <td className={`text-xs py-1 px-3 pl-5 border-b border-gray-50 truncate sticky left-0 bg-white z-10 ${inactive ? 'text-gray-400 italic' : 'text-gray-600'}`} style={{ maxWidth: 200 }}>{a.name}</td>
+                                                                {labeledQ.map(q => {
+                                                                    const v = a.values[q.label] || 0;
+                                                                    const pct = qTotals[q.label] > 0 ? (Math.abs(v) / qTotals[q.label] * 100) : 0;
+                                                                    return showPct ? (
+                                                                        <React.Fragment key={q.label}>
+                                                                            <td className={`text-xs text-right py-1 px-2 border-b border-gray-50 ${v === 0 ? 'text-gray-300' : 'text-gray-700'} ${selectedQ === q.label ? 'bg-indigo-50' : ''}`}>
+                                                                                {v !== 0 ? `$${fmt(Math.abs(v))}` : '—'}
+                                                                            </td>
+                                                                            <td className={`text-[10px] text-right py-1 px-1 border-b border-gray-50 text-gray-400 ${selectedQ === q.label ? 'bg-indigo-50' : ''}`}>
+                                                                                {v !== 0 ? `${pct.toFixed(1)}%` : ''}
+                                                                            </td>
+                                                                        </React.Fragment>
+                                                                    ) : (
+                                                                        <td key={q.label} className={`text-xs text-right py-1 px-2 border-b border-gray-50 ${v === 0 ? 'text-gray-300' : 'text-gray-700'} ${selectedQ === q.label ? 'bg-indigo-50' : ''}`}>
+                                                                            {v !== 0 ? `$${fmt(Math.abs(v))}` : '—'}
+                                                                        </td>
+                                                                    );
+                                                                })}
+                                                            </tr>
+                                                        );
+                                                    })
                                                 ];
                                             })}
                                             {/* Total row */}
                                             <tr>
                                                 <td className="text-xs font-bold text-gray-800 py-2 px-3 border-t-2 border-gray-300 sticky left-0 bg-white z-10">TOTAL</td>
-                                                {labeledQ.map(q => (
+                                                {labeledQ.map(q => showPct ? (
+                                                    <React.Fragment key={q.label}>
+                                                        <td className={`text-xs font-bold text-right py-2 px-2 border-t-2 border-gray-300 text-gray-800 ${selectedQ === q.label ? 'bg-indigo-50' : ''}`}>
+                                                            ${fmt(summaries['TOTAL']?.[q.label] || 0)}
+                                                        </td>
+                                                        <td className={`text-[10px] font-bold text-right py-2 px-1 border-t-2 border-gray-300 text-gray-400 ${selectedQ === q.label ? 'bg-indigo-50' : ''}`}>
+                                                            100%
+                                                        </td>
+                                                    </React.Fragment>
+                                                ) : (
                                                     <td key={q.label} className={`text-xs font-bold text-right py-2 px-2 border-t-2 border-gray-300 text-gray-800 ${selectedQ === q.label ? 'bg-indigo-50' : ''}`}>
                                                         ${fmt(summaries['TOTAL']?.[q.label] || 0)}
                                                     </td>
