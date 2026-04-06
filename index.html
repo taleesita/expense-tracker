@@ -2536,6 +2536,18 @@
             const filteredExpenses = displayExpenses.filter(e =>
                 e.merchant.toLowerCase().includes(searchTerm.toLowerCase())
             );
+            const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+            // Reset visible count when search or account changes
+            const prevAcctSearch = React.useRef(searchTerm + accountId);
+            React.useEffect(() => {
+                const key = searchTerm + accountId;
+                if (prevAcctSearch.current !== key) {
+                    setVisibleCount(PAGE_SIZE);
+                    prevAcctSearch.current = key;
+                }
+            }, [searchTerm, accountId]);
+            const visibleExpenses = filteredExpenses.slice(0, visibleCount);
+            const hasMore = filteredExpenses.length > visibleCount;
 
             const isCreditCard = CREDIT_CARDS.some(c => c.id === accountId);
             const total = calcAccountBalance(accountExpenses, accountId);
@@ -2618,19 +2630,29 @@
                         {filteredExpenses.length === 0 ? (
                             <div className="p-4 text-center text-gray-500">No expenses</div>
                         ) : (
-                            filteredExpenses.map((expense, idx) => (
-                                <ExpenseRow
-                                    key={expense.rowIndex}
-                                    expense={expense}
-                                    onDelete={onDelete}
-                                    onUpdate={(updated) => onUpdate(updated.rowIndex, updated)}
-                                    onReconcile={onReconcile}
-                                    onEdit={onEdit}
-                                    showReconcile={true}
-                                    hideAccount={true}
-                                    showDateSeparator={idx === 0 || getDateKey(expense) !== getDateKey(filteredExpenses[idx - 1])}
-                                />
-                            ))
+                            <>
+                                {visibleExpenses.map((expense, idx) => (
+                                    <ExpenseRow
+                                        key={expense.rowIndex}
+                                        expense={expense}
+                                        onDelete={onDelete}
+                                        onUpdate={(updated) => onUpdate(updated.rowIndex, updated)}
+                                        onReconcile={onReconcile}
+                                        onEdit={onEdit}
+                                        showReconcile={true}
+                                        hideAccount={true}
+                                        showDateSeparator={idx === 0 || getDateKey(expense) !== getDateKey(visibleExpenses[idx - 1])}
+                                    />
+                                ))}
+                                {hasMore && (
+                                    <button
+                                        onClick={() => setVisibleCount(c => c + PAGE_SIZE)}
+                                        className="w-full py-3 text-sm text-blue-600 font-medium bg-blue-50 hover:bg-blue-100 border-t border-gray-200"
+                                    >
+                                        Show more ({filteredExpenses.length - visibleCount} remaining)
+                                    </button>
+                                )}
+                            </>
                         )}
                     </div>
                 </div>
@@ -3849,14 +3871,29 @@
             );
         };
 
+        const PAGE_SIZE = 50;
+
         const AllTab = ({ expenses, onDelete, onUpdate, onEdit }) => {
             const [searchTerm, setSearchTerm] = useState('');
+            const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
 
             const filtered = expenses.filter(e =>
                 !e._balanceOnly &&
                 (e.merchant.toLowerCase().includes(searchTerm.toLowerCase()) ||
                 e.category.includes(searchTerm.toLowerCase()))
             );
+
+            // Reset visible count when search changes
+            const prevSearch = React.useRef(searchTerm);
+            React.useEffect(() => {
+                if (prevSearch.current !== searchTerm) {
+                    setVisibleCount(PAGE_SIZE);
+                    prevSearch.current = searchTerm;
+                }
+            }, [searchTerm]);
+
+            const visible = filtered.slice(0, visibleCount);
+            const hasMore = filtered.length > visibleCount;
 
             return (
                 <div className="pb-24">
@@ -3869,22 +3906,35 @@
                             onChange={(e) => setSearchTerm(e.target.value)}
                             className="flex-1 outline-none"
                         />
+                        {filtered.length > 0 && (
+                            <span className="text-xs text-gray-400 self-center whitespace-nowrap">{filtered.length}</span>
+                        )}
                     </div>
                     <div className="bg-white border border-gray-200 overflow-hidden">
                         {filtered.length === 0 ? (
                             <div className="p-4 text-center text-gray-500">No expenses</div>
                         ) : (
-                            filtered.map((expense, idx) => (
-                                <ExpenseRow
-                                    key={expense.rowIndex}
-                                    expense={expense}
-                                    onDelete={onDelete}
-                                    onUpdate={(updated) => onUpdate(updated.rowIndex, updated)}
-                                    onEdit={onEdit}
-                                    showReconcile={false}
-                                    showDateSeparator={idx === 0 || getDateKey(expense) !== getDateKey(filtered[idx - 1])}
-                                />
-                            ))
+                            <>
+                                {visible.map((expense, idx) => (
+                                    <ExpenseRow
+                                        key={expense.rowIndex}
+                                        expense={expense}
+                                        onDelete={onDelete}
+                                        onUpdate={(updated) => onUpdate(updated.rowIndex, updated)}
+                                        onEdit={onEdit}
+                                        showReconcile={false}
+                                        showDateSeparator={idx === 0 || getDateKey(expense) !== getDateKey(visible[idx - 1])}
+                                    />
+                                ))}
+                                {hasMore && (
+                                    <button
+                                        onClick={() => setVisibleCount(c => c + PAGE_SIZE)}
+                                        className="w-full py-3 text-sm text-blue-600 font-medium bg-blue-50 hover:bg-blue-100 border-t border-gray-200"
+                                    >
+                                        Show more ({filtered.length - visibleCount} remaining)
+                                    </button>
+                                )}
+                            </>
                         )}
                     </div>
                 </div>
