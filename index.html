@@ -2069,7 +2069,7 @@
                         <input
                             type="file"
                             accept="image/*"
-                            capture="environment"
+                            {...(/iPhone|iPad|iPod|Android/i.test(navigator.userAgent) ? { capture: "environment" } : {})}
                             onChange={(e) => e.target.files?.[0] && handleScan(e.target.files[0])}
                             className="hidden"
                             id="scan-receipt-camera"
@@ -4001,6 +4001,7 @@
             const [dismissedReminders, setDismissedReminders] = useState(() => {
                 try { return JSON.parse(localStorage.getItem('dismissed_reminders') || '{}'); } catch { return {}; }
             });
+            const [quarterlyLockVersion, setQuarterlyLockVersion] = useState(0);
 
             // Auto-detect completed quarters from quarterly sheet data
             useEffect(() => {
@@ -4027,9 +4028,10 @@
                         // Check if previous quarter column exists and has data
                         const colIdx = header.findIndex(h => (h || '').trim() === prevQLabel);
                         if (colIdx >= 0 && dataRow[colIdx] && String(dataRow[colIdx]).trim()) {
-                            // Quarter has data — auto-lock it
+                            // Quarter has data — auto-lock it and trigger reminder recompute
                             const updated = [...locked, prevQLabel];
                             localStorage.setItem('qr_locked', JSON.stringify(updated));
+                            setQuarterlyLockVersion(v => v + 1);
                         }
                     } catch (e) { /* silent */ }
                 };
@@ -4039,7 +4041,7 @@
             // Build merchant→account map and overdue recurring list
             const displayExpensesApp = useMemo(() => expenses.filter(e => !e._balanceOnly), [expenses]);
             const merchantAccountMap = useMemo(() => buildMerchantAccountMap(displayExpensesApp), [displayExpensesApp]);
-            const overdueRecurring = useMemo(() => getOverdueRecurring(displayExpensesApp), [displayExpensesApp]);
+            const overdueRecurring = useMemo(() => getOverdueRecurring(displayExpensesApp), [displayExpensesApp, quarterlyLockVersion]);
             const visibleReminders = overdueRecurring.filter(r => {
                 const dismissedAt = dismissedReminders[r.id];
                 if (!dismissedAt) return true;
