@@ -2066,22 +2066,23 @@
                             </div>
                         )}
 
-                        {showScanner && (
-                            <ReceiptScanner
-                                onCapture={handleScan}
-                                onFile={handleScan}
-                                onClose={() => setShowScanner(false)}
-                            />
-                        )}
+                        <input
+                            type="file"
+                            accept="image/*"
+                            capture="environment"
+                            onChange={(e) => e.target.files?.[0] && handleScan(e.target.files[0])}
+                            className="hidden"
+                            id="scan-receipt-camera"
+                        />
 
                         <div className="flex gap-2 mb-4">
-                            <button
-                                onClick={() => setShowScanner(true)}
-                                className="flex items-center justify-center gap-2 flex-1 bg-blue-600 text-white py-2.5 rounded-lg font-medium hover:bg-blue-700 text-sm"
+                            <label
+                                htmlFor="scan-receipt-camera"
+                                className="flex items-center justify-center gap-2 flex-1 bg-blue-600 text-white py-2.5 rounded-lg font-medium hover:bg-blue-700 text-sm cursor-pointer"
                             >
                                 <CameraIcon size={16} className="flex-shrink-0" />
                                 <span>Scan Receipt</span>
-                            </button>
+                            </label>
                             <input
                                 type="file"
                                 accept="image/*,application/pdf"
