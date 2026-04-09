@@ -2107,7 +2107,7 @@
             return parseDateToISO(expense.date || expense.timestamp);
         };
 
-        const AddExpenseModal = ({ isOpen, onClose, onAdd, onUpdate, editExpense, token, userName, expenses: allExpenses, merchantAccountMap }) => {
+        const AddExpenseModal = ({ isOpen, onClose, onAdd, onUpdate, editExpense, token, userName, expenses: allExpenses, merchantAccountMap, reconnect }) => {
             const isEdit = !!editExpense;
             const [merchant, setMerchant] = useState('');
             const [amount, setAmount] = useState('');
@@ -5018,6 +5018,7 @@
                         userName={user?.name}
                         expenses={expenses}
                         merchantAccountMap={merchantAccountMap}
+                        reconnect={reconnect}
                     />
 
                     {/* Bottom Navigation */}
