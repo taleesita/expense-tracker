@@ -453,8 +453,15 @@
             const prevQDisplayLabel = `Q${prevQ} ${prevQYear}`;
             {
                 const lockedQuarters = (() => { try { return JSON.parse(localStorage.getItem('qr_locked') || '[]'); } catch { return []; } })();
-                // Check both YYYY.MM format and legacy "Q1 2026" format
-                if (!lockedQuarters.includes(prevQLockLabel) && !lockedQuarters.includes(prevQDisplayLabel)) {
+                // Check ALL possible formats that might be in qr_locked:
+                // - "2026.03" (prev quarter last month — auto-lock format)
+                // - "2026.04" (current month — Lock button format)
+                // - "Q1 2026" (legacy display format)
+                const currentMonthLabel = `${now.getFullYear()}.${String(now.getMonth() + 1).padStart(2, '0')}`;
+                const isLocked = lockedQuarters.includes(prevQLockLabel)
+                    || lockedQuarters.includes(prevQDisplayLabel)
+                    || lockedQuarters.includes(currentMonthLabel);
+                if (!isLocked) {
                     overdue.push({
                         id: 'eoq_review',
                         label: `${prevQDisplayLabel} Review`,
@@ -4161,16 +4168,28 @@
                         const rows = sheetData.values || [];
                         if (rows.length < 2) return;
 
-                        // Look for the YYYY.MM label in header row
+                        // Look for the quarter's column in header — try multiple formats
                         const headerRow = rows[0] || [];
+                        const prevQ = qNum === 0 ? 4 : qNum;
+                        const prevQYear = qNum === 0 ? now.getFullYear() - 1 : now.getFullYear();
+                        const possibleLabels = [
+                            prevQLockLabel,                          // "2026.03"
+                            prevQLockLabel.replace('.0', '.'),       // "2026.3"
+                            `Q${prevQ} ${prevQYear}`,                // "Q1 2026"
+                            `Q${prevQ}`,                             // "Q1"
+                        ];
                         let colIdx = -1;
                         for (let i = 0; i < headerRow.length; i++) {
-                            if (String(headerRow[i]).trim() === prevQLockLabel) {
+                            const cell = String(headerRow[i]).trim();
+                            if (possibleLabels.includes(cell)) {
                                 colIdx = i;
                                 break;
                             }
                         }
-                        if (colIdx === -1) return; // Column not found
+                        if (colIdx === -1) {
+                            console.log('Quarterly auto-lock: no matching column found. Headers:', headerRow.slice(0, 10), 'Looking for:', possibleLabels);
+                            return;
+                        }
 
                         // Check if there's data in that column (row 2 or 3)
                         const hasData = rows.some((row, ri) => ri > 0 && row[colIdx] && String(row[colIdx]).trim() !== '');
