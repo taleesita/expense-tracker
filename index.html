@@ -1571,7 +1571,21 @@
         const useOCR = () => {
             const [processing, setProcessing] = useState(false);
 
-            // Convert PDF to image data URLs (all pages)
+            // Extract text directly from PDF using pdf.js (much more accurate for digital PDFs like paystubs)
+            const pdfToText = async (file) => {
+                const arrayBuffer = await file.arrayBuffer();
+                const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+                let fullText = '';
+                for (let i = 1; i <= pdf.numPages; i++) {
+                    const page = await pdf.getPage(i);
+                    const content = await page.getTextContent();
+                    const pageText = content.items.map(item => item.str).join(' ');
+                    fullText += pageText + '\n';
+                }
+                return fullText.trim();
+            };
+
+            // Convert PDF to image data URLs (all pages) — fallback for scanned/image PDFs
             const pdfToImages = async (file) => {
                 const arrayBuffer = await file.arrayBuffer();
                 const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
@@ -1730,10 +1744,27 @@
                 setProcessing(true);
                 try {
                     const isPDF = imageFile.type === 'application/pdf' || imageFile.name?.toLowerCase().endsWith('.pdf');
-                    let imageDatas;
+                    let text = '';
 
                     if (isPDF && window.pdfjsLib) {
-                        imageDatas = await pdfToImages(imageFile);
+                        // Try native text extraction first (much better for digital PDFs like paystubs)
+                        const nativeText = await pdfToText(imageFile);
+                        if (nativeText && nativeText.replace(/\s/g, '').length > 50) {
+                            // Got meaningful text — use it directly, skip Tesseract
+                            text = nativeText;
+                            console.log('PDF: using native text extraction (' + nativeText.length + ' chars)');
+                        } else {
+                            // Scanned/image PDF — fall back to Tesseract OCR
+                            console.log('PDF: native text too short (' + (nativeText || '').length + ' chars), falling back to Tesseract');
+                            const imageDatas = await pdfToImages(imageFile);
+                            const { createWorker } = Tesseract;
+                            const worker = await createWorker();
+                            for (const imgData of imageDatas) {
+                                const { data: { text: pageText } } = await worker.recognize(imgData);
+                                text += pageText + '\n';
+                            }
+                            await worker.terminate();
+                        }
                     } else {
                         const dataUrl = await new Promise((resolve) => {
                             const reader = new FileReader();
@@ -1742,17 +1773,12 @@
                         });
                         // Preprocess: auto-crop receipt from background + enhance contrast
                         const processed = await preprocessImage(dataUrl);
-                        imageDatas = [processed];
+                        const { createWorker } = Tesseract;
+                        const worker = await createWorker();
+                        const { data: { text: pageText } } = await worker.recognize(processed);
+                        text = pageText;
+                        await worker.terminate();
                     }
-
-                    const { createWorker } = Tesseract;
-                    const worker = await createWorker();
-                    let text = '';
-                    for (const imgData of imageDatas) {
-                        const { data: { text: pageText } } = await worker.recognize(imgData);
-                        text += pageText + '\n';
-                    }
-                    await worker.terminate();
 
                     // Parse OCR text
                     const lines = text.split('\n').filter(l => l.trim());
@@ -1919,29 +1945,57 @@
                     // ---- PAYSTUB / PAYCHECK DETECTION ----
                     // If the document looks like a paystub, override merchant/amount/category/txnType
                     const lowerText = text.toLowerCase();
-                    const isPaystub = (
-                        (/net\s*pay/i.test(text) || /direct\s*dep/i.test(text))
-                        && (/total\s*earnings|gross\s*pay|salary|pay\s*period|payroll/i.test(text))
-                    );
+                    // Broad paystub detection — match ANY 2+ of these payroll keywords
+                    const paystubKeywords = [
+                        /net\s*pay/i, /direct\s*dep/i, /gross\s*pay/i, /total\s*earnings/i,
+                        /pay\s*period/i, /payroll/i, /salary/i, /hourly\s*rate/i,
+                        /federal\s*tax/i, /state\s*tax/i, /fica/i, /social\s*security/i,
+                        /medicare/i, /year[\s-]*to[\s-]*date/i, /ytd/i, /deductions/i,
+                        /employer\s*contribution/i, /pay\s*date/i, /pay\s*stub/i, /earning\s*statement/i,
+                        /withholding/i, /w[\s-]*2/i, /hours\s*worked/i, /overtime/i,
+                    ];
+                    const paystubHits = paystubKeywords.filter(re => re.test(text)).length;
+                    const isPaystub = paystubHits >= 2;
                     let txnType = null;
+
 
                     if (isPaystub) {
                         txnType = 'deposit';
+                        console.log('Paystub detected (' + paystubHits + ' keyword hits)');
 
                         // Extract Net Pay amount (the actual deposit, not gross)
+                        // Search line-by-line for "net pay" or "direct deposit" near a dollar amount
                         const netPayPatterns = [
-                            /net\s*pay[:\s]*\$?\s*([\d,]+\.\d{2})/i,
+                            /net\s*pay[:\s$]*\$?\s*([\d,]+\.\d{2})/i,
                             /direct\s*dep(?:osit)?[^$\d]*\$?\s*([\d,]+\.\d{2})/i,
                             /net\s*amount[:\s]*\$?\s*([\d,]+\.\d{2})/i,
+                            /net\s*check[:\s]*\$?\s*([\d,]+\.\d{2})/i,
+                            /take[\s-]*home[:\s]*\$?\s*([\d,]+\.\d{2})/i,
                         ];
+                        // Try full-text match first
                         for (const pat of netPayPatterns) {
                             const m = text.match(pat);
                             if (m) { amount = parseFloat(m[1].replace(/,/g, '')); break; }
                         }
+                        // If that didn't work, try line-by-line: find line with "net pay" and extract nearest amount
+                        if (!amount) {
+                            const allLines = text.split('\n');
+                            for (const line of allLines) {
+                                if (/net\s*pay|direct\s*dep/i.test(line)) {
+                                    const amounts = [...line.matchAll(/\$?\s*([\d,]+\.\d{2})/g)];
+                                    if (amounts.length > 0) {
+                                        // Take the LAST amount on the net pay line (usually the current period value)
+                                        amount = parseFloat(amounts[amounts.length - 1][1].replace(/,/g, ''));
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        console.log('Paystub net pay amount:', amount);
 
                         // Match company to known recurring paycheck merchants
                         const companyPatterns = [
-                            { re: /disney/i, merchant: 'Deposit - Doug Disney Paycheck' },
+                            { re: /disney|twdc|walt\s*disney/i, merchant: 'Deposit - Doug Disney Paycheck' },
                             { re: /companycam/i, merchant: 'Paystub - CompanyCam' },
                         ];
                         let matched = false;
@@ -1952,7 +2006,7 @@
                         if (!matched) {
                             for (const rec of RECURRING_TRANSACTIONS) {
                                 if (rec.txnType === 'deposit' && rec.matchMerchant) {
-                                    if (lowerText.includes(rec.matchMerchant)) {
+                                    if (lowerText.includes(rec.matchMerchant.toLowerCase())) {
                                         merchant = rec.merchant;
                                         matched = true;
                                         break;
@@ -1961,9 +2015,9 @@
                             }
                         }
                         if (!matched) {
-                            // Generic paystub — try to extract company name from first few lines
                             merchant = 'Paycheck Deposit';
                         }
+
                     }
 
                     // ---- PAYMENT CONFIRMATION DETECTION ----
@@ -1981,6 +2035,7 @@
                         date,
                         category: cat,
                         txnType,
+
                         fullText: text
                     };
                 } catch (err) {
@@ -2225,6 +2280,9 @@
                     setDate(result.date);
                     setCategory(result.category || suggestCategory(finalMerchant));
                     if (result.txnType) setTxnType(result.txnType);
+                    // Suggest account from history (e.g. paystub deposits → Cap1 JCheck if that's where they usually go)
+                    const acctSugg = suggestAccountForMerchant(finalMerchant, merchantAccountMap);
+                    if (acctSugg) setAccount(acctSugg);
                 }
                 // Set receipt link from Drive upload
                 if (url) {
@@ -2271,6 +2329,12 @@
                         if (ocrResult.date) setDate(ocrResult.date);
                         if (ocrResult.category) setCategory(ocrResult.category);
                         if (ocrResult.txnType) setTxnType(ocrResult.txnType);
+                        // Suggest account from history
+                        const ocrMerchantForAcct = ocrResult.merchant || merchant;
+                        if (ocrMerchantForAcct) {
+                            const acctSugg = suggestAccountForMerchant(ocrMerchantForAcct, merchantAccountMap);
+                            if (acctSugg) setAccount(acctSugg);
+                        }
                     }
 
                     // Set receipt link from Drive upload
@@ -2344,15 +2408,25 @@
 
                                 // Autofill from OCR
                                 if (ocrResult) {
-                                    if (!merchant && ocrResult.merchant) {
+                                    if (ocrResult.merchant) {
                                         let corrected = (ocrResult.merchant || '').trim();
-                                        const knownNames = [...new Set((allExpenses || []).map(e => e.merchant).filter(Boolean))];
-                                        corrected = fuzzyMatchMerchant(corrected, knownNames);
+                                        const isAmazonOrder = /^Amazon - \d{3}-\d{7}-\d{7}$/.test(corrected);
+                                        if (!isAmazonOrder) {
+                                            const knownNames = [...new Set((allExpenses || []).map(e => e.merchant).filter(Boolean))];
+                                            corrected = fuzzyMatchMerchant(corrected, knownNames);
+                                        }
                                         setMerchant(corrected);
-                                        if (!isEdit) setCategory(suggestCategory(corrected));
                                     }
-                                    if (!amount && ocrResult.amount) setAmount(ocrResult.amount.toString());
+                                    if (ocrResult.amount) setAmount(ocrResult.amount.toString());
                                     if (ocrResult.date) setDate(ocrResult.date);
+                                    if (ocrResult.category) setCategory(ocrResult.category);
+                                    if (ocrResult.txnType) setTxnType(ocrResult.txnType);
+                                    // Suggest account from history
+                                    const driveOcrMerchant = ocrResult.merchant || '';
+                                    if (driveOcrMerchant) {
+                                        const acctSugg = suggestAccountForMerchant(driveOcrMerchant, merchantAccountMap);
+                                        if (acctSugg) setAccount(acctSugg);
+                                    }
                                 }
                             } catch (err) {
                                 console.error('Drive import failed:', err);
