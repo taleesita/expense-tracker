@@ -1460,7 +1460,91 @@
                 return images;
             };
 
-            // Preprocess image: auto-crop receipt from background + enhance contrast
+            // Crop receipt from background (keeps color, for Drive upload / display)
+            const cropReceiptImage = (dataUrl) => {
+                return new Promise((resolve) => {
+                    const img = new Image();
+                    img.onload = () => {
+                        const canvas = document.createElement('canvas');
+                        const ctx = canvas.getContext('2d');
+                        canvas.width = img.width;
+                        canvas.height = img.height;
+                        ctx.drawImage(img, 0, 0);
+
+                        const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                        const data = imgData.data;
+                        const w = canvas.width, h = canvas.height;
+
+                        // Grayscale for analysis only
+                        const gray = new Uint8Array(w * h);
+                        for (let i = 0; i < data.length; i += 4) {
+                            gray[i / 4] = Math.round(0.299 * data[i] + 0.587 * data[i+1] + 0.114 * data[i+2]);
+                        }
+
+                        // Variance-based edge detection (same as preprocessImage)
+                        const blockSize = Math.max(8, Math.round(Math.min(w, h) / 80));
+                        const rowVar = new Float32Array(h);
+                        const colVar = new Float32Array(w);
+                        for (let y = 0; y < h; y++) {
+                            let sum = 0, sumSq = 0, n = 0;
+                            for (let x = 0; x < w; x += 2) {
+                                const v = gray[y * w + x]; sum += v; sumSq += v * v; n++;
+                            }
+                            const mean = sum / n;
+                            rowVar[y] = (sumSq / n) - (mean * mean);
+                        }
+                        for (let x = 0; x < w; x++) {
+                            let sum = 0, sumSq = 0, n = 0;
+                            for (let y = 0; y < h; y += 2) {
+                                const v = gray[y * w + x]; sum += v; sumSq += v * v; n++;
+                            }
+                            const mean = sum / n;
+                            colVar[x] = (sumSq / n) - (mean * mean);
+                        }
+                        const smooth = (arr, radius) => {
+                            const out = new Float32Array(arr.length);
+                            for (let i = 0; i < arr.length; i++) {
+                                let s = 0, c = 0;
+                                for (let j = Math.max(0, i - radius); j <= Math.min(arr.length - 1, i + radius); j++) { s += arr[j]; c++; }
+                                out[i] = s / c;
+                            }
+                            return out;
+                        };
+                        const smoothRow = smooth(rowVar, blockSize);
+                        const smoothCol = smooth(colVar, blockSize);
+                        const sortedV = [...smoothRow].sort((a, b) => a - b);
+                        const medianVar = sortedV[Math.floor(sortedV.length / 2)];
+                        const varThresh = Math.max(medianVar * 0.15, 50);
+
+                        let top = 0, bottom = h - 1, left = 0, right = w - 1;
+                        for (top = 0; top < h && smoothRow[top] < varThresh; top++);
+                        for (bottom = h - 1; bottom > top && smoothRow[bottom] < varThresh; bottom--);
+                        for (left = 0; left < w && smoothCol[left] < varThresh; left++);
+                        for (right = w - 1; right > left && smoothCol[right] < varThresh; right--);
+
+                        const pad = Math.round(Math.min(w, h) * 0.02);
+                        top = Math.max(0, top - pad); bottom = Math.min(h - 1, bottom + pad);
+                        left = Math.max(0, left - pad); right = Math.min(w - 1, right + pad);
+                        const cropW = right - left + 1, cropH = bottom - top + 1;
+                        const shouldCrop = (left > w * 0.03 || top > h * 0.03 || right < w * 0.97 || bottom < h * 0.97);
+
+                        if (shouldCrop) {
+                            const outCanvas = document.createElement('canvas');
+                            outCanvas.width = cropW;
+                            outCanvas.height = cropH;
+                            outCanvas.getContext('2d').drawImage(canvas, left, top, cropW, cropH, 0, 0, cropW, cropH);
+                            console.log(`cropReceiptImage: cropped ${w}x${h} → ${cropW}x${cropH}`);
+                            outCanvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.85);
+                        } else {
+                            console.log('cropReceiptImage: no crop needed');
+                            canvas.toBlob((blob) => resolve(blob), 'image/jpeg', 0.85);
+                        }
+                    };
+                    img.src = dataUrl;
+                });
+            };
+
+            // Preprocess image: auto-crop receipt from background + enhance contrast (for OCR)
             const preprocessImage = (dataUrl) => {
                 return new Promise((resolve) => {
                     const img = new Image();
@@ -2017,10 +2101,21 @@
 
             const handleScan = async (file) => {
                 setShowOCRSpinner(true);
-                // Run OCR and Drive upload in parallel (same as handleReceiptUpload)
+                // Pre-crop the image for Drive upload (keeps color)
+                let uploadFile = file;
+                try {
+                    const dataUrl = await new Promise((res) => {
+                        const r = new FileReader(); r.onload = (e) => res(e.target.result); r.readAsDataURL(file);
+                    });
+                    const croppedBlob = await cropReceiptImage(dataUrl);
+                    if (croppedBlob) {
+                        uploadFile = new File([croppedBlob], file.name || 'receipt.jpg', { type: 'image/jpeg' });
+                    }
+                } catch (err) { console.error('Crop failed, using original:', err); }
+                // Run OCR (on original) and Drive upload (cropped) in parallel
                 const [result, url] = await Promise.all([
                     scanReceipt(file).catch(err => { console.error('OCR error:', err); return null; }),
-                    uploadReceipt(file, merchant || 'receipt', userName).catch(err => { console.error('Upload error:', err); return null; })
+                    uploadReceipt(uploadFile, merchant || 'receipt', userName).catch(err => { console.error('Upload error:', err); return null; })
                 ]);
                 setShowOCRSpinner(false);
                 if (result) {
@@ -2046,11 +2141,22 @@
             const handleReceiptUpload = async (file) => {
                 if (!token) return;
                 try {
-                    // Run OCR and Drive upload in parallel
+                    // Pre-crop the image for Drive upload (keeps color)
+                    let uploadFile = file;
+                    if (file.type?.startsWith('image/')) {
+                        try {
+                            const dataUrl = await new Promise((res) => {
+                                const r = new FileReader(); r.onload = (e) => res(e.target.result); r.readAsDataURL(file);
+                            });
+                            const croppedBlob = await cropReceiptImage(dataUrl);
+                            if (croppedBlob) uploadFile = new File([croppedBlob], file.name || 'receipt.jpg', { type: 'image/jpeg' });
+                        } catch (err) { console.error('Crop failed, using original:', err); }
+                    }
+                    // Run OCR (on original) and Drive upload (cropped) in parallel
                     setShowOCRSpinner(true);
                     const [ocrResult, url] = await Promise.all([
                         scanReceipt(file).catch(err => { console.error('OCR error:', err); return null; }),
-                        uploadReceipt(file, merchant || 'receipt', userName).catch(err => { console.error('Upload error:', err); return null; })
+                        uploadReceipt(uploadFile, merchant || 'receipt', userName).catch(err => { console.error('Upload error:', err); return null; })
                     ]);
                     setShowOCRSpinner(false);
 
@@ -4217,6 +4323,7 @@
             const [toast, setToast] = useState('');
             const [confirmationData, setConfirmationData] = useState(null);
             const [isSaving, setIsSaving] = useState(false);
+            const pendingSaveRef = useRef(null);
             const [testMode, setTestMode] = useState(_testMode);
             const [dismissedReminders, setDismissedReminders] = useState(() => {
                 try { return JSON.parse(localStorage.getItem('dismissed_reminders') || '{}'); } catch { return {}; }
@@ -4384,6 +4491,14 @@
             }, [user, token, fetchExpenses]);
 
             const handleAddExpense = async (expenseData) => {
+                // If token expired, auto-trigger reconnect and queue the save for retry
+                if (!token || needsReconnect) {
+                    pendingSaveRef.current = expenseData;
+                    setIsSaving(true);
+                    setToast('Reconnecting to Google...');
+                    reconnect();
+                    return;
+                }
                 setIsSaving(true);
                 try {
                     pushUndo(expenses);
@@ -4421,6 +4536,16 @@
                     setIsSaving(false);
                 }
             };
+
+            // Auto-retry pending save after reconnect provides a fresh token
+            useEffect(() => {
+                if (token && pendingSaveRef.current) {
+                    const data = pendingSaveRef.current;
+                    pendingSaveRef.current = null;
+                    setToast('Reconnected! Saving...');
+                    handleAddExpense(data);
+                }
+            }, [token]);
 
             const handleUpdateExpense = async (rowIndex, updated) => {
                 pushUndo(expenses);
