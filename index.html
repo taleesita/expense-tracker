@@ -970,16 +970,38 @@
 
             // Extract token from Firebase sign-in result
             const handleAuthResult = useCallback((result) => {
-                const credential = result.credential ||
-                    firebase.auth.GoogleAuthProvider.credentialFromResult(result);
-                if (credential?.accessToken) {
-                    const expiry = Date.now() + 55 * 60 * 1000; // ~55 min
-                    setToken(credential.accessToken);
-                    tokenExpiryRef.current = expiry;
-                    saveToken(credential.accessToken, expiry);
-                    setNeedsReconnect(false);
-                    return credential.accessToken;
+                // Try multiple ways to extract the Google OAuth access token
+                let accessToken = null;
+                try {
+                    // Method 1: Direct credential on result (compat SDK)
+                    if (result.credential && result.credential.accessToken) {
+                        accessToken = result.credential.accessToken;
+                    }
+                    // Method 2: credentialFromResult static method
+                    if (!accessToken) {
+                        const cred = firebase.auth.GoogleAuthProvider.credentialFromResult
+                            ? firebase.auth.GoogleAuthProvider.credentialFromResult(result)
+                            : null;
+                        if (cred && cred.accessToken) accessToken = cred.accessToken;
+                    }
+                    // Method 3: additionalUserInfo (some SDK versions)
+                    if (!accessToken && result.additionalUserInfo && result.additionalUserInfo.profile) {
+                        console.log('Auth result has additionalUserInfo but no accessToken');
+                    }
+                } catch (err) {
+                    console.error('Error extracting credential:', err);
                 }
+                if (accessToken) {
+                    const expiry = Date.now() + 55 * 60 * 1000; // ~55 min
+                    setToken(accessToken);
+                    tokenExpiryRef.current = expiry;
+                    saveToken(accessToken, expiry);
+                    setNeedsReconnect(false);
+                    console.log('Google access token obtained, length:', accessToken.length);
+                    return accessToken;
+                }
+                console.error('Failed to extract Google access token from Firebase result:', Object.keys(result));
+                setNeedsReconnect(true);
                 return null;
             }, [saveToken]);
 
@@ -1087,6 +1109,7 @@
         const useGoogleSheets = (token) => {
             const [expenses, setExpenses] = useState([]);
             const [loading, setLoading] = useState(false);
+            const [apiError, setApiError] = useState(null);
 
             // Sheet columns: A=Timestamp, B=Purchase Date, C=Card, D=Store/Transaction,
             // E=Charge/Debit, F=Deposit, G=Fee, H=Category, I=Receipt
@@ -1098,6 +1121,15 @@
                         `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A:J`,
                         { headers: { 'Authorization': `Bearer ${token}` } }
                     );
+                    if (!resp.ok) {
+                        const errData = await resp.json().catch(() => ({}));
+                        const msg = errData?.error?.message || resp.statusText;
+                        console.error('Sheets API error:', resp.status, msg);
+                        setApiError('Sheets API: ' + resp.status + ' — ' + msg);
+                        if (!silent) setLoading(false);
+                        return;
+                    }
+                    setApiError(null);
                     const data = await resp.json();
                     const rows = data.values || [];
                     const parsed = [];
@@ -1312,7 +1344,8 @@
                 fetchExpenses,
                 appendExpense,
                 updateExpense,
-                deleteExpense
+                deleteExpense,
+                apiError
             };
         };
 
@@ -4086,7 +4119,7 @@
         // ============ MAIN APP ============
         const App = () => {
             const { user, token, login, logout, authLoading, needsReconnect, reconnect } = useGoogleAuth();
-            const { expenses, setExpenses, loading, fetchExpenses, appendExpense, updateExpense, deleteExpense } = useGoogleSheets(token);
+            const { expenses, setExpenses, loading, fetchExpenses, appendExpense, updateExpense, deleteExpense, apiError } = useGoogleSheets(token);
             const { push: pushUndo, undo: undoAction, canUndo } = useUndoStack();
 
             const [activeTab, setActiveTab] = useState('home');
@@ -4416,6 +4449,13 @@
 
             return (
                 <div className="flex flex-col h-screen bg-gray-50">
+                    {/* API Error Banner */}
+                    {apiError && (
+                        <div className="bg-red-500 text-white text-center py-2 px-4 text-xs font-medium z-40 relative">
+                            ⚠️ {apiError}
+                            <button onClick={reconnect} className="ml-2 underline font-bold">Reconnect</button>
+                        </div>
+                    )}
                     {/* Test Mode Banner */}
                     {testMode && (
                         <div className="bg-amber-400 text-amber-900 text-center py-1.5 text-xs font-bold tracking-wide z-40 relative">
