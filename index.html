@@ -10,6 +10,7 @@
     <meta name="apple-mobile-web-app-title" content="Expenses">
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+    <script src="https://apis.google.com/js/api.js"></script>
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -1900,13 +1901,71 @@
                         }
                     }
 
-                    console.log('OCR parsed:', { merchant, amount, date });
+                    // ---- PAYSTUB / PAYCHECK DETECTION ----
+                    // If the document looks like a paystub, override merchant/amount/category/txnType
+                    const lowerText = text.toLowerCase();
+                    const isPaystub = (
+                        (/net\s*pay/i.test(text) || /direct\s*dep/i.test(text))
+                        && (/total\s*earnings|gross\s*pay|salary|pay\s*period|payroll/i.test(text))
+                    );
+                    let txnType = null;
 
+                    if (isPaystub) {
+                        txnType = 'deposit';
+
+                        // Extract Net Pay amount (the actual deposit, not gross)
+                        const netPayPatterns = [
+                            /net\s*pay[:\s]*\$?\s*([\d,]+\.\d{2})/i,
+                            /direct\s*dep(?:osit)?[^$\d]*\$?\s*([\d,]+\.\d{2})/i,
+                            /net\s*amount[:\s]*\$?\s*([\d,]+\.\d{2})/i,
+                        ];
+                        for (const pat of netPayPatterns) {
+                            const m = text.match(pat);
+                            if (m) { amount = parseFloat(m[1].replace(/,/g, '')); break; }
+                        }
+
+                        // Match company to known recurring paycheck merchants
+                        const companyPatterns = [
+                            { re: /disney/i, merchant: 'Deposit - Doug Disney Paycheck' },
+                            { re: /companycam/i, merchant: 'Paystub - CompanyCam' },
+                        ];
+                        let matched = false;
+                        for (const { re, merchant: m } of companyPatterns) {
+                            if (re.test(text)) { merchant = m; matched = true; break; }
+                        }
+                        // Fallback: try to match against RECURRING_TRANSACTIONS
+                        if (!matched) {
+                            for (const rec of RECURRING_TRANSACTIONS) {
+                                if (rec.txnType === 'deposit' && rec.matchMerchant) {
+                                    if (lowerText.includes(rec.matchMerchant)) {
+                                        merchant = rec.merchant;
+                                        matched = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if (!matched) {
+                            // Generic paystub — try to extract company name from first few lines
+                            merchant = 'Paycheck Deposit';
+                        }
+                    }
+
+                    // ---- PAYMENT CONFIRMATION DETECTION ----
+                    // "scheduled a payment", "payment confirmed", etc. → txnType = 'card_payment'
+                    if (!txnType && /schedul\w+\s+\w*\s*payment|payment\s+(confirm|schedul|of\s+\$)/i.test(text)) {
+                        txnType = 'card_payment';
+                    }
+
+                    console.log('OCR parsed:', { merchant, amount, date, isPaystub, txnType });
+
+                    const cat = isPaystub ? 'work_income' : suggestCategory(merchant);
                     return {
                         merchant,
                         amount,
                         date,
-                        category: suggestCategory(merchant),
+                        category: cat,
+                        txnType,
                         fullText: text
                     };
                 } catch (err) {
@@ -2191,11 +2250,12 @@
                                 corrected = fuzzyMatchMerchant(corrected, knownNames);
                             }
                             setMerchant(corrected);
-                            if (!isEdit) setCategory(suggestCategory(corrected));
+                            if (!isEdit) setCategory(ocrResult.category || suggestCategory(corrected));
                         }
                         if (!amount && ocrResult.amount) setAmount(ocrResult.amount.toString());
                         if (ocrResult.date) setDate(ocrResult.date);
-                        if (ocrResult.category && !merchant) setCategory(ocrResult.category);
+                        if (ocrResult.category) setCategory(ocrResult.category);
+                        if (ocrResult.txnType) setTxnType(ocrResult.txnType);
                     }
 
                     // Set receipt link from Drive upload
@@ -2213,6 +2273,73 @@
                     setTimeout(() => setValidationErrors(prev => ({...prev, upload: false})), 5000);
                 }
             };
+
+            // Import from Google Drive using Picker API
+            const handleDrivePick = useCallback(async () => {
+                if (!token) { reconnect(); return; }
+                // Load the Picker API if not already loaded
+                await new Promise((resolve) => {
+                    if (window.google?.picker) { resolve(); return; }
+                    gapi.load('picker', resolve);
+                });
+                const picker = new google.picker.PickerBuilder()
+                    .setOAuthToken(token)
+                    .addView(new google.picker.DocsView()
+                        .setIncludeFolders(true)
+                        .setMimeTypes('image/jpeg,image/png,image/webp,image/heic,application/pdf'))
+                    .setCallback(async (data) => {
+                        if (data.action === google.picker.Action.PICKED) {
+                            const doc = data.docs[0];
+                            setShowOCRSpinner(true);
+                            try {
+                                // Download the file content
+                                const resp = await fetch(`https://www.googleapis.com/drive/v3/files/${doc.id}?alt=media`, {
+                                    headers: { 'Authorization': `Bearer ${token}` }
+                                });
+                                const blob = await resp.blob();
+                                const file = new File([blob], doc.name || 'receipt', { type: blob.type || 'image/jpeg' });
+
+                                // Re-upload to receipts folder with proper naming (same as Scan/Upload)
+                                const ocrMerchant = merchant || 'receipt';
+                                const [ocrResult, url] = await Promise.all([
+                                    scanReceipt(file).catch(() => null),
+                                    uploadReceipt(file, ocrMerchant, userName).catch(() => null)
+                                ]);
+
+                                // Set receipt URL from the re-uploaded copy
+                                if (url) {
+                                    uploadedReceiptUrl.current = url;
+                                    setReceipt(url);
+                                } else {
+                                    // Fallback: link to the original file
+                                    const driveUrl = `https://drive.google.com/file/d/${doc.id}/view`;
+                                    uploadedReceiptUrl.current = driveUrl;
+                                    setReceipt(driveUrl);
+                                }
+
+                                // Autofill from OCR
+                                if (ocrResult) {
+                                    if (!merchant && ocrResult.merchant) {
+                                        let corrected = (ocrResult.merchant || '').trim();
+                                        const knownNames = [...new Set((allExpenses || []).map(e => e.merchant).filter(Boolean))];
+                                        corrected = fuzzyMatchMerchant(corrected, knownNames);
+                                        setMerchant(corrected);
+                                        if (!isEdit) setCategory(suggestCategory(corrected));
+                                    }
+                                    if (!amount && ocrResult.amount) setAmount(ocrResult.amount.toString());
+                                    if (ocrResult.date) setDate(ocrResult.date);
+                                }
+                            } catch (err) {
+                                console.error('Drive import failed:', err);
+                            } finally {
+                                setShowOCRSpinner(false);
+                            }
+                        }
+                    })
+                    .setTitle('Select a receipt')
+                    .build();
+                picker.setVisible(true);
+            }, [token, merchant, amount, allExpenses, isEdit, scanReceipt, uploadReceipt, userName, reconnect]);
 
             // Cancel: delete uploaded Drive file if any
             const handleCancel = () => {
@@ -2436,10 +2563,19 @@
                                 className="hidden"
                                 id="receipt-file"
                             />
-                            <label htmlFor="receipt-file" className="flex items-center justify-center gap-2 flex-1 bg-gray-200 text-gray-800 py-2.5 rounded-lg font-medium hover:bg-gray-300 cursor-pointer text-sm">
+                            <label htmlFor="receipt-file" className="flex items-center justify-center gap-2 bg-gray-200 text-gray-800 py-2.5 px-3 rounded-lg font-medium hover:bg-gray-300 cursor-pointer text-sm" style={{flex: '1'}}>
                                 <Upload2Icon size={16} className="flex-shrink-0" />
-                                <span>Upload File</span>
+                                <span>Upload</span>
                             </label>
+                            <button
+                                type="button"
+                                onClick={handleDrivePick}
+                                className="flex items-center justify-center gap-1.5 bg-gray-200 text-gray-800 py-2.5 px-3 rounded-lg font-medium hover:bg-gray-300 text-sm"
+                                style={{flex: '0.8'}}
+                            >
+                                <svg width="16" height="16" viewBox="0 0 87.3 78" xmlns="http://www.w3.org/2000/svg"><path d="M6.6 66.85l3.85 6.65c.8 1.4 1.95 2.5 3.3 3.3l13.75-23.8H0c0 1.55.4 3.1 1.2 4.5l5.4 9.35z" fill="#0066DA"/><path d="M43.65 25.15L29.9 1.35c-1.35.8-2.5 1.9-3.3 3.3L1.2 48.2c-.8 1.4-1.2 2.95-1.2 4.5h27.5l16.15-27.55z" fill="#00AC47"/><path d="M73.55 76.8c1.35-.8 2.5-1.9 3.3-3.3l1.6-2.75L84.3 61c.8-1.4 1.2-2.95 1.2-4.5H58.2l6.95 12.2 8.4 8.1z" fill="#EA4335"/><path d="M43.65 25.15L57.4 1.35c-1.35-.8-2.9-1.2-4.5-1.2H34.4c-1.6 0-3.15.45-4.5 1.2l13.75 23.8z" fill="#00832D"/><path d="M58.2 52.7H27.5L13.75 76.5c1.35.8 2.9 1.2 4.5 1.2h35.8c1.6 0 3.15-.45 4.5-1.2L58.2 52.7z" fill="#2684FC"/><path d="M73.4 26.5L60.1 4.65c-.8-1.4-1.95-2.5-3.3-3.3L43.05 25.15l15.15 27.55h27.4c0-1.55-.4-3.1-1.2-4.5L73.4 26.5z" fill="#FFBA00"/></svg>
+                                <span>Drive</span>
+                            </button>
                         </div>
 
                         <div className="space-y-3">
