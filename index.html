@@ -1031,16 +1031,12 @@
                 return null;
             }, [saveToken]);
 
-            // Check for any pending redirect result (safety net)
-            useEffect(() => {
-                expenseAuth.getRedirectResult().then((result) => {
-                    if (result && result.user) handleAuthResult(result);
-                }).catch(() => {});
-            }, [handleAuthResult]);
-
             // Firebase auth state listener — persistent session
             useEffect(() => {
+                // Safety timeout: if auth state never resolves, stop loading after 5s
+                const timeout = setTimeout(() => setAuthLoading(false), 5000);
                 const unsub = expenseAuth.onAuthStateChanged((fbUser) => {
+                    clearTimeout(timeout);
                     if (fbUser && ALLOWED_EMAILS.includes(fbUser.email)) {
                         const usr = {
                             email: fbUser.email,
