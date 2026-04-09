@@ -1099,24 +1099,24 @@
             }, [buildProvider, handleAuthResult]);
 
             // Reconnect — get a fresh Google API token (user is already signed in via Firebase)
+            // Try popup first on ALL platforms (fast when Google session exists).
+            // Fall back to redirect only if popup is blocked.
             const reconnect = useCallback(async () => {
                 if (!expenseAuth.currentUser) { login(); return; }
                 try {
-                    if (isMobile) {
-                        // On mobile, always use signInWithRedirect (reauthenticateWithRedirect is unreliable)
-                        await expenseAuth.signInWithRedirect(buildProvider());
-                    } else {
+                    const result = await expenseAuth.signInWithPopup(buildProvider());
+                    handleAuthResult(result);
+                } catch (err) {
+                    console.error('Reconnect popup failed:', err.code, err.message);
+                    if (err.code === 'auth/popup-blocked' || err.code === 'auth/popup-closed-by-user'
+                        || err.code === 'auth/cancelled-popup-request') {
+                        // Popup blocked or closed — fall back to redirect
                         try {
-                            const result = await expenseAuth.currentUser.reauthenticateWithPopup(buildProvider());
-                            handleAuthResult(result);
-                        } catch (err) {
-                            console.error('Reauthenticate failed, trying signInWithPopup:', err);
-                            const result = await expenseAuth.signInWithPopup(buildProvider());
-                            handleAuthResult(result);
+                            await expenseAuth.signInWithRedirect(buildProvider());
+                        } catch (err2) {
+                            console.error('Reconnect redirect also failed:', err2);
                         }
                     }
-                } catch (err) {
-                    console.error('Reconnect failed:', err);
                 }
             }, [buildProvider, handleAuthResult, login]);
 
@@ -1142,29 +1142,6 @@
                 return () => clearInterval(interval);
             }, [user, token, buildProvider, handleAuthResult]);
 
-            // Auto-reconnect on load if token expired (avoids showing empty data)
-            const autoReconnectAttempted = useRef(false);
-            useEffect(() => {
-                if (autoReconnectAttempted.current) return;
-                if (!user || !needsReconnect || authLoading) return;
-                // Don't auto-reconnect if we just came back from a redirect (would cause loop)
-                const justRedirected = sessionStorage.getItem('expense_reconnecting');
-                if (justRedirected) {
-                    sessionStorage.removeItem('expense_reconnecting');
-                    return;
-                }
-                autoReconnectAttempted.current = true;
-                // Small delay to let getRedirectResult settle first
-                const timer = setTimeout(() => {
-                    console.log('Auto-reconnecting (token expired on load)');
-                    if (isMobile) {
-                        try { sessionStorage.setItem('expense_reconnecting', '1'); } catch {}
-                    }
-                    reconnect();
-                }, 1500);
-                return () => clearTimeout(timer);
-            }, [user, needsReconnect, authLoading, reconnect]);
-
             const logout = useCallback(() => {
                 expenseAuth.signOut();
                 setUser(null);
@@ -1178,8 +1155,31 @@
         };
 
         // ============ GOOGLE SHEETS API ============
+        const EXPENSES_CACHE_KEY = 'expense_cached_data';
+        const loadCachedExpenses = () => {
+            try {
+                const raw = localStorage.getItem(EXPENSES_CACHE_KEY);
+                if (raw) return JSON.parse(raw);
+            } catch {}
+            return [];
+        };
+        const saveCachedExpenses = (expenses) => {
+            try {
+                // Only cache essential fields to keep localStorage small
+                const slim = expenses.map(e => ({
+                    rowIndex: e.rowIndex, timestamp: e.timestamp, date: e.date,
+                    merchant: e.merchant, amount: e.amount, rawCharge: e.rawCharge,
+                    rawDeposit: e.rawDeposit, category: e.category, categoryRaw: e.categoryRaw,
+                    account: e.account, accountRaw: e.accountRaw, receipt: e.receipt,
+                    fee: e.fee, txnType: e.txnType, isCredit: e.isCredit,
+                    _balanceOnly: e._balanceOnly, _recKey: e._recKey,
+                }));
+                localStorage.setItem(EXPENSES_CACHE_KEY, JSON.stringify(slim));
+            } catch {}
+        };
+
         const useGoogleSheets = (token) => {
-            const [expenses, setExpenses] = useState([]);
+            const [expenses, setExpenses] = useState(() => loadCachedExpenses());
             const [loading, setLoading] = useState(false);
             const [apiError, setApiError] = useState(null);
 
@@ -1270,6 +1270,7 @@
                     });
                     setExpenses(parsed);
                     setExpensesCache(parsed);
+                    saveCachedExpenses(parsed);
                 } catch (err) {
                     console.error('Failed to fetch expenses:', err);
                 } finally {
