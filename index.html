@@ -1032,9 +1032,8 @@
 
             const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 
-            // On mobile, check for pending redirect result (from signInWithRedirect)
+            // Check for pending redirect result (from signInWithRedirect/reauthenticateWithRedirect)
             useEffect(() => {
-                if (!isMobile) return;
                 expenseAuth.getRedirectResult().then((result) => {
                     if (result && result.user) {
                         console.log('Redirect sign-in completed');
@@ -1104,24 +1103,20 @@
                 if (!expenseAuth.currentUser) { login(); return; }
                 try {
                     if (isMobile) {
-                        // On mobile, use redirect for reconnect too
-                        await expenseAuth.currentUser.reauthenticateWithRedirect(buildProvider());
+                        // On mobile, always use signInWithRedirect (reauthenticateWithRedirect is unreliable)
+                        await expenseAuth.signInWithRedirect(buildProvider());
                     } else {
-                        const result = await expenseAuth.currentUser.reauthenticateWithPopup(buildProvider());
-                        handleAuthResult(result);
-                    }
-                } catch (err) {
-                    console.error('Reconnect failed:', err);
-                    try {
-                        if (isMobile) {
-                            await expenseAuth.signInWithRedirect(buildProvider());
-                        } else {
+                        try {
+                            const result = await expenseAuth.currentUser.reauthenticateWithPopup(buildProvider());
+                            handleAuthResult(result);
+                        } catch (err) {
+                            console.error('Reauthenticate failed, trying signInWithPopup:', err);
                             const result = await expenseAuth.signInWithPopup(buildProvider());
                             handleAuthResult(result);
                         }
-                    } catch (err2) {
-                        console.error('Fallback sign-in failed:', err2);
                     }
+                } catch (err) {
+                    console.error('Reconnect failed:', err);
                 }
             }, [buildProvider, handleAuthResult, login]);
 
@@ -1146,6 +1141,29 @@
                 const interval = setInterval(checkRefresh, 5 * 60 * 1000);
                 return () => clearInterval(interval);
             }, [user, token, buildProvider, handleAuthResult]);
+
+            // Auto-reconnect on load if token expired (avoids showing empty data)
+            const autoReconnectAttempted = useRef(false);
+            useEffect(() => {
+                if (autoReconnectAttempted.current) return;
+                if (!user || !needsReconnect || authLoading) return;
+                // Don't auto-reconnect if we just came back from a redirect (would cause loop)
+                const justRedirected = sessionStorage.getItem('expense_reconnecting');
+                if (justRedirected) {
+                    sessionStorage.removeItem('expense_reconnecting');
+                    return;
+                }
+                autoReconnectAttempted.current = true;
+                // Small delay to let getRedirectResult settle first
+                const timer = setTimeout(() => {
+                    console.log('Auto-reconnecting (token expired on load)');
+                    if (isMobile) {
+                        try { sessionStorage.setItem('expense_reconnecting', '1'); } catch {}
+                    }
+                    reconnect();
+                }, 1500);
+                return () => clearTimeout(timer);
+            }, [user, needsReconnect, authLoading, reconnect]);
 
             const logout = useCallback(() => {
                 expenseAuth.signOut();
