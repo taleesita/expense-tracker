@@ -1680,20 +1680,21 @@
                     }
                     merchant = merchant || 'Unknown';
 
-                    // Amazon order number detection: pattern ###-#######-#######
-                    const amazonOrderRe = /(\d{3}-\d{7}-\d{7})/;
-                    const amazonOrderMatch = text.match(amazonOrderRe);
-                    const isAmazon = /amazon/i.test(text);
-                    // Known stores that are Amazon subsidiaries or mention Amazon on receipts
-                    const isKnownNonAmazon = /whole\s*foods|wholefoods/i.test(merchant) || /whole\s*foods|wholefoods/i.test(text.split('\n').slice(0, 5).join(' '));
-                    if (isKnownNonAmazon) {
-                        // Whole Foods receipt — keep the merchant as-is, don't override with Amazon
-                        if (!/whole\s*foods/i.test(merchant)) merchant = 'Whole Foods';
-                    } else if (amazonOrderMatch && isAmazon) {
-                        merchant = `Amazon - ${amazonOrderMatch[1]}`;
-                    } else if (isAmazon && !amazonOrderMatch) {
-                        // Amazon receipt but couldn't extract order number — still label it Amazon
-                        if (!/amazon/i.test(merchant)) merchant = 'Amazon';
+                    // Known grocery/retail stores that mention Amazon on receipts (subsidiaries)
+                    // Check the FULL text — Whole Foods receipts say "WHOLE FOODS" near the top
+                    const wholefoods = /whole\s*foods/i.test(text);
+                    if (wholefoods) {
+                        merchant = 'Whole Foods';
+                    } else {
+                        // Amazon order number detection: pattern ###-#######-#######
+                        const amazonOrderRe = /(\d{3}-\d{7}-\d{7})/;
+                        const amazonOrderMatch = text.match(amazonOrderRe);
+                        const isAmazon = /amazon/i.test(text);
+                        if (amazonOrderMatch && isAmazon) {
+                            merchant = `Amazon - ${amazonOrderMatch[1]}`;
+                        } else if (isAmazon && !amazonOrderMatch) {
+                            if (!/amazon/i.test(merchant)) merchant = 'Amazon';
+                        }
                     }
 
                     // Look for total/amount — try labeled totals first, then largest dollar amount
@@ -1705,16 +1706,33 @@
                         new RegExp('scheduled\\s+a?\\s*\\$?\\s*' + moneyRe + '\\s*payment', 'i'),
                         new RegExp('payment\\s+of\\s+\\$?\\s*' + moneyRe, 'i'),
                         new RegExp('authorize[\\s\\S]{0,60}payment\\s+of\\s+\\$?\\s*' + moneyRe, 'i'),
-                        // Standard receipt totals
+                        // Standard receipt totals — most specific first
                         new RegExp('(?:grand\\s*total|total\\s*due|amount\\s*due|balance\\s*due|total\\s*charged?)[\\s:]*\\$?\\s*' + moneyRe, 'i'),
-                        new RegExp('(?:total)[\\s:]*\\$?\\s*' + moneyRe, 'i'),
-                        new RegExp('(?:amount|subtotal|sub\\s*total)[\\s:]*\\$?\\s*' + moneyRe, 'i'),
-                        // "Amount" on one line, "$X" on next line (common in payment UIs)
-                        new RegExp('amount[\\s\\n]*\\$?\\s*' + moneyRe, 'im'),
+                        // Standalone "total" with word boundary — NOT "subtotal", NOT "total savings/tax"
+                        new RegExp('(?:^|\\n)\\s*total(?!\\s*(?:savings?|tax|before|items?|qty))\\s*[:$\\s]*\\$?\\s*' + moneyRe, 'im'),
                     ];
                     for (const pat of totalPatterns) {
                         const m = text.match(pat);
                         if (m) { amount = parseMoney(m[1]); break; }
+                    }
+                    // If no labeled total found, try finding the LAST "total" line (grocery receipts put final total last)
+                    if (!amount) {
+                        const totalLineRe = new RegExp('(?:^|\\n)\\s*total(?!\\s*(?:savings?|tax|before|items?|qty))\\s*[:$\\s]*\\$?\\s*' + moneyRe, 'gim');
+                        let lastMatch = null;
+                        for (const m of text.matchAll(totalLineRe)) lastMatch = m;
+                        if (lastMatch) amount = parseMoney(lastMatch[1]);
+                    }
+                    // Try subtotal or generic amount as fallback
+                    if (!amount) {
+                        const fallbackPats = [
+                            new RegExp('(?:subtotal|sub\\s*total)[\\s:]*\\$?\\s*' + moneyRe, 'i'),
+                            new RegExp('(?:amount)[\\s:]*\\$?\\s*' + moneyRe, 'i'),
+                            new RegExp('amount[\\s\\n]*\\$?\\s*' + moneyRe, 'im'),
+                        ];
+                        for (const pat of fallbackPats) {
+                            const m = text.match(pat);
+                            if (m) { amount = parseMoney(m[1]); break; }
+                        }
                     }
                     // Fallback: find all dollar amounts and pick the most frequent, then largest
                     if (!amount) {
