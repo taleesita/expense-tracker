@@ -1014,6 +1014,21 @@
                 return null;
             }, [saveToken]);
 
+            const isMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+
+            // On mobile, check for pending redirect result (from signInWithRedirect)
+            useEffect(() => {
+                if (!isMobile) return;
+                expenseAuth.getRedirectResult().then((result) => {
+                    if (result && result.user) {
+                        console.log('Redirect sign-in completed');
+                        handleAuthResult(result);
+                    }
+                }).catch((err) => {
+                    console.error('getRedirectResult error:', err);
+                });
+            }, [handleAuthResult]);
+
             // Firebase auth state listener — persistent session
             useEffect(() => {
                 const unsub = expenseAuth.onAuthStateChanged((fbUser) => {
@@ -1049,15 +1064,21 @@
                 return unsub;
             }, []);
 
-            // Sign in (first time or reconnect)
+            // Sign in — use redirect on mobile (avoids iOS sessionStorage partitioning), popup on desktop
             const login = useCallback(async () => {
                 try {
-                    const result = await expenseAuth.signInWithPopup(buildProvider());
-                    handleAuthResult(result);
+                    if (isMobile) {
+                        await expenseAuth.signInWithRedirect(buildProvider());
+                        // Page will reload — result handled by getRedirectResult above
+                    } else {
+                        const result = await expenseAuth.signInWithPopup(buildProvider());
+                        handleAuthResult(result);
+                    }
                 } catch (err) {
                     console.error('Sign-in failed:', err);
                     if (err.code === 'auth/popup-blocked') {
-                        alert('Popup was blocked — please allow popups for this site and try again.');
+                        // Fallback to redirect
+                        await expenseAuth.signInWithRedirect(buildProvider());
                     }
                 }
             }, [buildProvider, handleAuthResult]);
@@ -1066,14 +1087,22 @@
             const reconnect = useCallback(async () => {
                 if (!expenseAuth.currentUser) { login(); return; }
                 try {
-                    const result = await expenseAuth.currentUser.reauthenticateWithPopup(buildProvider());
-                    handleAuthResult(result);
+                    if (isMobile) {
+                        // On mobile, use redirect for reconnect too
+                        await expenseAuth.currentUser.reauthenticateWithRedirect(buildProvider());
+                    } else {
+                        const result = await expenseAuth.currentUser.reauthenticateWithPopup(buildProvider());
+                        handleAuthResult(result);
+                    }
                 } catch (err) {
                     console.error('Reconnect failed:', err);
-                    // Fall back to full sign-in
                     try {
-                        const result = await expenseAuth.signInWithPopup(buildProvider());
-                        handleAuthResult(result);
+                        if (isMobile) {
+                            await expenseAuth.signInWithRedirect(buildProvider());
+                        } else {
+                            const result = await expenseAuth.signInWithPopup(buildProvider());
+                            handleAuthResult(result);
+                        }
                     } catch (err2) {
                         console.error('Fallback sign-in failed:', err2);
                     }
