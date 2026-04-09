@@ -10,7 +10,7 @@
     <meta name="apple-mobile-web-app-title" content="Expenses">
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
-    <script src="https://apis.google.com/js/api.js"></script>
+    <!-- gapi loaded dynamically when Drive picker is needed -->
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
     <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
@@ -30,6 +30,21 @@
 <body class="bg-white">
     <div id="root"></div>
 
+    <script>
+        // Global error handler — catches Babel compile errors and runtime errors that cause white screen
+        window.onerror = function(msg, url, line, col, error) {
+            var root = document.getElementById('root');
+            if (root && !root.innerHTML.trim()) {
+                root.innerHTML = '<div style="padding:32px;font-family:system-ui;max-width:600px;margin:0 auto;">' +
+                    '<h2 style="color:#dc2626;">Something went wrong</h2>' +
+                    '<p style="color:#666;">The app failed to load. Error details:</p>' +
+                    '<pre style="background:#fef2f2;padding:16px;border-radius:8px;overflow:auto;font-size:13px;color:#991b1b;">' +
+                    msg + (line ? '\\nLine: ' + line : '') + (col ? ', Col: ' + col : '') +
+                    (error && error.stack ? '\\n\\n' + error.stack : '') + '</pre>' +
+                    '<p style="color:#666;font-size:14px;">Try refreshing the page or clearing your browser cache.</p></div>';
+            }
+        };
+    </script>
     <script type="text/babel">
         const { useState, useEffect, useRef, useCallback, useMemo } = React;
 
@@ -2277,6 +2292,16 @@
             // Import from Google Drive using Picker API
             const handleDrivePick = useCallback(async () => {
                 if (!token) { reconnect(); return; }
+                // Dynamically load gapi script if not present
+                if (!window.gapi) {
+                    await new Promise((resolve, reject) => {
+                        const s = document.createElement('script');
+                        s.src = 'https://apis.google.com/js/api.js';
+                        s.onload = resolve;
+                        s.onerror = reject;
+                        document.head.appendChild(s);
+                    });
+                }
                 // Load the Picker API if not already loaded
                 await new Promise((resolve) => {
                     if (window.google?.picker) { resolve(); return; }
@@ -5119,8 +5144,16 @@
         };
 
         // ============ RENDER ============
-        const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<App />);
+        try {
+            const root = ReactDOM.createRoot(document.getElementById('root'));
+            root.render(<App />);
+        } catch (err) {
+            console.error('Render failed:', err);
+            document.getElementById('root').innerHTML = '<div style="padding:32px;font-family:system-ui;">' +
+                '<h2 style="color:#dc2626;">App failed to render</h2>' +
+                '<pre style="background:#fef2f2;padding:16px;border-radius:8px;font-size:13px;">' +
+                err.message + '</pre></div>';
+        }
     </script>
 </body>
 </html>
