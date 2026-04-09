@@ -1215,7 +1215,7 @@
             }, [token]);
 
             const appendExpense = useCallback(async (expense, { skipRefresh = false } = {}) => {
-                if (!token) return;
+                if (!token) { throw new Error('Google connection expired — tap Reconnect at the top of the screen, then try saving again.'); }
                 try {
                     // Sheet columns: A=Timestamp, B=Purchase Date, C=Card, D=Store/Transaction,
                     // E=Charge/Debit, F=Deposit, G=Fee, H=Category, I=Receipt
@@ -2035,10 +2035,6 @@
                     setDate(result.date);
                     setCategory(result.category || suggestCategory(finalMerchant));
                     if (result.txnType) setTxnType(result.txnType);
-                    // DEBUG: show OCR results as alert so we can see what Tesseract read
-                    const debugText = result.fullText || '';
-                    const first15 = debugText.split('\n').slice(0, 15).join('\n');
-                    alert(`OCR Debug:\nMerchant: ${result.merchant}\nFinal: ${finalMerchant}\nAmount: ${result.amount}\nCategory: ${result.category}\n\nFirst 15 lines:\n${first15}`);
                 }
                 // Set receipt link from Drive upload
                 if (url) {
@@ -4418,6 +4414,9 @@
                         });
                     }
                     setTimeout(() => setConfirmationData(null), 10000);
+                } catch (err) {
+                    console.error('Save failed:', err);
+                    alert(err.message || 'Failed to save expense. Please try again.');
                 } finally {
                     setIsSaving(false);
                 }
