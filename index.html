@@ -3,6 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>Expenses</title>
     <link rel="icon" href="apple-touch-icon.png">
     <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
@@ -62,6 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
+        const APP_VERSION = 'v2.2-apr10';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
         const TEST_PARENT_FOLDER_ID = '1LJ57lHUhuLigB1NKuko39saGCRVqs8Ya';
@@ -1096,53 +1100,43 @@
                     handleAuthResult(result);
                 } catch (err) {
                     console.error('Reconnect failed:', err.code, err.message);
-                    alert('Reconnect failed: ' + (err.message || err.code) + '\n\nTry opening the app in your browser if this keeps happening.');
+                    // Don't use alert() — it's blocked in PWA standalone mode. Let caller handle via catch.
+                    throw err;
                 }
             }, [buildProvider, handleAuthResult, login]);
 
-            // Auto-refresh timer — silently reconnect before token expires
+            // Token expiry check — show reconnect banner when token is expired/expiring
+            // NOTE: We do NOT auto-open popups here because browsers block popups from timers.
+            // The user taps "Reconnect" (user-initiated click) which opens the popup successfully.
             useEffect(() => {
                 if (!user || !token) return;
-                const checkRefresh = async () => {
-                    if (tokenExpiryRef.current && Date.now() > tokenExpiryRef.current - 5 * 60 * 1000) {
-                        // Token expiring within 5 min — auto-reconnect silently
-                        console.log('Token expiring soon, auto-reconnecting...');
-                        try {
-                            const result = await expenseAuth.signInWithPopup(buildProvider());
-                            handleAuthResult(result);
-                            console.log('Auto-reconnect succeeded');
-                        } catch (err) {
-                            console.warn('Auto-reconnect failed, will show banner:', err.code);
-                            setToken(null);
-                            setNeedsReconnect(true);
-                        }
+                const checkExpiry = () => {
+                    if (tokenExpiryRef.current && Date.now() > tokenExpiryRef.current - 3 * 60 * 1000) {
+                        console.log('Token expiring soon, showing reconnect banner');
+                        setToken(null);
+                        setNeedsReconnect(true);
                     }
                 };
-                // Check every 2 minutes
-                const interval = setInterval(checkRefresh, 2 * 60 * 1000);
+                // Check every minute
+                const interval = setInterval(checkExpiry, 60 * 1000);
                 return () => clearInterval(interval);
-            }, [user, token, buildProvider, handleAuthResult]);
+            }, [user, token]);
 
-            // Also auto-reconnect when app becomes visible and token is expired/expiring
+            // When app becomes visible, check if token is expired and show banner
             useEffect(() => {
                 if (!user) return;
-                const handleVisibility = async () => {
+                const handleVisibility = () => {
                     if (document.visibilityState !== 'visible') return;
                     const exp = tokenExpiryRef.current;
-                    if (!exp || Date.now() > exp - 2 * 60 * 1000) {
-                        console.log('App visible + token expired/expiring, auto-reconnecting...');
-                        try {
-                            const result = await expenseAuth.signInWithPopup(buildProvider());
-                            handleAuthResult(result);
-                        } catch (err) {
-                            console.warn('Visibility reconnect failed:', err.code);
-                            setNeedsReconnect(true);
-                        }
+                    if (exp && Date.now() > exp - 3 * 60 * 1000) {
+                        console.log('App visible + token expired, showing reconnect banner');
+                        setToken(null);
+                        setNeedsReconnect(true);
                     }
                 };
                 document.addEventListener('visibilitychange', handleVisibility);
                 return () => document.removeEventListener('visibilitychange', handleVisibility);
-            }, [user, buildProvider, handleAuthResult]);
+            }, [user]);
 
             const logout = useCallback(() => {
                 expenseAuth.signOut();
@@ -1967,26 +1961,36 @@
                             const m = line.match(new RegExp('\\$\\s*' + moneyRe + '|\\b' + moneyRe + '\\s*$'));
                             return m ? parseMoney(m[1] || m[2]) : 0;
                         };
-                        // Pass 1: Look for "grand total", "total due", "amount due", "balance due"
+                        // Pass 1: Look for card payment line (VISA/MC/AMEX/DEBIT followed by amount — this is the actual charged amount)
                         for (const line of reversedLines) {
-                            if (/grand\s*total|total\s*due|amount\s*due|balance\s*due|total\s*charged?/i.test(line)) {
+                            if (/\b(visa|mastercard|master\s*card|amex|american\s*express|discover|debit|credit\s*card|credit\/debit)\b/i.test(line)) {
                                 const val = amountFromLine(line);
                                 if (val > 0) { amount = val; break; }
                             }
                         }
-                        // Pass 2: Look for standalone "total" (not "subtotal", not "total savings/tax/items")
+                        // Pass 2: Look for "net total", "grand total", "total due", "amount due", "balance due", "total charged"
+                        if (!amount) {
+                            for (const line of reversedLines) {
+                                if (/net\s*total|grand\s*total|total\s*due|amount\s*due|balance\s*due|total\s*charged?/i.test(line)) {
+                                    const val = amountFromLine(line);
+                                    if (val > 0) { amount = val; break; }
+                                }
+                            }
+                        }
+                        // Pass 3: Look for standalone "total" (not "subtotal", not "total savings/tax/items")
                         if (!amount) {
                             for (const line of reversedLines) {
                                 const stripped = line.trim().toLowerCase();
                                 if (/\btotal\b/i.test(stripped)
                                     && !/sub\s*total/i.test(stripped)
+                                    && !/net\s*sales/i.test(stripped)
                                     && !/total\s*(savings?|tax|before|items?|qty|rewards?|discount)/i.test(stripped)) {
                                     const val = amountFromLine(line);
                                     if (val > 0) { amount = val; break; }
                                 }
                             }
                         }
-                        // Pass 3: Subtotal as fallback
+                        // Pass 4: Subtotal as fallback
                         if (!amount) {
                             for (const line of reversedLines) {
                                 if (/sub\s*total/i.test(line)) {
@@ -2025,8 +2029,14 @@
                         const dm = text.match(re);
                         if (dm) {
                             const { mo, d, y } = parse(dm);
-                            const fullYear = y.length <= 2 ? parseInt('20' + y) : parseInt(y);
+                            let fullYear = y.length <= 2 ? parseInt('20' + y) : parseInt(y);
                             if (fullYear >= 2020 && fullYear <= 2030) {
+                                // Sanity check: if parsed year is >1 year in the past, OCR probably misread — use current year
+                                const currentYear = new Date().getFullYear();
+                                if (fullYear < currentYear - 1) {
+                                    console.log(`OCR date year ${fullYear} looks wrong, adjusting to ${currentYear}`);
+                                    fullYear = currentYear;
+                                }
                                 date = `${fullYear}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
                                 break;
                             }
@@ -2603,7 +2613,7 @@
 
             // Import from Google Drive using Picker API
             const handleDrivePick = useCallback(async () => {
-                if (!token) { reconnect(); return; }
+                if (!token) { reconnect().catch(err => console.error('Reconnect failed:', err)); return; }
                 const sessionAtStart = modalSessionId.current;
                 // Dynamically load gapi script if not present
                 if (!window.gapi) {
@@ -3475,9 +3485,14 @@
             const unlockedUnreconciled = recentExpenses.filter(e => !e.reconciled && !e.reconciledLocked);
             const totalReconciled = lockedExpenses.length + unlockedReconciled.length;
 
-            const filteredExpenses = displayExpenses.filter(e =>
-                e.merchant.toLowerCase().includes(searchTerm.toLowerCase())
-            );
+            const filteredExpenses = displayExpenses.filter(e => {
+                if (!searchTerm) return true;
+                const q = searchTerm.toLowerCase();
+                return e.merchant.toLowerCase().includes(q) ||
+                    String(e.amount).includes(q) ||
+                    (e.category && e.category.toLowerCase().includes(q)) ||
+                    (e.date && e.date.includes(q));
+            });
             const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
             // Reset visible count when search or account changes
             const prevAcctSearch = React.useRef(searchTerm + accountId);
@@ -4817,11 +4832,15 @@
             const [searchTerm, setSearchTerm] = useState('');
             const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
 
-            const filtered = expenses.filter(e =>
-                !e._balanceOnly &&
-                (e.merchant.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                e.category.includes(searchTerm.toLowerCase()))
-            );
+            const filtered = expenses.filter(e => {
+                if (e._balanceOnly) return false;
+                if (!searchTerm) return true;
+                const q = searchTerm.toLowerCase();
+                return e.merchant.toLowerCase().includes(q) ||
+                    (e.category && e.category.toLowerCase().includes(q)) ||
+                    String(e.amount).includes(q) ||
+                    (e.date && e.date.includes(q));
+            });
 
             // Reset visible count when search changes
             const prevSearch = React.useRef(searchTerm);
@@ -5216,13 +5235,26 @@
                 return () => document.removeEventListener('visibilitychange', handleVisibility);
             }, [token, fetchExpenses]);
 
+            const handleReconnect = useCallback(() => {
+                reconnect().catch(err => {
+                    console.error('Reconnect failed:', err);
+                    setToast('Reconnect failed — try signing out and back in.');
+                    setTimeout(() => setToast(''), 8000);
+                });
+            }, [reconnect]);
+
             const handleAddExpense = async (expenseData) => {
                 // If token expired, auto-trigger reconnect and queue the save for retry
                 if (!token || needsReconnect) {
                     pendingSaveRef.current = expenseData;
                     setIsSaving(true);
                     setToast('Reconnecting to Google...');
-                    reconnect();
+                    reconnect().catch(err => {
+                        console.error('Reconnect failed during save:', err);
+                        setToast('Reconnect failed — tap Reconnect and try again.');
+                        setTimeout(() => setToast(''), 8000);
+                        setIsSaving(false);
+                    });
                     return;
                 }
                 setIsSaving(true);
@@ -5396,14 +5428,14 @@
                     {user && (!token || needsReconnect) && (
                         <div className="bg-amber-500 text-white text-center py-2 px-4 text-xs font-medium z-40 relative flex items-center justify-center gap-2">
                             <span>🔄 Google connection expired</span>
-                            <button onClick={reconnect} className="ml-1 bg-white text-amber-600 px-3 py-0.5 rounded-full text-xs font-bold hover:bg-amber-50 transition-colors">Reconnect</button>
+                            <button onClick={handleReconnect} className="ml-1 bg-white text-amber-600 px-3 py-0.5 rounded-full text-xs font-bold hover:bg-amber-50 transition-colors">Reconnect</button>
                         </div>
                     )}
                     {/* API Error Banner */}
                     {apiError && (
                         <div className="bg-red-500 text-white text-center py-2 px-4 text-xs font-medium z-40 relative">
                             ⚠️ {apiError}
-                            <button onClick={reconnect} className="ml-2 underline font-bold">Reconnect</button>
+                            <button onClick={handleReconnect} className="ml-2 underline font-bold">Reconnect</button>
                         </div>
                     )}
                     {/* Test Mode Banner */}
@@ -5601,6 +5633,7 @@
 
                     {/* Bottom Navigation */}
                     <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 flex justify-around p-2 z-30">
+                        <span className="absolute top-0.5 right-2 text-[9px] text-gray-300">{APP_VERSION}</span>
                         {[
                             { id: 'home', icon: HomeIcon, label: 'Home' },
                             { id: 'all', icon: ListIcon, label: 'All' },
