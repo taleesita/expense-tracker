@@ -2218,7 +2218,7 @@
                         </button>
                     )}
                     <button
-                        onClick={(e) => { e.stopPropagation(); if (confirm('Delete this expense?')) onDelete(expense.rowIndex); }}
+                        onClick={(e) => { e.stopPropagation(); onDelete(expense.rowIndex); }}
                         className="ml-1 flex-shrink-0"
                     >
                         <Trash2Icon size={16} className="text-red-400 hover:text-red-600" />
@@ -4846,12 +4846,38 @@
             const { expenses, setExpenses, loading, fetchExpenses, appendExpense, updateExpense, deleteExpense, apiError } = useGoogleSheets(token);
             const { push: pushUndo, undo: undoAction, canUndo } = useUndoStack();
 
-            const [activeTab, setActiveTab] = useState('home');
+            // Hash-based routing: #home, #all, #cards/amazon_chase, #banks/cap1_jcheck, #review
+            const parseHash = () => {
+                const hash = window.location.hash.replace(/^#\/?/, '') || 'home';
+                const [tab, sub] = hash.split('/');
+                return { tab, sub };
+            };
+            const initialHash = parseHash();
+            const [activeTab, setActiveTabRaw] = useState(initialHash.tab || 'home');
             const [showAddModal, setShowAddModal] = useState(false);
             const [editExpense, setEditExpense] = useState(null);
             const [splitExpense, setSplitExpense] = useState(null);
-            const [selectedCard, setSelectedCard] = useState(CREDIT_CARDS[0]?.id || '');
-            const [selectedBank, setSelectedBank] = useState(BANK_ACCOUNTS[0]?.id || '');
+            const [selectedCard, setSelectedCard] = useState(initialHash.tab === 'cards' && initialHash.sub ? initialHash.sub : (CREDIT_CARDS[0]?.id || ''));
+            const [selectedBank, setSelectedBank] = useState(initialHash.tab === 'banks' && initialHash.sub ? initialHash.sub : (BANK_ACCOUNTS[0]?.id || ''));
+
+            // Sync hash → state on popstate (back/forward)
+            useEffect(() => {
+                const onHashChange = () => {
+                    const { tab, sub } = parseHash();
+                    setActiveTabRaw(tab || 'home');
+                    if (tab === 'cards' && sub) setSelectedCard(sub);
+                    if (tab === 'banks' && sub) setSelectedBank(sub);
+                };
+                window.addEventListener('hashchange', onHashChange);
+                return () => window.removeEventListener('hashchange', onHashChange);
+            }, []);
+
+            // Wrapper: setActiveTab also updates the URL hash
+            const setActiveTab = useCallback((tab) => {
+                setActiveTabRaw(tab);
+                const sub = tab === 'cards' ? selectedCard : tab === 'banks' ? selectedBank : '';
+                window.location.hash = sub ? `${tab}/${sub}` : tab;
+            }, [selectedCard, selectedBank]);
             const [toast, setToast] = useState('');
             const [confirmationData, setConfirmationData] = useState(null);
             const [isSaving, setIsSaving] = useState(false);
@@ -5128,12 +5154,10 @@
             };
 
             const handleDeleteExpense = async (rowIndex) => {
-                if (confirm('Delete this expense?')) {
-                    pushUndo(expenses);
-                    await deleteExpense(rowIndex);
-                    setToast('Expense deleted');
-                    setTimeout(() => setToast(''), 5000);
-                }
+                pushUndo(expenses);
+                await deleteExpense(rowIndex);
+                setToast('Expense deleted — tap Undo to restore');
+                setTimeout(() => setToast(''), 5000);
             };
 
             const handleReconcile = (rowIndex, reconciled) => {
@@ -5332,7 +5356,7 @@
                                         ))}
                                     </div>
                                 )}
-                                {activeTab === 'home' && <HomeTab expenses={expenses} onEdit={handleEditExpense} onDelete={handleDeleteExpense} onNavigateToCard={(id) => { setSelectedCard(id); setActiveTab('cards'); }} onNavigateToBank={(id) => { setSelectedBank(id); setActiveTab('banks'); }} />}
+                                {activeTab === 'home' && <HomeTab expenses={expenses} onEdit={handleEditExpense} onDelete={handleDeleteExpense} onNavigateToCard={(id) => { setSelectedCard(id); setActiveTabRaw('cards'); window.location.hash = 'cards/' + id; }} onNavigateToBank={(id) => { setSelectedBank(id); setActiveTabRaw('banks'); window.location.hash = 'banks/' + id; }} />}
 
                                 {activeTab === 'all' && (
                                     <AllTab
@@ -5350,7 +5374,7 @@
                                             {CREDIT_CARDS.map(card => (
                                                 <button
                                                     key={card.id}
-                                                    onClick={() => setSelectedCard(card.id)}
+                                                    onClick={() => { setSelectedCard(card.id); window.location.hash = 'cards/' + card.id; }}
                                                     className={`whitespace-nowrap px-4 py-2 rounded-full font-medium transition ${selectedCard === card.id ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-800'}`}
                                                 >
                                                     {card.shortName}
@@ -5377,7 +5401,7 @@
                                             {BANK_ACCOUNTS.map(bank => (
                                                 <button
                                                     key={bank.id}
-                                                    onClick={() => setSelectedBank(bank.id)}
+                                                    onClick={() => { setSelectedBank(bank.id); window.location.hash = 'banks/' + bank.id; }}
                                                     className={`whitespace-nowrap px-4 py-2 rounded-full font-medium transition ${selectedBank === bank.id ? 'bg-blue-600 text-white' : 'bg-gray-200 text-gray-800'}`}
                                                 >
                                                     {bank.shortName}
