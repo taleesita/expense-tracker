@@ -1924,8 +1924,10 @@
                     const amazonOrderRe = /(\d{3}-\d{7}-\d{7})/;
                     const amazonOrderMatch = text.match(amazonOrderRe);
                     const isAmazon = /amazon/i.test(text);
-                    const wholefoods = /whole\s*foods/i.test(text);
+                    // Broad Whole Foods matching — OCR can garble characters
+                    const wholefoods = /whole\s*foods/i.test(text) || /wh[o0]le\s*f[o0]{2}ds/i.test(text) || /WFM/i.test(text) || /whole\s*f[o0]+ds?\s*m/i.test(text);
                     const hasAmazonOrderPage = /order\s*details|order\s*placed|your\s*orders/i.test(text);
+                    console.log('OCR merchant detection:', { merchant, isAmazon, wholefoods, hasAmazonOrderPage, hasOrderNum: !!amazonOrderMatch, textSnippet: text.substring(0, 300) });
 
                     if (amazonOrderMatch && (isAmazon || hasAmazonOrderPage)) {
                         // Has Amazon order number → definitely Amazon
