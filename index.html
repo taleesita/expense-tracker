@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v2.3-apr10';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v2.4-apr10';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
         const TEST_PARENT_FOLDER_ID = '1LJ57lHUhuLigB1NKuko39saGCRVqs8Ya';
@@ -1956,78 +1956,70 @@
 
                     // Step 2: Scan lines from BOTTOM UP for total labels
                     if (!amount) {
-                        // Debug: log the last portion of OCR text where totals usually are
-                        const lastChunk = lines.slice(-20).map((l,i) => `  [${lines.length-20+i}] "${l.trim()}"`).join('\n');
-                        console.log('OCR amount extraction — last 20 lines:\n' + lastChunk);
                         const reversedLines = [...lines].reverse();
                         const amountFromLine = (line) => {
                             const m = line.match(new RegExp('\\$\\s*' + moneyRe + '|\\b' + moneyRe + '\\s*$'));
                             return m ? parseMoney(m[1] || m[2]) : 0;
                         };
-                        // Also extract ALL dollar amounts from a line (for lines with multiple amounts)
-                        const allAmountsFromLine = (line) => {
-                            const matches = [...line.matchAll(new RegExp('\\$?\\s*(' + moneyRe + ')', 'g'))];
-                            return matches.map(m => parseMoney(m[1])).filter(v => v > 0);
-                        };
 
-                        // Pass 0: Card tender / payment line — LAST amount on that line is the charged amount
-                        // Whole Foods puts "VISA TEND" or "EBT TEND" etc. with the tender amount
-                        for (const line of reversedLines) {
-                            if (/\b(visa|mastercard|master\s*card|amex|american\s*express|discover|debit|credit\s*card|credit\/debit|tend)\b/i.test(line)) {
-                                const vals = allAmountsFromLine(line);
-                                if (vals.length > 0) {
-                                    amount = vals[vals.length - 1]; // last amount on the line
-                                    console.log('OCR amount Pass 0 (card tender):', amount, 'from line:', line.trim());
-                                    break;
-                                }
+                        // Debug: log ALL lines that contain a dollar amount or key receipt words
+                        const interestingLines = lines.map((l, i) => {
+                            const t = l.trim();
+                            if (!t) return null;
+                            const hasMoney = /\$\s*\d+\.\d{2}|\b\d+\.\d{2}\s*$/.test(t);
+                            const hasKeyword = /total|subtotal|visa|mastercard|amex|debit|credit|tend|net\s*sale|saving|paid|change|due|balance/i.test(t);
+                            if (hasMoney || hasKeyword) return `  [${i}] "${t}"`;
+                            return null;
+                        }).filter(Boolean).join('\n');
+                        console.log('OCR amount extraction — interesting lines:\n' + interestingLines);
+
+                        // FULL TEXT SEARCH approach: search entire OCR text for patterns, not just individual lines
+                        // This handles cases where Tesseract splits a label and its amount across lines
+
+                        // Strategy 1: Look for "VISA" or card keyword near a dollar amount in the full text
+                        const cardMatch = text.match(/\b(visa|mastercard|amex|discover|debit)\b[^$\n]{0,30}\$?\s*(\d+\.\d{2})/i);
+                        if (cardMatch) {
+                            const val = parseFloat(cardMatch[2]);
+                            if (val > 0) { amount = val; console.log('OCR amount: card match in text:', amount, 'context:', cardMatch[0].trim()); }
+                        }
+
+                        // Strategy 2: "Net Sales" or "Net Total" near a dollar amount
+                        if (!amount) {
+                            const netMatch = text.match(/net\s*(?:sales|total)[:\s]*\$?\s*(\d+\.\d{2})/i);
+                            if (netMatch) {
+                                const val = parseFloat(netMatch[1]);
+                                if (val > 0) { amount = val; console.log('OCR amount: net sales/total match:', amount); }
                             }
                         }
-                        // Pass 1: "net total", "net sales", "grand total", "total due", "amount due", "balance due", "total charged"
+
+                        // Strategy 3: "Total" (not sub, not savings) near a dollar amount — full text
                         if (!amount) {
-                            for (const line of reversedLines) {
-                                if (/net\s*total|net\s*sales|grand\s*total|total\s*due|amount\s*due|balance\s*due|total\s*charged?/i.test(line)) {
-                                    const val = amountFromLine(line);
-                                    if (val > 0) { amount = val; console.log('OCR amount Pass 1 (net/grand total):', amount, 'from line:', line.trim()); break; }
-                                }
+                            // Find all "Total" occurrences with nearby amounts, pick the one that's NOT subtotal/savings
+                            const totalMatches = [...text.matchAll(/\b((?:sub\s*)?total(?:\s*(?:savings?|tax|items?|qty|rewards?|discount))?)[:\s]*\$?\s*(\d+\.\d{2})/gi)];
+                            for (const tm of totalMatches.reverse()) {
+                                const label = tm[1].toLowerCase();
+                                if (/sub\s*total|total\s*(savings?|tax|items?|qty|rewards?|discount)/i.test(label)) continue;
+                                const val = parseFloat(tm[2]);
+                                if (val > 0) { amount = val; console.log('OCR amount: total match in text:', amount, 'label:', tm[1]); break; }
                             }
                         }
-                        // Pass 2: Standalone "total" — but subtract savings if a savings line follows
-                        // Skip lines that say subtotal, net sales, total savings/tax/items etc.
+
+                        // Strategy 4: If we found a subtotal but also found savings, subtract
                         if (!amount) {
-                            let totalVal = 0;
-                            let savingsVal = 0;
-                            for (const line of lines) {
-                                const stripped = line.trim().toLowerCase();
-                                // Look for savings/discount lines
-                                if (/\b(prime\s*savings?|your\s*savings?|member\s*savings?|coupon|discount)\b/i.test(stripped)) {
-                                    const sv = amountFromLine(line);
-                                    if (sv > 0) savingsVal += sv;
+                            const subMatch = text.match(/sub\s*total[:\s]*\$?\s*(\d+\.\d{2})/i);
+                            const savingsMatch = text.match(/(?:total\s*)?savings?[:\s]*-?\$?\s*(\d+\.\d{2})/i);
+                            if (subMatch) {
+                                const subVal = parseFloat(subMatch[1]);
+                                if (savingsMatch) {
+                                    const savVal = parseFloat(savingsMatch[1]);
+                                    if (savVal > 0 && savVal < subVal) {
+                                        amount = Math.round((subVal - savVal) * 100) / 100;
+                                        console.log('OCR amount: subtotal - savings:', subVal, '-', savVal, '=', amount);
+                                    }
                                 }
-                            }
-                            for (const line of reversedLines) {
-                                const stripped = line.trim().toLowerCase();
-                                if (/\btotal\b/i.test(stripped)
-                                    && !/sub\s*total/i.test(stripped)
-                                    && !/net\s*sales/i.test(stripped)
-                                    && !/total\s*(savings?|tax|before|items?|qty|rewards?|discount)/i.test(stripped)) {
-                                    const val = amountFromLine(line);
-                                    if (val > 0) { totalVal = val; break; }
-                                }
-                            }
-                            if (totalVal > 0 && savingsVal > 0 && savingsVal < totalVal) {
-                                amount = Math.round((totalVal - savingsVal) * 100) / 100;
-                                console.log('OCR amount Pass 2 (total - savings):', totalVal, '-', savingsVal, '=', amount);
-                            } else if (totalVal > 0) {
-                                amount = totalVal;
-                                console.log('OCR amount Pass 2 (total):', amount);
-                            }
-                        }
-                        // Pass 3: Subtotal as fallback
-                        if (!amount) {
-                            for (const line of reversedLines) {
-                                if (/sub\s*total/i.test(line)) {
-                                    const val = amountFromLine(line);
-                                    if (val > 0) { amount = val; console.log('OCR amount Pass 3 (subtotal fallback):', amount); break; }
+                                if (!amount) {
+                                    amount = subVal;
+                                    console.log('OCR amount: subtotal fallback:', amount);
                                 }
                             }
                         }
