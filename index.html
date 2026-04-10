@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v2.2-apr10';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v2.3-apr10';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
         const TEST_PARENT_FOLDER_ID = '1LJ57lHUhuLigB1NKuko39saGCRVqs8Ya';
@@ -1956,29 +1956,54 @@
 
                     // Step 2: Scan lines from BOTTOM UP for total labels
                     if (!amount) {
+                        // Debug: log the last portion of OCR text where totals usually are
+                        const lastChunk = lines.slice(-20).map((l,i) => `  [${lines.length-20+i}] "${l.trim()}"`).join('\n');
+                        console.log('OCR amount extraction — last 20 lines:\n' + lastChunk);
                         const reversedLines = [...lines].reverse();
                         const amountFromLine = (line) => {
                             const m = line.match(new RegExp('\\$\\s*' + moneyRe + '|\\b' + moneyRe + '\\s*$'));
                             return m ? parseMoney(m[1] || m[2]) : 0;
                         };
-                        // Pass 1: Look for card payment line (VISA/MC/AMEX/DEBIT followed by amount — this is the actual charged amount)
+                        // Also extract ALL dollar amounts from a line (for lines with multiple amounts)
+                        const allAmountsFromLine = (line) => {
+                            const matches = [...line.matchAll(new RegExp('\\$?\\s*(' + moneyRe + ')', 'g'))];
+                            return matches.map(m => parseMoney(m[1])).filter(v => v > 0);
+                        };
+
+                        // Pass 0: Card tender / payment line — LAST amount on that line is the charged amount
+                        // Whole Foods puts "VISA TEND" or "EBT TEND" etc. with the tender amount
                         for (const line of reversedLines) {
-                            if (/\b(visa|mastercard|master\s*card|amex|american\s*express|discover|debit|credit\s*card|credit\/debit)\b/i.test(line)) {
-                                const val = amountFromLine(line);
-                                if (val > 0) { amount = val; break; }
-                            }
-                        }
-                        // Pass 2: Look for "net total", "grand total", "total due", "amount due", "balance due", "total charged"
-                        if (!amount) {
-                            for (const line of reversedLines) {
-                                if (/net\s*total|grand\s*total|total\s*due|amount\s*due|balance\s*due|total\s*charged?/i.test(line)) {
-                                    const val = amountFromLine(line);
-                                    if (val > 0) { amount = val; break; }
+                            if (/\b(visa|mastercard|master\s*card|amex|american\s*express|discover|debit|credit\s*card|credit\/debit|tend)\b/i.test(line)) {
+                                const vals = allAmountsFromLine(line);
+                                if (vals.length > 0) {
+                                    amount = vals[vals.length - 1]; // last amount on the line
+                                    console.log('OCR amount Pass 0 (card tender):', amount, 'from line:', line.trim());
+                                    break;
                                 }
                             }
                         }
-                        // Pass 3: Look for standalone "total" (not "subtotal", not "total savings/tax/items")
+                        // Pass 1: "net total", "net sales", "grand total", "total due", "amount due", "balance due", "total charged"
                         if (!amount) {
+                            for (const line of reversedLines) {
+                                if (/net\s*total|net\s*sales|grand\s*total|total\s*due|amount\s*due|balance\s*due|total\s*charged?/i.test(line)) {
+                                    const val = amountFromLine(line);
+                                    if (val > 0) { amount = val; console.log('OCR amount Pass 1 (net/grand total):', amount, 'from line:', line.trim()); break; }
+                                }
+                            }
+                        }
+                        // Pass 2: Standalone "total" — but subtract savings if a savings line follows
+                        // Skip lines that say subtotal, net sales, total savings/tax/items etc.
+                        if (!amount) {
+                            let totalVal = 0;
+                            let savingsVal = 0;
+                            for (const line of lines) {
+                                const stripped = line.trim().toLowerCase();
+                                // Look for savings/discount lines
+                                if (/\b(prime\s*savings?|your\s*savings?|member\s*savings?|coupon|discount)\b/i.test(stripped)) {
+                                    const sv = amountFromLine(line);
+                                    if (sv > 0) savingsVal += sv;
+                                }
+                            }
                             for (const line of reversedLines) {
                                 const stripped = line.trim().toLowerCase();
                                 if (/\btotal\b/i.test(stripped)
@@ -1986,16 +2011,23 @@
                                     && !/net\s*sales/i.test(stripped)
                                     && !/total\s*(savings?|tax|before|items?|qty|rewards?|discount)/i.test(stripped)) {
                                     const val = amountFromLine(line);
-                                    if (val > 0) { amount = val; break; }
+                                    if (val > 0) { totalVal = val; break; }
                                 }
                             }
+                            if (totalVal > 0 && savingsVal > 0 && savingsVal < totalVal) {
+                                amount = Math.round((totalVal - savingsVal) * 100) / 100;
+                                console.log('OCR amount Pass 2 (total - savings):', totalVal, '-', savingsVal, '=', amount);
+                            } else if (totalVal > 0) {
+                                amount = totalVal;
+                                console.log('OCR amount Pass 2 (total):', amount);
+                            }
                         }
-                        // Pass 4: Subtotal as fallback
+                        // Pass 3: Subtotal as fallback
                         if (!amount) {
                             for (const line of reversedLines) {
                                 if (/sub\s*total/i.test(line)) {
                                     const val = amountFromLine(line);
-                                    if (val > 0) { amount = val; break; }
+                                    if (val > 0) { amount = val; console.log('OCR amount Pass 3 (subtotal fallback):', amount); break; }
                                 }
                             }
                         }
@@ -2031,11 +2063,17 @@
                             const { mo, d, y } = parse(dm);
                             let fullYear = y.length <= 2 ? parseInt('20' + y) : parseInt(y);
                             if (fullYear >= 2020 && fullYear <= 2030) {
-                                // Sanity check: if parsed year is >1 year in the past, OCR probably misread — use current year
                                 const currentYear = new Date().getFullYear();
-                                if (fullYear < currentYear - 1) {
-                                    console.log(`OCR date year ${fullYear} looks wrong, adjusting to ${currentYear}`);
-                                    fullYear = currentYear;
+                                const parsedMonth = parseInt(mo);
+                                const parsedDay = parseInt(d);
+                                const currentMonth = new Date().getMonth() + 1;
+                                // If year != current year but month/day are close to today, OCR probably misread the year
+                                if (fullYear !== currentYear) {
+                                    const sameMonthOrClose = Math.abs(parsedMonth - currentMonth) <= 1;
+                                    if (sameMonthOrClose || fullYear < currentYear) {
+                                        console.log(`OCR date year ${fullYear} looks wrong (current: ${currentYear}, month ${parsedMonth} is close to ${currentMonth}), adjusting to ${currentYear}`);
+                                        fullYear = currentYear;
+                                    }
                                 }
                                 date = `${fullYear}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
                                 break;
