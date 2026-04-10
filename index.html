@@ -3091,16 +3091,12 @@
 
             const handleLock = () => {
                 if (unlockedReconciled.length === 0) return;
-                if (confirm(`Lock ${unlockedReconciled.length} reconciled item${unlockedReconciled.length === 1 ? '' : 's'}? They won't be clearable after this.`)) {
-                    onLockItems(unlockedReconciled.map(e => e.rowIndex));
-                }
+                onLockItems(unlockedReconciled.map(e => e.rowIndex));
             };
 
             const handleClear = () => {
                 if (unlockedReconciled.length === 0) return;
-                if (confirm(`Clear ${unlockedReconciled.length} unlocked reconciliation${unlockedReconciled.length === 1 ? '' : 's'}?`)) {
-                    onClearUnlocked(unlockedReconciled.map(e => e.rowIndex));
-                }
+                onClearUnlocked(unlockedReconciled.map(e => e.rowIndex));
             };
 
             if (!account) return null;
@@ -4821,6 +4817,8 @@
                     if (exp) try { localStorage.setItem('rec_locked_' + exp._recKey, JSON.stringify(true)); } catch {}
                 });
                 setExpenses(prev => prev.map(e => rowIndexes.includes(e.rowIndex) ? { ...e, reconciledLocked: true } : e));
+                setToast(`Locked ${rowIndexes.length} item${rowIndexes.length === 1 ? '' : 's'}`);
+                setTimeout(() => setToast(''), 3000);
             };
 
             // Clear only unlocked reconciled items
@@ -4831,6 +4829,8 @@
                     if (exp) try { localStorage.setItem('rec_' + exp._recKey, JSON.stringify(false)); } catch {}
                 });
                 setExpenses(prev => prev.map(e => rowIndexes.includes(e.rowIndex) ? { ...e, reconciled: false } : e));
+                setToast(`Cleared ${rowIndexes.length} reconciliation${rowIndexes.length === 1 ? '' : 's'}`);
+                setTimeout(() => setToast(''), 3000);
             };
 
             const handleUndo = async () => {
