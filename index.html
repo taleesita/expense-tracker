@@ -1350,7 +1350,7 @@
             }, [token, fetchExpenses]);
 
             const updateExpense = useCallback(async (rowIndex, expense) => {
-                if (!token) return;
+                if (!token) throw new Error('Google connection expired — tap Reconnect, then try saving again.');
                 try {
                     // Sheet: A=Timestamp, B=Purchase Date, C=Card, D=Store, E=Charge, F=Deposit, G=Fee, H=Category, I=Receipt
                     const isInflow = expense.txnType === 'deposit' || expense.txnType === 'credit_refund';
@@ -1389,7 +1389,7 @@
                         {
                             method: 'PUT',
                             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ values: [[]] })
+                            body: JSON.stringify({ values: [["", "", "", "", "", "", "", "", ""]] })
                         }
                     );
                     await fetchExpenses(true);
@@ -5026,13 +5026,13 @@
                 setIsSaving(true);
                 try {
                     pushUndo(expenses);
-                    // 1. Delete the parent row (clear it)
+                    // 1. Delete the parent row (clear ALL columns so it doesn't linger as balance-only)
                     await fetch(
                         `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A${parentExpense.rowIndex}:I${parentExpense.rowIndex}?valueInputOption=USER_ENTERED`,
                         {
                             method: 'PUT',
                             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ values: [[]] })
+                            body: JSON.stringify({ values: [["", "", "", "", "", "", "", "", ""]] })
                         }
                     );
                     // 2. Append each split row with [N/M] merchant suffix
@@ -5149,8 +5149,16 @@
             }, [token]);
 
             const handleUpdateExpense = async (rowIndex, updated) => {
-                pushUndo(expenses);
-                await updateExpense(rowIndex, updated);
+                try {
+                    pushUndo(expenses);
+                    await updateExpense(rowIndex, updated);
+                    setToast('Saved');
+                    setTimeout(() => setToast(''), 2000);
+                } catch (err) {
+                    console.error('Update failed:', err);
+                    setToast(err.message || 'Save failed');
+                    setTimeout(() => setToast(''), 5000);
+                }
             };
 
             const handleDeleteExpense = async (rowIndex) => {
