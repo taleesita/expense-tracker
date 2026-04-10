@@ -781,6 +781,14 @@
             </svg>
         );
 
+        const ScissorsIcon = ({ size = 24, className = '' }) => (
+            <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+                <circle cx="6" cy="6" r="3"></circle><circle cx="6" cy="18" r="3"></circle>
+                <line x1="20" y1="4" x2="8.12" y2="15.88"></line><line x1="14.47" y1="14.48" x2="20" y2="20"></line>
+                <line x1="8.12" y1="8.12" x2="12" y2="12"></line>
+            </svg>
+        );
+
         // ============ UTILITIES ============
         // Data-driven category suggestion: learns from existing entries, falls back to hardcoded map
         let _expensesCache = [];
@@ -1132,11 +1140,12 @@
                 // Only cache essential fields to keep localStorage small
                 const slim = expenses.map(e => ({
                     rowIndex: e.rowIndex, timestamp: e.timestamp, date: e.date,
-                    merchant: e.merchant, amount: e.amount, rawCharge: e.rawCharge,
+                    merchant: e.merchant, merchantRaw: e.merchantRaw, amount: e.amount, rawCharge: e.rawCharge,
                     rawDeposit: e.rawDeposit, category: e.category, categoryRaw: e.categoryRaw,
                     account: e.account, accountRaw: e.accountRaw, receipt: e.receipt,
                     fee: e.fee, txnType: e.txnType, isCredit: e.isCredit,
                     _balanceOnly: e._balanceOnly, _recKey: e._recKey,
+                    _splitGroup: e._splitGroup, _splitIndex: e._splitIndex, _splitTotal: e._splitTotal,
                 }));
                 localStorage.setItem(EXPENSES_CACHE_KEY, JSON.stringify(slim));
             } catch {}
@@ -1193,11 +1202,23 @@
                                 txnType = 'deposit';
                             }
                         }
+                        // Detect split entries: merchant ends with [1/2], [2/3], etc.
+                        const rawMerchant = row[3] || '';
+                        const splitMatch = rawMerchant.match(/^(.+?)\s*\[(\d+)\/(\d+)\]\s*$/);
+                        const displayMerchant = splitMatch ? splitMatch[1].trim() : rawMerchant;
+                        const splitIndex = splitMatch ? parseInt(splitMatch[2]) : null;
+                        const splitTotal = splitMatch ? parseInt(splitMatch[3]) : null;
+                        // Split group key: same base merchant + date + account = same group
+                        const splitGroup = splitMatch ? btoa(unescape(encodeURIComponent(
+                            displayMerchant + '|' + (row[1] || '') + '|' + (row[2] || '')
+                        ))).slice(0, 20) : null;
+
                         parsed.push({
                             rowIndex: i + 1,
                             timestamp: row[0] || '',                    // A: Timestamp
                             date: row[1] || '',                         // B: Purchase Date
-                            merchant: row[3] || '',                     // D: Store/Transaction
+                            merchant: displayMerchant,                  // D: Store/Transaction (without [N/M] suffix)
+                            merchantRaw: rawMerchant,                   // Keep original with split tag for writing back
                             amount: amount,
                             rawCharge: charge,                          // E raw (can be negative for refunds)
                             rawDeposit: deposit,                        // F raw
@@ -1211,6 +1232,9 @@
                             isCredit: txnType !== 'charge',  // backwards compat for display
                             originalCurrency: 'USD',
                             originalAmount: amount,
+                            _splitGroup: splitGroup,
+                            _splitIndex: splitIndex,
+                            _splitTotal: splitTotal,
                             reconciled: (() => {
                                 // Key by timestamp+merchant for stable identity across row shifts
                                 const recKey = 'rec_' + btoa(unescape(encodeURIComponent((row[0] || '') + '|' + (row[3] || '')))).slice(0, 24);
@@ -1336,7 +1360,7 @@
                         expense.timestamp,                                      // A
                         expense.date || '',                                     // B
                         expense.accountRaw || getSheetCardName(expense.account), // C
-                        expense.merchant,                                       // D
+                        expense.merchantRaw || expense.merchant,                 // D (preserve [N/M] split tag if present)
                         chargeAmt,                                             // E
                         depositAmt,                                            // F
                         expense.fee || '',                                     // G
@@ -1817,19 +1841,24 @@
                     }
                     merchant = merchant || 'Unknown';
 
-                    // Known grocery/retail stores that mention Amazon on receipts (subsidiaries)
-                    // Check the FULL text — Whole Foods receipts say "WHOLE FOODS" near the top
-                    const wholefoods = /whole\s*foods/i.test(text);
-                    if (wholefoods) {
-                        merchant = 'Whole Foods';
+                    // Amazon detection FIRST — order number is the strongest signal.
+                    // Item names can contain subsidiary brands (e.g. "365 by Whole Foods Market")
+                    // which would otherwise falsely match as Whole Foods.
+                    const amazonOrderRe = /(\d{3}-\d{7}-\d{7})/;
+                    const amazonOrderMatch = text.match(amazonOrderRe);
+                    const isAmazon = /amazon/i.test(text);
+                    const hasAmazonOrderPage = /order\s*details|order\s*placed|your\s*orders/i.test(text);
+
+                    if (amazonOrderMatch && (isAmazon || hasAmazonOrderPage)) {
+                        merchant = `Amazon - ${amazonOrderMatch[1]}`;
+                    } else if (isAmazon && hasAmazonOrderPage) {
+                        merchant = 'Amazon';
                     } else {
-                        // Amazon order number detection: pattern ###-#######-#######
-                        const amazonOrderRe = /(\d{3}-\d{7}-\d{7})/;
-                        const amazonOrderMatch = text.match(amazonOrderRe);
-                        const isAmazon = /amazon/i.test(text);
-                        if (amazonOrderMatch && isAmazon) {
-                            merchant = `Amazon - ${amazonOrderMatch[1]}`;
-                        } else if (isAmazon && !amazonOrderMatch) {
+                        // Only match Whole Foods if this is NOT an Amazon order page
+                        const wholefoods = /whole\s*foods/i.test(text);
+                        if (wholefoods && !isAmazon && !hasAmazonOrderPage) {
+                            merchant = 'Whole Foods';
+                        } else if (isAmazon) {
                             if (!/amazon/i.test(merchant)) merchant = 'Amazon';
                         }
                     }
@@ -2051,9 +2080,54 @@
             return { stack, push, undo, canUndo: stack.length > 0 };
         };
 
+        // ============ SPLIT GROUPING ============
+        // Groups expenses so split entries appear as indented sub-rows under a virtual parent header
+        const groupExpensesWithSplits = (expenses) => {
+            const result = [];
+            const splitGroups = {};
+            // First pass: collect split groups
+            expenses.forEach(e => {
+                if (e._splitGroup) {
+                    if (!splitGroups[e._splitGroup]) splitGroups[e._splitGroup] = [];
+                    splitGroups[e._splitGroup].push(e);
+                }
+            });
+            // Sort each split group by _splitIndex
+            Object.values(splitGroups).forEach(group => group.sort((a, b) => a._splitIndex - b._splitIndex));
+
+            // Second pass: emit items, replacing first split member with group header + all children
+            const emittedGroups = new Set();
+            expenses.forEach(e => {
+                if (e._splitGroup) {
+                    if (emittedGroups.has(e._splitGroup)) return; // already emitted
+                    emittedGroups.add(e._splitGroup);
+                    const group = splitGroups[e._splitGroup];
+                    const totalAmount = group.reduce((s, g) => s + g.amount, 0);
+                    // Virtual parent header
+                    result.push({
+                        _isSplitHeader: true,
+                        _splitGroupKey: e._splitGroup,
+                        merchant: group[0].merchant,
+                        amount: totalAmount,
+                        date: group[0].date,
+                        timestamp: group[0].timestamp,
+                        category: group[0].category,
+                        account: group[0].account,
+                        txnType: group[0].txnType,
+                        isCredit: group[0].isCredit,
+                        splitCount: group.length,
+                        children: group,
+                    });
+                } else {
+                    result.push(e);
+                }
+            });
+            return result;
+        };
+
         // ============ MAIN COMPONENTS ============
 
-        const ExpenseRow = ({ expense, onDelete, onUpdate, onReconcile, showReconcile, onEdit, hideAccount = false, showDateSeparator = false }) => {
+        const ExpenseRow = ({ expense, onDelete, onUpdate, onReconcile, showReconcile, onEdit, onSplit, hideAccount = false, showDateSeparator = false, isSplitChild = false }) => {
             const category = getCategoryById(expense.category);
             const account = getAccountById(expense.account);
             const isPaymentOrTransfer = expense.category === 'card_payment' || expense.category === 'transfer';
@@ -2066,11 +2140,16 @@
                         <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">{expense.date || expense.timestamp}</span>
                     </div>
                 )}
-                <div className="flex items-center gap-2.5 py-2.5 px-3 border-b border-gray-100 hover:bg-gray-50 group cursor-pointer" onClick={() => onEdit && onEdit(expense)}>
-                    <div className="text-xl flex-shrink-0">{category?.emoji || '📦'}</div>
+                <div className={`flex items-center gap-2.5 py-2.5 border-b border-gray-100 hover:bg-gray-50 group cursor-pointer ${isSplitChild ? 'pl-8 pr-3 bg-gray-50/50' : 'px-3'}`} onClick={() => onEdit && onEdit(expense)}>
+                    <div className="text-xl flex-shrink-0">{isSplitChild ? <span className="text-sm text-gray-300">┗</span> : (category?.emoji || '📦')}</div>
                     <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-1.5">
-                            <span className="font-medium text-sm truncate">{expense.merchant}</span>
+                            <span className={`font-medium text-sm truncate ${isSplitChild ? 'text-gray-600' : ''}`}>{expense.merchant}</span>
+                            {expense._splitGroup && (
+                                <span className="text-[10px] bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded flex-shrink-0 leading-none">
+                                    {expense._splitIndex}/{expense._splitTotal}
+                                </span>
+                            )}
                             {isPaymentOrTransfer && (
                                 <span className="text-[10px] bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded flex-shrink-0 leading-none">{expense.category === 'card_payment' ? 'Payment' : 'Transfer'}</span>
                             )}
@@ -2129,6 +2208,15 @@
                             <span style={{ fontSize: '14px', display: 'inline-block', transform: 'scaleX(-1)' }}>✏️</span>
                         </button>
                     )}
+                    {onSplit && !expense._splitGroup && (
+                        <button
+                            onClick={(e) => { e.stopPropagation(); onSplit(expense); }}
+                            className="p-1 hover:scale-110 transition-transform flex-shrink-0"
+                            title="Split"
+                        >
+                            <ScissorsIcon size={14} className="text-purple-400 hover:text-purple-600" />
+                        </button>
+                    )}
                     <button
                         onClick={(e) => { e.stopPropagation(); if (confirm('Delete this expense?')) onDelete(expense.rowIndex); }}
                         className="ml-1 flex-shrink-0"
@@ -2143,6 +2231,71 @@
         // Helper: get date key for grouping
         const getDateKey = (expense) => {
             return parseDateToISO(expense.date || expense.timestamp);
+        };
+
+        // Renders a single expense or a split group (header + indented children)
+        const ExpenseOrSplitGroup = ({ item, onDelete, onUpdate, onReconcile, showReconcile, onEdit, onSplit, hideAccount, showDateSeparator }) => {
+            if (item._isSplitHeader) {
+                const category = getCategoryById(item.category);
+                const account = getAccountById(item.account);
+                const isPaymentOrTransfer = item.category === 'card_payment' || item.category === 'transfer';
+                const isInflow = !isPaymentOrTransfer && (item.txnType === 'deposit' || item.txnType === 'credit_refund');
+                return (
+                    <>
+                        {showDateSeparator && (
+                            <div className="bg-gray-50 px-3 py-1.5 border-b-2 border-gray-200">
+                                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">{item.date || item.timestamp}</span>
+                            </div>
+                        )}
+                        <div className="flex items-center gap-2.5 py-2.5 px-3 border-b border-gray-100 bg-purple-50/30">
+                            <div className="text-xl flex-shrink-0">{category?.emoji || '📦'}</div>
+                            <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-1.5">
+                                    <span className="font-medium text-sm truncate">{item.merchant}</span>
+                                    <span className="text-[10px] bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded flex-shrink-0 leading-none">
+                                        <ScissorsIcon size={10} className="inline -mt-0.5" /> {item.splitCount} split
+                                    </span>
+                                </div>
+                                <div className="text-[11px] text-gray-400 flex items-center gap-1.5 mt-0.5">
+                                    <span>{item.date || item.timestamp}</span>
+                                    {!hideAccount && account && <span className="font-medium" style={{ color: account.color }}>{account.shortName}</span>}
+                                </div>
+                            </div>
+                            <div className="text-right flex-shrink-0">
+                                <span className={`font-semibold text-sm ${isPaymentOrTransfer ? 'text-gray-500' : isInflow ? 'text-green-600' : 'text-red-600'}`}>
+                                    {isPaymentOrTransfer ? '' : isInflow ? '+' : '-'}${fmt(item.amount)}
+                                </span>
+                            </div>
+                        </div>
+                        {item.children.map(child => (
+                            <ExpenseRow
+                                key={child.rowIndex}
+                                expense={child}
+                                onDelete={onDelete}
+                                onUpdate={onUpdate}
+                                onReconcile={onReconcile}
+                                onEdit={onEdit}
+                                showReconcile={showReconcile}
+                                hideAccount={hideAccount}
+                                isSplitChild={true}
+                            />
+                        ))}
+                    </>
+                );
+            }
+            return (
+                <ExpenseRow
+                    expense={item}
+                    onDelete={onDelete}
+                    onUpdate={onUpdate}
+                    onReconcile={onReconcile}
+                    onEdit={onEdit}
+                    onSplit={onSplit}
+                    showReconcile={showReconcile}
+                    hideAccount={hideAccount}
+                    showDateSeparator={showDateSeparator}
+                />
+            );
         };
 
         const AddExpenseModal = ({ isOpen, onClose, onAdd, onUpdate, editExpense, token, userName, expenses: allExpenses, merchantAccountMap, reconnect }) => {
@@ -3060,7 +3213,140 @@
             );
         };
 
-        const AccountTabView = ({ accountId, expenses, onUpdate, onReconcile, onDelete, onEdit, onLockItems, onClearUnlocked }) => {
+        // ============ SPLIT EXPENSE MODAL ============
+        const SplitExpenseModal = ({ isOpen, onClose, expense, onSplit }) => {
+            const [rows, setRows] = useState([{ amount: '', merchant: '' }, { amount: '', merchant: '' }]);
+            const [error, setError] = useState('');
+
+            useEffect(() => {
+                if (isOpen && expense) {
+                    // Pre-fill with 2 rows, amounts empty, merchant copied from parent
+                    setRows([
+                        { amount: '', merchant: expense.merchant },
+                        { amount: '', merchant: expense.merchant },
+                    ]);
+                    setError('');
+                }
+            }, [isOpen, expense]);
+
+            if (!isOpen || !expense) return null;
+
+            const parentAmount = expense.amount;
+            const currentTotal = rows.reduce((sum, r) => sum + (parseFloat(r.amount) || 0), 0);
+            const remainder = Math.round((parentAmount - currentTotal) * 100) / 100;
+            const isValid = Math.abs(remainder) < 0.01 && rows.every(r => parseFloat(r.amount) > 0);
+
+            const updateRow = (idx, field, value) => {
+                setRows(prev => prev.map((r, i) => i === idx ? { ...r, [field]: value } : r));
+                setError('');
+            };
+
+            const addRow = () => setRows(prev => [...prev, { amount: '', merchant: expense.merchant }]);
+
+            const removeRow = (idx) => {
+                if (rows.length <= 2) return;
+                setRows(prev => prev.filter((_, i) => i !== idx));
+            };
+
+            // Auto-fill last row with remainder
+            const autoFillLast = () => {
+                if (remainder > 0) {
+                    const lastIdx = rows.length - 1;
+                    updateRow(lastIdx, 'amount', remainder.toFixed(2));
+                }
+            };
+
+            const handleSplit = () => {
+                if (!isValid) {
+                    setError(`Amounts must add up to $${fmt(parentAmount)}. Currently ${remainder > 0 ? '$' + fmt(remainder) + ' remaining' : 'over by $' + fmt(Math.abs(remainder))}.`);
+                    return;
+                }
+                onSplit(expense, rows);
+                onClose();
+            };
+
+            return (
+                <div className="fixed inset-0 bg-black/50 z-50 flex items-end sm:items-center justify-center" onClick={onClose}>
+                    <div className="bg-white w-full max-w-md rounded-t-2xl sm:rounded-2xl p-5 max-h-[85vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+                        <div className="flex justify-between items-center mb-4">
+                            <h2 className="text-lg font-bold flex items-center gap-2">
+                                <ScissorsIcon size={20} /> Split Expense
+                            </h2>
+                            <button onClick={onClose} className="p-1"><XIcon size={20} /></button>
+                        </div>
+
+                        <div className="bg-gray-50 rounded-lg p-3 mb-4">
+                            <div className="text-sm text-gray-600">Splitting:</div>
+                            <div className="font-semibold">{expense.merchant}</div>
+                            <div className="text-lg font-bold text-red-600">-${fmt(parentAmount)}</div>
+                            <div className="text-xs text-gray-400">{expense.date}</div>
+                        </div>
+
+                        <div className="space-y-3 mb-4">
+                            {rows.map((row, idx) => (
+                                <div key={idx} className="flex gap-2 items-start">
+                                    <div className="flex-1 space-y-1">
+                                        <input
+                                            type="text"
+                                            value={row.merchant}
+                                            onChange={e => updateRow(idx, 'merchant', e.target.value)}
+                                            placeholder="Merchant name"
+                                            className="w-full px-3 py-2 border rounded-lg text-sm"
+                                        />
+                                        <div className="relative">
+                                            <span className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm">$</span>
+                                            <input
+                                                type="number"
+                                                step="0.01"
+                                                value={row.amount}
+                                                onChange={e => updateRow(idx, 'amount', e.target.value)}
+                                                placeholder="0.00"
+                                                className="w-full pl-7 pr-3 py-2 border rounded-lg text-sm"
+                                            />
+                                        </div>
+                                    </div>
+                                    {rows.length > 2 && (
+                                        <button onClick={() => removeRow(idx)} className="mt-2 p-1 text-red-400 hover:text-red-600">
+                                            <XIcon size={16} />
+                                        </button>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
+
+                        <div className="flex justify-between items-center mb-3">
+                            <button onClick={addRow} className="text-sm text-blue-600 font-medium">+ Add row</button>
+                            {remainder > 0.005 && (
+                                <button onClick={autoFillLast} className="text-xs text-blue-600 underline">
+                                    Fill ${fmt(remainder)} into last row
+                                </button>
+                            )}
+                        </div>
+
+                        <div className={`text-sm font-medium mb-4 ${Math.abs(remainder) < 0.01 ? 'text-green-600' : 'text-amber-600'}`}>
+                            {Math.abs(remainder) < 0.01
+                                ? '✓ Amounts match'
+                                : remainder > 0
+                                    ? `$${fmt(remainder)} remaining`
+                                    : `Over by $${fmt(Math.abs(remainder))}`
+                            }
+                        </div>
+
+                        {error && <div className="text-red-600 text-sm mb-3">{error}</div>}
+
+                        <button
+                            onClick={handleSplit}
+                            disabled={!isValid}
+                            className={`w-full py-3 rounded-xl font-semibold text-white ${isValid ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-300 cursor-not-allowed'}`}
+                        >
+                            Split into {rows.length} entries
+                        </button>
+                    </div>
+                </div>
+            );
+        };
+
+        const AccountTabView = ({ accountId, expenses, onUpdate, onReconcile, onDelete, onEdit, onSplit, onLockItems, onClearUnlocked }) => {
             const account = getAccountById(accountId);
             const accountExpenses = expenses.filter(e => e.account === accountId);
             const displayExpenses = accountExpenses.filter(e => !e._balanceOnly); // exclude balance-only rows from UI
@@ -3171,17 +3457,18 @@
                             <div className="p-4 text-center text-gray-500">No expenses</div>
                         ) : (
                             <>
-                                {visibleExpenses.map((expense, idx) => (
-                                    <ExpenseRow
-                                        key={expense.rowIndex}
-                                        expense={expense}
+                                {groupExpensesWithSplits(visibleExpenses).map((item, idx, arr) => (
+                                    <ExpenseOrSplitGroup
+                                        key={item._isSplitHeader ? item._splitGroupKey : item.rowIndex}
+                                        item={item}
                                         onDelete={onDelete}
                                         onUpdate={(updated) => onUpdate(updated.rowIndex, updated)}
                                         onReconcile={onReconcile}
                                         onEdit={onEdit}
+                                        onSplit={onSplit}
                                         showReconcile={true}
                                         hideAccount={true}
-                                        showDateSeparator={idx === 0 || getDateKey(expense) !== getDateKey(visibleExpenses[idx - 1])}
+                                        showDateSeparator={idx === 0 || getDateKey(item) !== getDateKey(arr[idx - 1])}
                                     />
                                 ))}
                                 {hasMore && (
@@ -4413,7 +4700,7 @@
 
         const PAGE_SIZE = 50;
 
-        const AllTab = ({ expenses, onDelete, onUpdate, onEdit }) => {
+        const AllTab = ({ expenses, onDelete, onUpdate, onEdit, onSplit }) => {
             const [searchTerm, setSearchTerm] = useState('');
             const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
 
@@ -4455,15 +4742,16 @@
                             <div className="p-4 text-center text-gray-500">No expenses</div>
                         ) : (
                             <>
-                                {visible.map((expense, idx) => (
-                                    <ExpenseRow
-                                        key={expense.rowIndex}
-                                        expense={expense}
+                                {groupExpensesWithSplits(visible).map((item, idx, arr) => (
+                                    <ExpenseOrSplitGroup
+                                        key={item._isSplitHeader ? item._splitGroupKey : item.rowIndex}
+                                        item={item}
                                         onDelete={onDelete}
                                         onUpdate={(updated) => onUpdate(updated.rowIndex, updated)}
                                         onEdit={onEdit}
+                                        onSplit={onSplit}
                                         showReconcile={false}
-                                        showDateSeparator={idx === 0 || getDateKey(expense) !== getDateKey(visible[idx - 1])}
+                                        showDateSeparator={idx === 0 || getDateKey(item) !== getDateKey(arr[idx - 1])}
                                     />
                                 ))}
                                 {hasMore && (
@@ -4561,6 +4849,7 @@
             const [activeTab, setActiveTab] = useState('home');
             const [showAddModal, setShowAddModal] = useState(false);
             const [editExpense, setEditExpense] = useState(null);
+            const [splitExpense, setSplitExpense] = useState(null);
             const [selectedCard, setSelectedCard] = useState(CREDIT_CARDS[0]?.id || '');
             const [selectedBank, setSelectedBank] = useState(BANK_ACCOUNTS[0]?.id || '');
             const [toast, setToast] = useState('');
@@ -4704,6 +4993,48 @@
             const handleCloseModal = () => {
                 setShowAddModal(false);
                 setEditExpense(null);
+            };
+
+            const handleSplitExpense = async (parentExpense, splitRows) => {
+                if (!token) return;
+                setIsSaving(true);
+                try {
+                    pushUndo(expenses);
+                    // 1. Delete the parent row (clear it)
+                    await fetch(
+                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A${parentExpense.rowIndex}:I${parentExpense.rowIndex}?valueInputOption=USER_ENTERED`,
+                        {
+                            method: 'PUT',
+                            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ values: [[]] })
+                        }
+                    );
+                    // 2. Append each split row with [N/M] merchant suffix
+                    const total = splitRows.length;
+                    for (let i = 0; i < splitRows.length; i++) {
+                        const sr = splitRows[i];
+                        const merchantWithTag = `${sr.merchant} [${i + 1}/${total}]`;
+                        const isLast = i === splitRows.length - 1;
+                        await appendExpense({
+                            merchant: merchantWithTag,
+                            amount: parseFloat(sr.amount),
+                            category: parentExpense.category,
+                            account: parentExpense.account,
+                            txnType: parentExpense.txnType,
+                            receipt: parentExpense.receipt || '',
+                            date: parentExpense.date,
+                            person: parentExpense.person || '',
+                        }, { skipRefresh: !isLast });
+                    }
+                    setToast(`Split into ${total} entries`);
+                    setTimeout(() => setToast(''), 3000);
+                } catch (err) {
+                    console.error('Split failed:', err);
+                    setToast('Split failed: ' + err.message);
+                    setTimeout(() => setToast(''), 5000);
+                } finally {
+                    setIsSaving(false);
+                }
             };
 
             const handleQuickMetrocard = async () => {
@@ -5009,6 +5340,7 @@
                                         onDelete={handleDeleteExpense}
                                         onUpdate={handleUpdateExpense}
                                         onEdit={handleEditExpense}
+                                        onSplit={(e) => setSplitExpense(e)}
                                     />
                                 )}
 
@@ -5032,6 +5364,7 @@
                                             onReconcile={handleReconcile}
                                             onDelete={handleDeleteExpense}
                                             onEdit={handleEditExpense}
+                                            onSplit={(e) => setSplitExpense(e)}
                                             onLockItems={handleLockItems}
                                             onClearUnlocked={handleClearUnlocked}
                                         />
@@ -5058,6 +5391,7 @@
                                             onReconcile={handleReconcile}
                                             onDelete={handleDeleteExpense}
                                             onEdit={handleEditExpense}
+                                            onSplit={(e) => setSplitExpense(e)}
                                             onLockItems={handleLockItems}
                                             onClearUnlocked={handleClearUnlocked}
                                         />
@@ -5085,6 +5419,13 @@
                         expenses={expenses}
                         merchantAccountMap={merchantAccountMap}
                         reconnect={reconnect}
+                    />
+
+                    <SplitExpenseModal
+                        isOpen={!!splitExpense}
+                        onClose={() => setSplitExpense(null)}
+                        expense={splitExpense}
+                        onSplit={handleSplitExpense}
                     />
 
                     {/* Bottom Navigation */}
