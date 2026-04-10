@@ -1100,19 +1100,49 @@
                 }
             }, [buildProvider, handleAuthResult, login]);
 
-            // Auto-refresh timer — refresh token before it expires
+            // Auto-refresh timer — silently reconnect before token expires
             useEffect(() => {
                 if (!user || !token) return;
                 const checkRefresh = async () => {
                     if (tokenExpiryRef.current && Date.now() > tokenExpiryRef.current - 5 * 60 * 1000) {
-                        // Token expiring soon — mark as needing reconnect (user will tap Reconnect)
-                        setToken(null);
-                        setNeedsReconnect(true);
+                        // Token expiring within 5 min — auto-reconnect silently
+                        console.log('Token expiring soon, auto-reconnecting...');
+                        try {
+                            const result = await expenseAuth.signInWithPopup(buildProvider());
+                            handleAuthResult(result);
+                            console.log('Auto-reconnect succeeded');
+                        } catch (err) {
+                            console.warn('Auto-reconnect failed, will show banner:', err.code);
+                            setToken(null);
+                            setNeedsReconnect(true);
+                        }
                     }
                 };
-                const interval = setInterval(checkRefresh, 5 * 60 * 1000);
+                // Check every 2 minutes
+                const interval = setInterval(checkRefresh, 2 * 60 * 1000);
                 return () => clearInterval(interval);
             }, [user, token, buildProvider, handleAuthResult]);
+
+            // Also auto-reconnect when app becomes visible and token is expired/expiring
+            useEffect(() => {
+                if (!user) return;
+                const handleVisibility = async () => {
+                    if (document.visibilityState !== 'visible') return;
+                    const exp = tokenExpiryRef.current;
+                    if (!exp || Date.now() > exp - 2 * 60 * 1000) {
+                        console.log('App visible + token expired/expiring, auto-reconnecting...');
+                        try {
+                            const result = await expenseAuth.signInWithPopup(buildProvider());
+                            handleAuthResult(result);
+                        } catch (err) {
+                            console.warn('Visibility reconnect failed:', err.code);
+                            setNeedsReconnect(true);
+                        }
+                    }
+                };
+                document.addEventListener('visibilitychange', handleVisibility);
+                return () => document.removeEventListener('visibilitychange', handleVisibility);
+            }, [user, buildProvider, handleAuthResult]);
 
             const logout = useCallback(() => {
                 expenseAuth.signOut();
@@ -1123,7 +1153,36 @@
                 try { localStorage.removeItem('expense_user'); } catch {}
             }, [saveToken]);
 
-            return { user, token, login, logout, authLoading, needsReconnect, reconnect };
+            // Helper: fetch with auto-retry on 401 (expired token)
+            const authenticatedFetch = useCallback(async (url, options = {}) => {
+                const doFetch = (tkn) => fetch(url, {
+                    ...options,
+                    headers: { ...options.headers, 'Authorization': `Bearer ${tkn}` }
+                });
+                let currentToken = token;
+                if (!currentToken) throw new Error('Google connection expired — tap Reconnect, then try again.');
+                let resp = await doFetch(currentToken);
+                if (resp.status === 401) {
+                    // Token expired mid-session — try to auto-reconnect
+                    console.log('Got 401, attempting auto-reconnect...');
+                    try {
+                        const result = await expenseAuth.signInWithPopup(buildProvider());
+                        const newToken = handleAuthResult(result);
+                        if (newToken) {
+                            currentToken = newToken;
+                            resp = await doFetch(newToken);
+                        }
+                    } catch (err) {
+                        console.warn('Auto-reconnect on 401 failed:', err.code);
+                        setToken(null);
+                        setNeedsReconnect(true);
+                        throw new Error('Google connection expired — tap Reconnect, then try again.');
+                    }
+                }
+                return resp;
+            }, [token, buildProvider, handleAuthResult]);
+
+            return { user, token, login, logout, authLoading, needsReconnect, reconnect, authenticatedFetch };
         };
 
         // ============ GOOGLE SHEETS API ============
@@ -1294,6 +1353,11 @@
                             body: JSON.stringify({ values: [row] })
                         }
                     );
+                    if (!resp.ok) {
+                        const errBody = await resp.text();
+                        console.error('Sheet append failed:', resp.status, errBody);
+                        throw new Error(resp.status === 401 ? 'Google connection expired — tap Reconnect, then try again.' : `Save failed (${resp.status}). Please try again.`);
+                    }
                     const result = await resp.json();
                     console.log('Sheet append result:', result);
 
@@ -1346,6 +1410,7 @@
                     if (!skipRefresh) await fetchExpenses();
                 } catch (err) {
                     console.error('Failed to append expense:', err);
+                    throw err;
                 }
             }, [token, fetchExpenses]);
 
@@ -1367,7 +1432,7 @@
                         expense.categoryRaw || getSheetCategoryName(expense.category), // H
                         expense.receipt || '',                                 // I
                     ];
-                    await fetch(
+                    const updateResp = await fetch(
                         `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A${rowIndex}:I${rowIndex}?valueInputOption=USER_ENTERED`,
                         {
                             method: 'PUT',
@@ -1375,16 +1440,22 @@
                             body: JSON.stringify({ values: [row] })
                         }
                     );
+                    if (!updateResp.ok) {
+                        const errBody = await updateResp.text();
+                        console.error('Sheet update failed:', updateResp.status, errBody);
+                        throw new Error(updateResp.status === 401 ? 'Google connection expired — tap Reconnect, then try again.' : `Update failed (${updateResp.status}). Please try again.`);
+                    }
                     await fetchExpenses(true);
                 } catch (err) {
                     console.error('Failed to update expense:', err);
+                    throw err;
                 }
             }, [token, fetchExpenses]);
 
             const deleteExpense = useCallback(async (rowIndex) => {
-                if (!token) return;
+                if (!token) throw new Error('Google connection expired — tap Reconnect, then try again.');
                 try {
-                    await fetch(
+                    const delResp = await fetch(
                         `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A${rowIndex}:I${rowIndex}?valueInputOption=USER_ENTERED`,
                         {
                             method: 'PUT',
@@ -1392,9 +1463,15 @@
                             body: JSON.stringify({ values: [["", "", "", "", "", "", "", "", ""]] })
                         }
                     );
+                    if (!delResp.ok) {
+                        const errBody = await delResp.text();
+                        console.error('Sheet delete failed:', delResp.status, errBody);
+                        throw new Error(delResp.status === 401 ? 'Google connection expired — tap Reconnect, then try again.' : `Delete failed (${delResp.status}). Please try again.`);
+                    }
                     await fetchExpenses(true);
                 } catch (err) {
                     console.error('Failed to delete expense:', err);
+                    throw err;
                 }
             }, [token, fetchExpenses]);
 
@@ -1841,26 +1918,26 @@
                     }
                     merchant = merchant || 'Unknown';
 
-                    // Amazon detection FIRST — order number is the strongest signal.
-                    // Item names can contain subsidiary brands (e.g. "365 by Whole Foods Market")
-                    // which would otherwise falsely match as Whole Foods.
+                    // Merchant detection: Whole Foods vs Amazon
+                    // Whole Foods receipts often contain "Amazon" (Prime branding),
+                    // so we use the Amazon ORDER NUMBER as the definitive Amazon signal.
                     const amazonOrderRe = /(\d{3}-\d{7}-\d{7})/;
                     const amazonOrderMatch = text.match(amazonOrderRe);
                     const isAmazon = /amazon/i.test(text);
+                    const wholefoods = /whole\s*foods/i.test(text);
                     const hasAmazonOrderPage = /order\s*details|order\s*placed|your\s*orders/i.test(text);
 
                     if (amazonOrderMatch && (isAmazon || hasAmazonOrderPage)) {
+                        // Has Amazon order number → definitely Amazon
                         merchant = `Amazon - ${amazonOrderMatch[1]}`;
+                    } else if (wholefoods) {
+                        // "Whole Foods" in text and no Amazon order number → Whole Foods
+                        // (even if "Amazon" appears due to Prime branding on receipt)
+                        merchant = 'Whole Foods';
                     } else if (isAmazon && hasAmazonOrderPage) {
                         merchant = 'Amazon';
-                    } else {
-                        // Only match Whole Foods if this is NOT an Amazon order page
-                        const wholefoods = /whole\s*foods/i.test(text);
-                        if (wholefoods && !isAmazon && !hasAmazonOrderPage) {
-                            merchant = 'Whole Foods';
-                        } else if (isAmazon) {
-                            if (!/amazon/i.test(merchant)) merchant = 'Amazon';
-                        }
+                    } else if (isAmazon) {
+                        if (!/amazon/i.test(merchant)) merchant = 'Amazon';
                     }
 
                     // ---- AMOUNT EXTRACTION ----
@@ -2127,7 +2204,7 @@
 
         // ============ MAIN COMPONENTS ============
 
-        const ExpenseRow = ({ expense, onDelete, onUpdate, onReconcile, showReconcile, onEdit, onSplit, hideAccount = false, showDateSeparator = false, isSplitChild = false }) => {
+        const ExpenseRow = ({ expense, onDelete, onUpdate, onReconcile, showReconcile, onEdit, onSplit, hideAccount = false, showDateSeparator = false, isSplitChild = false, isDeleting = false }) => {
             const category = getCategoryById(expense.category);
             const account = getAccountById(expense.account);
             const isPaymentOrTransfer = expense.category === 'card_payment' || expense.category === 'transfer';
@@ -2218,10 +2295,15 @@
                         </button>
                     )}
                     <button
-                        onClick={(e) => { e.stopPropagation(); onDelete(expense.rowIndex); }}
+                        onClick={(e) => { e.stopPropagation(); if (!isDeleting) onDelete(expense.rowIndex); }}
                         className="ml-1 flex-shrink-0"
+                        disabled={isDeleting}
                     >
-                        <Trash2Icon size={16} className="text-red-400 hover:text-red-600" />
+                        {isDeleting ? (
+                            <div className="w-4 h-4 border-2 border-red-200 border-t-red-500 rounded-full animate-spin" />
+                        ) : (
+                            <Trash2Icon size={16} className="text-red-400 hover:text-red-600" />
+                        )}
                     </button>
                 </div>
                 </>
@@ -2234,7 +2316,7 @@
         };
 
         // Renders a single expense or a split group (header + indented children)
-        const ExpenseOrSplitGroup = ({ item, onDelete, onUpdate, onReconcile, showReconcile, onEdit, onSplit, hideAccount, showDateSeparator }) => {
+        const ExpenseOrSplitGroup = ({ item, onDelete, onUpdate, onReconcile, showReconcile, onEdit, onSplit, hideAccount, showDateSeparator, deletingRowIndex }) => {
             if (item._isSplitHeader) {
                 const category = getCategoryById(item.category);
                 const account = getAccountById(item.account);
@@ -2278,6 +2360,7 @@
                                 showReconcile={showReconcile}
                                 hideAccount={hideAccount}
                                 isSplitChild={true}
+                                isDeleting={deletingRowIndex === child.rowIndex}
                             />
                         ))}
                     </>
@@ -2294,6 +2377,7 @@
                     showReconcile={showReconcile}
                     hideAccount={hideAccount}
                     showDateSeparator={showDateSeparator}
+                    isDeleting={deletingRowIndex === item.rowIndex}
                 />
             );
         };
@@ -2321,6 +2405,11 @@
 
             // Pre-fill when editing
             useEffect(() => {
+                if (isOpen) {
+                    // New modal session — increment counter so stale async uploads are ignored
+                    modalSessionId.current += 1;
+                    uploadedReceiptUrl.current = null;
+                }
                 if (editExpense && isOpen) {
                     setMerchant(editExpense.merchant || '');
                     setAmount(editExpense.amount?.toString() || '');
@@ -2367,6 +2456,7 @@
             const [showOCRSpinner, setShowOCRSpinner] = useState(false);
             const [showSuggestions, setShowSuggestions] = useState(false);
             const uploadedReceiptUrl = useRef(null); // track file uploaded this session for cancel/rename
+            const modalSessionId = useRef(0); // incremented each time modal opens to ignore stale async results
 
             // Compute frequent merchants (5+ entries)
             const frequentMerchants = useMemo(() => {
@@ -2386,6 +2476,7 @@
             const { uploadReceipt, deleteFile, renameFile } = useGoogleDrive(token);
 
             const handleScan = async (file) => {
+                const sessionAtStart = modalSessionId.current;
                 setShowOCRSpinner(true);
                 // Pre-crop the image for Drive upload (keeps color)
                 let uploadFile = file;
@@ -2403,6 +2494,11 @@
                     scanReceipt(file).catch(err => { console.error('OCR error:', err); return null; }),
                     uploadReceipt(uploadFile, merchant || 'receipt', userName).catch(err => { console.error('Upload error:', err); return null; })
                 ]);
+                // Ignore results if modal session changed (user closed/reopened for different expense)
+                if (modalSessionId.current !== sessionAtStart) {
+                    console.log('Ignoring stale scan result from previous modal session');
+                    return;
+                }
                 setShowOCRSpinner(false);
                 if (result) {
                     const isAmazonOrder = /^Amazon - \d{3}-\d{7}-\d{7}$/.test(result.merchant);
@@ -2428,6 +2524,7 @@
             };
 
             const handleReceiptUpload = async (file) => {
+                const sessionAtStart = modalSessionId.current;
                 try {
                     // Pre-crop the image for Drive upload (keeps color)
                     let uploadFile = file;
@@ -2452,6 +2549,11 @@
                         tasks.push(Promise.resolve(null));
                     }
                     const [ocrResult, url] = await Promise.all(tasks);
+                    // Ignore results if modal session changed (user closed/reopened for different expense)
+                    if (modalSessionId.current !== sessionAtStart) {
+                        console.log('Ignoring stale upload result from previous modal session');
+                        return;
+                    }
                     setShowOCRSpinner(false);
 
                     // Autofill empty fields from OCR, with fuzzy merchant matching
@@ -2500,6 +2602,7 @@
             // Import from Google Drive using Picker API
             const handleDrivePick = useCallback(async () => {
                 if (!token) { reconnect(); return; }
+                const sessionAtStart = modalSessionId.current;
                 // Dynamically load gapi script if not present
                 if (!window.gapi) {
                     await new Promise((resolve, reject) => {
@@ -2538,6 +2641,13 @@
                                     scanReceipt(file).catch(() => null),
                                     uploadReceipt(file, ocrMerchant, userName).catch(() => null)
                                 ]);
+
+                                // Ignore results if modal session changed
+                                if (modalSessionId.current !== sessionAtStart) {
+                                    console.log('Ignoring stale picker result from previous modal session');
+                                    setShowOCRSpinner(false);
+                                    return;
+                                }
 
                                 // Set receipt URL from the re-uploaded copy
                                 if (url) {
@@ -3346,7 +3456,7 @@
             );
         };
 
-        const AccountTabView = ({ accountId, expenses, onUpdate, onReconcile, onDelete, onEdit, onSplit, onLockItems, onClearUnlocked }) => {
+        const AccountTabView = ({ accountId, expenses, onUpdate, onReconcile, onDelete, onEdit, onSplit, onLockItems, onClearUnlocked, deletingRowIndex }) => {
             const account = getAccountById(accountId);
             const accountExpenses = expenses.filter(e => e.account === accountId);
             const displayExpenses = accountExpenses.filter(e => !e._balanceOnly); // exclude balance-only rows from UI
@@ -3469,6 +3579,7 @@
                                         showReconcile={true}
                                         hideAccount={true}
                                         showDateSeparator={idx === 0 || getDateKey(item) !== getDateKey(arr[idx - 1])}
+                                        deletingRowIndex={deletingRowIndex}
                                     />
                                 ))}
                                 {hasMore && (
@@ -4700,7 +4811,7 @@
 
         const PAGE_SIZE = 50;
 
-        const AllTab = ({ expenses, onDelete, onUpdate, onEdit, onSplit }) => {
+        const AllTab = ({ expenses, onDelete, onUpdate, onEdit, onSplit, deletingRowIndex }) => {
             const [searchTerm, setSearchTerm] = useState('');
             const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
 
@@ -4752,6 +4863,7 @@
                                         onSplit={onSplit}
                                         showReconcile={false}
                                         showDateSeparator={idx === 0 || getDateKey(item) !== getDateKey(arr[idx - 1])}
+                                        deletingRowIndex={deletingRowIndex}
                                     />
                                 ))}
                                 {hasMore && (
@@ -5091,6 +5203,17 @@
                 }
             }, [user, token, fetchExpenses]);
 
+            // Auto-refresh when app becomes visible (e.g., after editing sheet, switching tabs/apps)
+            useEffect(() => {
+                const handleVisibility = () => {
+                    if (document.visibilityState === 'visible' && token) {
+                        fetchExpenses(true); // silent refresh
+                    }
+                };
+                document.addEventListener('visibilitychange', handleVisibility);
+                return () => document.removeEventListener('visibilitychange', handleVisibility);
+            }, [token, fetchExpenses]);
+
             const handleAddExpense = async (expenseData) => {
                 // If token expired, auto-trigger reconnect and queue the save for retry
                 if (!token || needsReconnect) {
@@ -5132,7 +5255,8 @@
                     setTimeout(() => setConfirmationData(null), 10000);
                 } catch (err) {
                     console.error('Save failed:', err);
-                    alert(err.message || 'Failed to save expense. Please try again.');
+                    setToast(err.message || 'Failed to save expense. Please try again.');
+                    setTimeout(() => setToast(''), 8000);
                 } finally {
                     setIsSaving(false);
                 }
@@ -5161,11 +5285,21 @@
                 }
             };
 
+            const [deletingRowIndex, setDeletingRowIndex] = useState(null);
             const handleDeleteExpense = async (rowIndex) => {
-                pushUndo(expenses);
-                await deleteExpense(rowIndex);
-                setToast('Expense deleted — tap Undo to restore');
-                setTimeout(() => setToast(''), 5000);
+                setDeletingRowIndex(rowIndex);
+                try {
+                    pushUndo(expenses);
+                    await deleteExpense(rowIndex);
+                    setToast('Expense deleted — tap Undo to restore');
+                    setTimeout(() => setToast(''), 5000);
+                } catch (err) {
+                    console.error('Delete failed:', err);
+                    setToast(err.message || 'Delete failed');
+                    setTimeout(() => setToast(''), 5000);
+                } finally {
+                    setDeletingRowIndex(null);
+                }
             };
 
             const handleReconcile = (rowIndex, reconciled) => {
@@ -5373,6 +5507,7 @@
                                         onUpdate={handleUpdateExpense}
                                         onEdit={handleEditExpense}
                                         onSplit={(e) => setSplitExpense(e)}
+                                        deletingRowIndex={deletingRowIndex}
                                     />
                                 )}
 
@@ -5399,6 +5534,7 @@
                                             onSplit={(e) => setSplitExpense(e)}
                                             onLockItems={handleLockItems}
                                             onClearUnlocked={handleClearUnlocked}
+                                            deletingRowIndex={deletingRowIndex}
                                         />
                                     </div>
                                 )}
@@ -5426,6 +5562,7 @@
                                             onSplit={(e) => setSplitExpense(e)}
                                             onLockItems={handleLockItems}
                                             onClearUnlocked={handleClearUnlocked}
+                                            deletingRowIndex={deletingRowIndex}
                                         />
                                     </div>
                                 )}
