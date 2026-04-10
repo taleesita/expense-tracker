@@ -2275,7 +2275,6 @@
             };
 
             const handleReceiptUpload = async (file) => {
-                if (!token) return;
                 try {
                     // Pre-crop the image for Drive upload (keeps color)
                     let uploadFile = file;
@@ -2290,10 +2289,16 @@
                     }
                     // Run OCR (on original) and Drive upload (cropped) in parallel
                     setShowOCRSpinner(true);
-                    const [ocrResult, url] = await Promise.all([
+                    const tasks = [
                         scanReceipt(file).catch(err => { console.error('OCR error:', err); return null; }),
-                        uploadReceipt(uploadFile, merchant || 'receipt', userName).catch(err => { console.error('Upload error:', err); return null; })
-                    ]);
+                    ];
+                    // Only attempt Drive upload if we have a valid token
+                    if (token) {
+                        tasks.push(uploadReceipt(uploadFile, merchant || 'receipt', userName).catch(err => { console.error('Upload error:', err); return null; }));
+                    } else {
+                        tasks.push(Promise.resolve(null));
+                    }
+                    const [ocrResult, url] = await Promise.all(tasks);
                     setShowOCRSpinner(false);
 
                     // Autofill empty fields from OCR, with fuzzy merchant matching
@@ -2324,6 +2329,9 @@
                     if (url) {
                         uploadedReceiptUrl.current = url;
                         setReceipt(url);
+                    } else if (!token) {
+                        setValidationErrors(prev => ({...prev, upload: 'Session expired — tap Reconnect to upload receipt to Drive'}));
+                        setTimeout(() => setValidationErrors(prev => ({...prev, upload: false})), 8000);
                     } else {
                         setValidationErrors(prev => ({...prev, upload: 'Upload failed — please try again'}));
                         setTimeout(() => setValidationErrors(prev => ({...prev, upload: false})), 5000);
