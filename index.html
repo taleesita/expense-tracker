@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v2.6-apr11';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v2.7-apr11';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
         const TEST_PARENT_FOLDER_ID = '1LJ57lHUhuLigB1NKuko39saGCRVqs8Ya';
@@ -5354,8 +5354,43 @@
                 setDeletingRowIndex(rowIndex);
                 try {
                     pushUndo(expenses);
+                    // Check if this is a split child — if so, we may need to unsplit the remaining sibling
+                    const deletedExpense = expenses.find(e => e.rowIndex === rowIndex);
+                    const splitGroup = deletedExpense?._splitGroup;
+                    const siblings = splitGroup ? expenses.filter(e => e._splitGroup === splitGroup && e.rowIndex !== rowIndex) : [];
+
                     await deleteExpense(rowIndex);
-                    setToast('Expense deleted — tap Undo to restore');
+
+                    // Handle split group cleanup after deleting a split child
+                    if (siblings.length === 1) {
+                        // Only one sibling left — unsplit it (remove [N/M] tag)
+                        const remaining = siblings[0];
+                        const baseMerchant = remaining.merchant; // already stripped of [N/M] by parser
+                        try {
+                            await updateExpense(remaining.rowIndex, { ...remaining, merchantRaw: baseMerchant });
+                            setToast('Split deleted — remaining entry unsplit');
+                        } catch (err) {
+                            console.warn('Failed to unsplit remaining entry:', err);
+                            setToast('Expense deleted — tap Undo to restore');
+                        }
+                    } else if (siblings.length > 1) {
+                        // Multiple siblings remain — renumber them [1/N], [2/N], etc.
+                        const sorted = [...siblings].sort((a, b) => (a._splitIndex || 0) - (b._splitIndex || 0));
+                        const newTotal = sorted.length;
+                        try {
+                            for (let i = 0; i < sorted.length; i++) {
+                                const sib = sorted[i];
+                                const newMerchantRaw = `${sib.merchant} [${i + 1}/${newTotal}]`;
+                                await updateExpense(sib.rowIndex, { ...sib, merchantRaw: newMerchantRaw });
+                            }
+                            setToast(`Deleted — ${newTotal} splits remaining`);
+                        } catch (err) {
+                            console.warn('Failed to renumber split siblings:', err);
+                            setToast('Expense deleted — tap Undo to restore');
+                        }
+                    } else {
+                        setToast('Expense deleted — tap Undo to restore');
+                    }
                     setTimeout(() => setToast(''), 5000);
                 } catch (err) {
                     console.error('Delete failed:', err);
