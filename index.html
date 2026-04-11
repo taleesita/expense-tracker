@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v2.5-apr11';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v2.6-apr11';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
         const TEST_PARENT_FOLDER_ID = '1LJ57lHUhuLigB1NKuko39saGCRVqs8Ya';
@@ -2756,7 +2756,7 @@
                     if (account && secondaryAccount && account === secondaryAccount) errors.secondaryAccount = true;
                 } else {
                     if (!merchant) errors.merchant = true;
-                    if (!category || category === 'other') errors.category = true;
+                    if (!category) errors.category = true;
                 }
                 if (Object.keys(errors).length) {
                     setValidationErrors(errors);
