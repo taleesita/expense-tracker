@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v3.3-apr11';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v3.4-apr11';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
         const TEST_PARENT_FOLDER_ID = '1LJ57lHUhuLigB1NKuko39saGCRVqs8Ya';
@@ -5417,8 +5417,20 @@
                 try {
                     pushUndo(expenses);
                     await updateExpense(rowIndex, updated);
-                    setToast('Saved');
-                    setTimeout(() => setToast(''), 2000);
+                    setConfirmationData({
+                        isDual: false,
+                        isNew: false,
+                        merchant: updated.merchant,
+                        amount: updated.amount,
+                        category: updated.category,
+                        account: updated.account,
+                        txnType: updated.txnType,
+                        date: updated.date,
+                        receipt: updated.receipt || null,
+                        person: updated.person,
+                        timestamp: new Date().toLocaleString(),
+                    });
+                    setTimeout(() => setConfirmationData(null), 10000);
                 } catch (err) {
                     console.error('Update failed:', err);
                     setToast(err.message || 'Save failed');
