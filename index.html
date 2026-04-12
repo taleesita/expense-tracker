@@ -3,6 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
     <title>Expenses</title>
     <link rel="icon" href="apple-touch-icon.png">
     <link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png">
@@ -62,6 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
+        const APP_VERSION = 'v3.7-apr11';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
         const TEST_PARENT_FOLDER_ID = '1LJ57lHUhuLigB1NKuko39saGCRVqs8Ya';
@@ -1096,23 +1100,43 @@
                     handleAuthResult(result);
                 } catch (err) {
                     console.error('Reconnect failed:', err.code, err.message);
-                    alert('Reconnect failed: ' + (err.message || err.code) + '\n\nTry opening the app in your browser if this keeps happening.');
+                    // Don't use alert() — it's blocked in PWA standalone mode. Let caller handle via catch.
+                    throw err;
                 }
             }, [buildProvider, handleAuthResult, login]);
 
-            // Auto-refresh timer — refresh token before it expires
+            // Token expiry check — show reconnect banner when token is expired/expiring
+            // NOTE: We do NOT auto-open popups here because browsers block popups from timers.
+            // The user taps "Reconnect" (user-initiated click) which opens the popup successfully.
             useEffect(() => {
                 if (!user || !token) return;
-                const checkRefresh = async () => {
-                    if (tokenExpiryRef.current && Date.now() > tokenExpiryRef.current - 5 * 60 * 1000) {
-                        // Token expiring soon — mark as needing reconnect (user will tap Reconnect)
+                const checkExpiry = () => {
+                    if (tokenExpiryRef.current && Date.now() > tokenExpiryRef.current - 3 * 60 * 1000) {
+                        console.log('Token expiring soon, showing reconnect banner');
                         setToken(null);
                         setNeedsReconnect(true);
                     }
                 };
-                const interval = setInterval(checkRefresh, 5 * 60 * 1000);
+                // Check every minute
+                const interval = setInterval(checkExpiry, 60 * 1000);
                 return () => clearInterval(interval);
-            }, [user, token, buildProvider, handleAuthResult]);
+            }, [user, token]);
+
+            // When app becomes visible, check if token is expired and show banner
+            useEffect(() => {
+                if (!user) return;
+                const handleVisibility = () => {
+                    if (document.visibilityState !== 'visible') return;
+                    const exp = tokenExpiryRef.current;
+                    if (exp && Date.now() > exp - 3 * 60 * 1000) {
+                        console.log('App visible + token expired, showing reconnect banner');
+                        setToken(null);
+                        setNeedsReconnect(true);
+                    }
+                };
+                document.addEventListener('visibilitychange', handleVisibility);
+                return () => document.removeEventListener('visibilitychange', handleVisibility);
+            }, [user]);
 
             const logout = useCallback(() => {
                 expenseAuth.signOut();
@@ -1123,7 +1147,36 @@
                 try { localStorage.removeItem('expense_user'); } catch {}
             }, [saveToken]);
 
-            return { user, token, login, logout, authLoading, needsReconnect, reconnect };
+            // Helper: fetch with auto-retry on 401 (expired token)
+            const authenticatedFetch = useCallback(async (url, options = {}) => {
+                const doFetch = (tkn) => fetch(url, {
+                    ...options,
+                    headers: { ...options.headers, 'Authorization': `Bearer ${tkn}` }
+                });
+                let currentToken = token;
+                if (!currentToken) throw new Error('Google connection expired — tap Reconnect, then try again.');
+                let resp = await doFetch(currentToken);
+                if (resp.status === 401) {
+                    // Token expired mid-session — try to auto-reconnect
+                    console.log('Got 401, attempting auto-reconnect...');
+                    try {
+                        const result = await expenseAuth.signInWithPopup(buildProvider());
+                        const newToken = handleAuthResult(result);
+                        if (newToken) {
+                            currentToken = newToken;
+                            resp = await doFetch(newToken);
+                        }
+                    } catch (err) {
+                        console.warn('Auto-reconnect on 401 failed:', err.code);
+                        setToken(null);
+                        setNeedsReconnect(true);
+                        throw new Error('Google connection expired — tap Reconnect, then try again.');
+                    }
+                }
+                return resp;
+            }, [token, buildProvider, handleAuthResult]);
+
+            return { user, token, login, logout, authLoading, needsReconnect, reconnect, authenticatedFetch };
         };
 
         // ============ GOOGLE SHEETS API ============
@@ -1287,13 +1340,18 @@
                     ];
                     console.log('Writing row to sheet:', { merchant: expense.merchant, account: expense.account, txnType: expense.txnType, charge: chargeAmt, deposit: depositAmt, receipt: expense.receipt || '(none)' });
                     const resp = await fetch(
-                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A:I:append?valueInputOption=USER_ENTERED`,
+                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A1:I1:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
                         {
                             method: 'POST',
                             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
                             body: JSON.stringify({ values: [row] })
                         }
                     );
+                    if (!resp.ok) {
+                        const errBody = await resp.text();
+                        console.error('Sheet append failed:', resp.status, errBody);
+                        throw new Error(resp.status === 401 ? 'Google connection expired — tap Reconnect, then try again.' : `Save failed (${resp.status}). Please try again.`);
+                    }
                     const result = await resp.json();
                     console.log('Sheet append result:', result);
 
@@ -1346,6 +1404,7 @@
                     if (!skipRefresh) await fetchExpenses();
                 } catch (err) {
                     console.error('Failed to append expense:', err);
+                    throw err;
                 }
             }, [token, fetchExpenses]);
 
@@ -1367,7 +1426,7 @@
                         expense.categoryRaw || getSheetCategoryName(expense.category), // H
                         expense.receipt || '',                                 // I
                     ];
-                    await fetch(
+                    const updateResp = await fetch(
                         `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A${rowIndex}:I${rowIndex}?valueInputOption=USER_ENTERED`,
                         {
                             method: 'PUT',
@@ -1375,16 +1434,22 @@
                             body: JSON.stringify({ values: [row] })
                         }
                     );
+                    if (!updateResp.ok) {
+                        const errBody = await updateResp.text();
+                        console.error('Sheet update failed:', updateResp.status, errBody);
+                        throw new Error(updateResp.status === 401 ? 'Google connection expired — tap Reconnect, then try again.' : `Update failed (${updateResp.status}). Please try again.`);
+                    }
                     await fetchExpenses(true);
                 } catch (err) {
                     console.error('Failed to update expense:', err);
+                    throw err;
                 }
             }, [token, fetchExpenses]);
 
             const deleteExpense = useCallback(async (rowIndex) => {
-                if (!token) return;
+                if (!token) throw new Error('Google connection expired — tap Reconnect, then try again.');
                 try {
-                    await fetch(
+                    const delResp = await fetch(
                         `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A${rowIndex}:I${rowIndex}?valueInputOption=USER_ENTERED`,
                         {
                             method: 'PUT',
@@ -1392,9 +1457,15 @@
                             body: JSON.stringify({ values: [["", "", "", "", "", "", "", "", ""]] })
                         }
                     );
+                    if (!delResp.ok) {
+                        const errBody = await delResp.text();
+                        console.error('Sheet delete failed:', delResp.status, errBody);
+                        throw new Error(delResp.status === 401 ? 'Google connection expired — tap Reconnect, then try again.' : `Delete failed (${delResp.status}). Please try again.`);
+                    }
                     await fetchExpenses(true);
                 } catch (err) {
                     console.error('Failed to delete expense:', err);
+                    throw err;
                 }
             }, [token, fetchExpenses]);
 
@@ -1841,26 +1912,28 @@
                     }
                     merchant = merchant || 'Unknown';
 
-                    // Amazon detection FIRST — order number is the strongest signal.
-                    // Item names can contain subsidiary brands (e.g. "365 by Whole Foods Market")
-                    // which would otherwise falsely match as Whole Foods.
+                    // Merchant detection: Whole Foods vs Amazon
+                    // Whole Foods receipts often contain "Amazon" (Prime branding),
+                    // so we use the Amazon ORDER NUMBER as the definitive Amazon signal.
                     const amazonOrderRe = /(\d{3}-\d{7}-\d{7})/;
                     const amazonOrderMatch = text.match(amazonOrderRe);
                     const isAmazon = /amazon/i.test(text);
+                    // Broad Whole Foods matching — OCR can garble characters
+                    const wholefoods = /whole\s*foods/i.test(text) || /wh[o0]le\s*f[o0]{2}ds/i.test(text) || /WFM/i.test(text) || /whole\s*f[o0]+ds?\s*m/i.test(text);
                     const hasAmazonOrderPage = /order\s*details|order\s*placed|your\s*orders/i.test(text);
+                    console.log('OCR merchant detection:', { merchant, isAmazon, wholefoods, hasAmazonOrderPage, hasOrderNum: !!amazonOrderMatch, textSnippet: text.substring(0, 300) });
 
                     if (amazonOrderMatch && (isAmazon || hasAmazonOrderPage)) {
+                        // Has Amazon order number → definitely Amazon
                         merchant = `Amazon - ${amazonOrderMatch[1]}`;
+                    } else if (wholefoods) {
+                        // "Whole Foods" in text and no Amazon order number → Whole Foods
+                        // (even if "Amazon" appears due to Prime branding on receipt)
+                        merchant = 'Whole Foods';
                     } else if (isAmazon && hasAmazonOrderPage) {
                         merchant = 'Amazon';
-                    } else {
-                        // Only match Whole Foods if this is NOT an Amazon order page
-                        const wholefoods = /whole\s*foods/i.test(text);
-                        if (wholefoods && !isAmazon && !hasAmazonOrderPage) {
-                            merchant = 'Whole Foods';
-                        } else if (isAmazon) {
-                            if (!/amazon/i.test(merchant)) merchant = 'Amazon';
-                        }
+                    } else if (isAmazon) {
+                        if (!/amazon/i.test(merchant)) merchant = 'Amazon';
                     }
 
                     // ---- AMOUNT EXTRACTION ----
@@ -1888,31 +1961,65 @@
                             const m = line.match(new RegExp('\\$\\s*' + moneyRe + '|\\b' + moneyRe + '\\s*$'));
                             return m ? parseMoney(m[1] || m[2]) : 0;
                         };
-                        // Pass 1: Look for "grand total", "total due", "amount due", "balance due"
-                        for (const line of reversedLines) {
-                            if (/grand\s*total|total\s*due|amount\s*due|balance\s*due|total\s*charged?/i.test(line)) {
-                                const val = amountFromLine(line);
-                                if (val > 0) { amount = val; break; }
+
+                        // Debug: log ALL lines that contain a dollar amount or key receipt words
+                        const interestingLines = lines.map((l, i) => {
+                            const t = l.trim();
+                            if (!t) return null;
+                            const hasMoney = /\$\s*\d+\.\d{2}|\b\d+\.\d{2}\s*$/.test(t);
+                            const hasKeyword = /total|subtotal|visa|mastercard|amex|debit|credit|tend|net\s*sale|saving|paid|change|due|balance/i.test(t);
+                            if (hasMoney || hasKeyword) return `  [${i}] "${t}"`;
+                            return null;
+                        }).filter(Boolean).join('\n');
+                        console.log('OCR amount extraction — interesting lines:\n' + interestingLines);
+
+                        // FULL TEXT SEARCH approach: search entire OCR text for patterns, not just individual lines
+                        // This handles cases where Tesseract splits a label and its amount across lines
+
+                        // Strategy 1: Look for "VISA" or card keyword near a dollar amount in the full text
+                        const cardMatch = text.match(/\b(visa|mastercard|amex|discover|debit)\b[^$\n]{0,30}\$?\s*(\d+\.\d{2})/i);
+                        if (cardMatch) {
+                            const val = parseFloat(cardMatch[2]);
+                            if (val > 0) { amount = val; console.log('OCR amount: card match in text:', amount, 'context:', cardMatch[0].trim()); }
+                        }
+
+                        // Strategy 2: "Net Sales" or "Net Total" near a dollar amount
+                        if (!amount) {
+                            const netMatch = text.match(/net\s*(?:sales|total)[:\s]*\$?\s*(\d+\.\d{2})/i);
+                            if (netMatch) {
+                                const val = parseFloat(netMatch[1]);
+                                if (val > 0) { amount = val; console.log('OCR amount: net sales/total match:', amount); }
                             }
                         }
-                        // Pass 2: Look for standalone "total" (not "subtotal", not "total savings/tax/items")
+
+                        // Strategy 3: "Total" (not sub, not savings) near a dollar amount — full text
                         if (!amount) {
-                            for (const line of reversedLines) {
-                                const stripped = line.trim().toLowerCase();
-                                if (/\btotal\b/i.test(stripped)
-                                    && !/sub\s*total/i.test(stripped)
-                                    && !/total\s*(savings?|tax|before|items?|qty|rewards?|discount)/i.test(stripped)) {
-                                    const val = amountFromLine(line);
-                                    if (val > 0) { amount = val; break; }
+                            // Find all "Total" occurrences with nearby amounts, pick the one that's NOT subtotal/savings
+                            const totalMatches = [...text.matchAll(/\b((?:sub\s*)?total(?:\s*(?:savings?|tax|items?|qty|rewards?|discount))?)[:\s]*\$?\s*(\d+\.\d{2})/gi)];
+                            for (const tm of totalMatches.reverse()) {
+                                const label = tm[1].toLowerCase();
+                                if (/sub\s*total|total\s*(savings?|tax|items?|qty|rewards?|discount)/i.test(label)) continue;
+                                const val = parseFloat(tm[2]);
+                                if (val > 0) { amount = val; console.log('OCR amount: total match in text:', amount, 'label:', tm[1]); break; }
+                            }
+                        }
+
+                        // Strategy 4: If we found a subtotal but also found savings, subtract
+                        if (!amount) {
+                            const subMatch = text.match(/sub\s*total[:\s]*\$?\s*(\d+\.\d{2})/i);
+                            const savingsMatch = text.match(/(?:total\s*)?savings?[:\s]*-?\$?\s*(\d+\.\d{2})/i);
+                            if (subMatch) {
+                                const subVal = parseFloat(subMatch[1]);
+                                if (savingsMatch) {
+                                    const savVal = parseFloat(savingsMatch[1]);
+                                    if (savVal > 0 && savVal < subVal) {
+                                        amount = Math.round((subVal - savVal) * 100) / 100;
+                                        console.log('OCR amount: subtotal - savings:', subVal, '-', savVal, '=', amount);
+                                    }
                                 }
-                            }
-                        }
-                        // Pass 3: Subtotal as fallback
-                        if (!amount) {
-                            for (const line of reversedLines) {
-                                if (/sub\s*total/i.test(line)) {
-                                    const val = amountFromLine(line);
-                                    if (val > 0) { amount = val; break; }
+                                if (!amount) {
+                                    amount = subVal;
+                                    console.log('OCR amount: subtotal fallback:', amount);
                                 }
                             }
                         }
@@ -1946,8 +2053,20 @@
                         const dm = text.match(re);
                         if (dm) {
                             const { mo, d, y } = parse(dm);
-                            const fullYear = y.length <= 2 ? parseInt('20' + y) : parseInt(y);
+                            let fullYear = y.length <= 2 ? parseInt('20' + y) : parseInt(y);
                             if (fullYear >= 2020 && fullYear <= 2030) {
+                                const currentYear = new Date().getFullYear();
+                                const parsedMonth = parseInt(mo);
+                                const parsedDay = parseInt(d);
+                                const currentMonth = new Date().getMonth() + 1;
+                                // If year != current year but month/day are close to today, OCR probably misread the year
+                                if (fullYear !== currentYear) {
+                                    const sameMonthOrClose = Math.abs(parsedMonth - currentMonth) <= 1;
+                                    if (sameMonthOrClose || fullYear < currentYear) {
+                                        console.log(`OCR date year ${fullYear} looks wrong (current: ${currentYear}, month ${parsedMonth} is close to ${currentMonth}), adjusting to ${currentYear}`);
+                                        fullYear = currentYear;
+                                    }
+                                }
                                 date = `${fullYear}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
                                 break;
                             }
@@ -2125,9 +2244,77 @@
             return result;
         };
 
+        // ============ PULL TO REFRESH ============
+        const usePullToRefresh = (onRefresh) => {
+            const containerRef = useRef(null);
+            const [pullDistance, setPullDistance] = useState(0);
+            const [isRefreshing, setIsRefreshing] = useState(false);
+            const touchStartY = useRef(0);
+            const isPulling = useRef(false);
+            const THRESHOLD = 80;
+
+            useEffect(() => {
+                const el = containerRef.current;
+                if (!el) return;
+
+                const onTouchStart = (e) => {
+                    if (el.scrollTop <= 0 && !isRefreshing) {
+                        touchStartY.current = e.touches[0].clientY;
+                        isPulling.current = true;
+                    }
+                };
+                const onTouchMove = (e) => {
+                    if (!isPulling.current || isRefreshing) return;
+                    const dy = e.touches[0].clientY - touchStartY.current;
+                    if (dy > 0 && el.scrollTop <= 0) {
+                        // Dampen the pull distance
+                        setPullDistance(Math.min(dy * 0.4, THRESHOLD * 1.5));
+                        if (dy > 10) e.preventDefault(); // prevent scroll bounce
+                    } else {
+                        isPulling.current = false;
+                        setPullDistance(0);
+                    }
+                };
+                const onTouchEnd = async () => {
+                    if (!isPulling.current) return;
+                    isPulling.current = false;
+                    if (pullDistance >= THRESHOLD && !isRefreshing) {
+                        setIsRefreshing(true);
+                        setPullDistance(THRESHOLD * 0.6); // hold at partial height during refresh
+                        try { await onRefresh(); } catch (e) { console.error('Pull refresh failed:', e); }
+                        setIsRefreshing(false);
+                    }
+                    setPullDistance(0);
+                };
+
+                el.addEventListener('touchstart', onTouchStart, { passive: true });
+                el.addEventListener('touchmove', onTouchMove, { passive: false });
+                el.addEventListener('touchend', onTouchEnd, { passive: true });
+                return () => {
+                    el.removeEventListener('touchstart', onTouchStart);
+                    el.removeEventListener('touchmove', onTouchMove);
+                    el.removeEventListener('touchend', onTouchEnd);
+                };
+            }, [onRefresh, isRefreshing, pullDistance]);
+
+            const PullIndicator = () => (pullDistance > 0 || isRefreshing) ? (
+                React.createElement('div', {
+                    className: 'flex items-center justify-center transition-all overflow-hidden',
+                    style: { height: pullDistance > 0 ? pullDistance : isRefreshing ? 48 : 0 }
+                },
+                    React.createElement('div', {
+                        className: `text-blue-500 ${isRefreshing ? 'animate-spin' : ''}`,
+                        style: { opacity: Math.min(pullDistance / THRESHOLD, 1), transform: `rotate(${pullDistance * 3}deg)` }
+                    }, React.createElement(RefreshCwIcon, { size: 22 }))
+                )
+            ) : null;
+
+            return { containerRef, PullIndicator };
+        };
+
         // ============ MAIN COMPONENTS ============
 
-        const ExpenseRow = ({ expense, onDelete, onUpdate, onReconcile, showReconcile, onEdit, onSplit, hideAccount = false, showDateSeparator = false, isSplitChild = false }) => {
+        const ExpenseRow = ({ expense, onDelete, onUpdate, onReconcile, showReconcile, onEdit, onSplit, hideAccount = false, showDateSeparator = false, isSplitChild = false, isDeleting = false }) => {
             const category = getCategoryById(expense.category);
             const account = getAccountById(expense.account);
             const isPaymentOrTransfer = expense.category === 'card_payment' || expense.category === 'transfer';
@@ -2161,7 +2348,6 @@
                             )}
                         </div>
                         <div className="text-[11px] text-gray-400 flex items-center gap-1.5 mt-0.5">
-                            <span>{expense.date || expense.timestamp}</span>
                             {!hideAccount && account && <span className="font-medium" style={{ color: account.color }}>{account.shortName}</span>}
                         </div>
                     </div>
@@ -2172,11 +2358,6 @@
                     </div>
                     {(() => {
                         if (!showReconcile) return null;
-                        const dateISO = parseDateToISO(expense.date);
-                        const isPre2026 = dateISO < '2026-01-01';
-                        if (isPre2026) {
-                            return <div className="ml-1 flex-shrink-0"><CircleIcon size={18} className="text-gray-200" /></div>;
-                        }
                         // Locked = cemented reconciliation, can't be toggled
                         if (expense.reconciledLocked) {
                             return (
@@ -2218,10 +2399,15 @@
                         </button>
                     )}
                     <button
-                        onClick={(e) => { e.stopPropagation(); onDelete(expense.rowIndex); }}
+                        onClick={(e) => { e.stopPropagation(); if (!isDeleting) onDelete(expense.rowIndex); }}
                         className="ml-1 flex-shrink-0"
+                        disabled={isDeleting}
                     >
-                        <Trash2Icon size={16} className="text-red-400 hover:text-red-600" />
+                        {isDeleting ? (
+                            <div className="w-4 h-4 border-2 border-red-200 border-t-red-500 rounded-full animate-spin" />
+                        ) : (
+                            <Trash2Icon size={16} className="text-red-400 hover:text-red-600" />
+                        )}
                     </button>
                 </div>
                 </>
@@ -2234,7 +2420,7 @@
         };
 
         // Renders a single expense or a split group (header + indented children)
-        const ExpenseOrSplitGroup = ({ item, onDelete, onUpdate, onReconcile, showReconcile, onEdit, onSplit, hideAccount, showDateSeparator }) => {
+        const ExpenseOrSplitGroup = ({ item, onDelete, onUpdate, onReconcile, showReconcile, onEdit, onSplit, hideAccount, showDateSeparator, deletingRowIndex }) => {
             if (item._isSplitHeader) {
                 const category = getCategoryById(item.category);
                 const account = getAccountById(item.account);
@@ -2257,7 +2443,6 @@
                                     </span>
                                 </div>
                                 <div className="text-[11px] text-gray-400 flex items-center gap-1.5 mt-0.5">
-                                    <span>{item.date || item.timestamp}</span>
                                     {!hideAccount && account && <span className="font-medium" style={{ color: account.color }}>{account.shortName}</span>}
                                 </div>
                             </div>
@@ -2278,6 +2463,7 @@
                                 showReconcile={showReconcile}
                                 hideAccount={hideAccount}
                                 isSplitChild={true}
+                                isDeleting={deletingRowIndex === child.rowIndex}
                             />
                         ))}
                     </>
@@ -2294,6 +2480,7 @@
                     showReconcile={showReconcile}
                     hideAccount={hideAccount}
                     showDateSeparator={showDateSeparator}
+                    isDeleting={deletingRowIndex === item.rowIndex}
                 />
             );
         };
@@ -2321,6 +2508,11 @@
 
             // Pre-fill when editing
             useEffect(() => {
+                if (isOpen) {
+                    // New modal session — increment counter so stale async uploads are ignored
+                    modalSessionId.current += 1;
+                    uploadedReceiptUrl.current = null;
+                }
                 if (editExpense && isOpen) {
                     setMerchant(editExpense.merchant || '');
                     setAmount(editExpense.amount?.toString() || '');
@@ -2367,6 +2559,7 @@
             const [showOCRSpinner, setShowOCRSpinner] = useState(false);
             const [showSuggestions, setShowSuggestions] = useState(false);
             const uploadedReceiptUrl = useRef(null); // track file uploaded this session for cancel/rename
+            const modalSessionId = useRef(0); // incremented each time modal opens to ignore stale async results
 
             // Compute frequent merchants (5+ entries)
             const frequentMerchants = useMemo(() => {
@@ -2386,6 +2579,7 @@
             const { uploadReceipt, deleteFile, renameFile } = useGoogleDrive(token);
 
             const handleScan = async (file) => {
+                const sessionAtStart = modalSessionId.current;
                 setShowOCRSpinner(true);
                 // Pre-crop the image for Drive upload (keeps color)
                 let uploadFile = file;
@@ -2403,6 +2597,11 @@
                     scanReceipt(file).catch(err => { console.error('OCR error:', err); return null; }),
                     uploadReceipt(uploadFile, merchant || 'receipt', userName).catch(err => { console.error('Upload error:', err); return null; })
                 ]);
+                // Ignore results if modal session changed (user closed/reopened for different expense)
+                if (modalSessionId.current !== sessionAtStart) {
+                    console.log('Ignoring stale scan result from previous modal session');
+                    return;
+                }
                 setShowOCRSpinner(false);
                 if (result) {
                     const isAmazonOrder = /^Amazon - \d{3}-\d{7}-\d{7}$/.test(result.merchant);
@@ -2428,6 +2627,7 @@
             };
 
             const handleReceiptUpload = async (file) => {
+                const sessionAtStart = modalSessionId.current;
                 try {
                     // Pre-crop the image for Drive upload (keeps color)
                     let uploadFile = file;
@@ -2452,6 +2652,11 @@
                         tasks.push(Promise.resolve(null));
                     }
                     const [ocrResult, url] = await Promise.all(tasks);
+                    // Ignore results if modal session changed (user closed/reopened for different expense)
+                    if (modalSessionId.current !== sessionAtStart) {
+                        console.log('Ignoring stale upload result from previous modal session');
+                        return;
+                    }
                     setShowOCRSpinner(false);
 
                     // Autofill empty fields from OCR, with fuzzy merchant matching
@@ -2499,7 +2704,8 @@
 
             // Import from Google Drive using Picker API
             const handleDrivePick = useCallback(async () => {
-                if (!token) { reconnect(); return; }
+                if (!token) { reconnect().catch(err => console.error('Reconnect failed:', err)); return; }
+                const sessionAtStart = modalSessionId.current;
                 // Dynamically load gapi script if not present
                 if (!window.gapi) {
                     await new Promise((resolve, reject) => {
@@ -2538,6 +2744,13 @@
                                     scanReceipt(file).catch(() => null),
                                     uploadReceipt(file, ocrMerchant, userName).catch(() => null)
                                 ]);
+
+                                // Ignore results if modal session changed
+                                if (modalSessionId.current !== sessionAtStart) {
+                                    console.log('Ignoring stale picker result from previous modal session');
+                                    setShowOCRSpinner(false);
+                                    return;
+                                }
 
                                 // Set receipt URL from the re-uploaded copy
                                 if (url) {
@@ -2604,7 +2817,7 @@
                     if (account && secondaryAccount && account === secondaryAccount) errors.secondaryAccount = true;
                 } else {
                     if (!merchant) errors.merchant = true;
-                    if (!category || category === 'other') errors.category = true;
+                    if (!category) errors.category = true;
                 }
                 if (Object.keys(errors).length) {
                     setValidationErrors(errors);
@@ -2692,12 +2905,15 @@
                     person: userName,
                     date,
                 };
-                if (isEdit && editExpense) {
+                if (isEdit && editExpense && editExpense.rowIndex) {
+                    console.log('Edit mode: updating row', editExpense.rowIndex, 'with', data);
+                    onClose();
                     onUpdate(editExpense.rowIndex, { ...editExpense, ...data });
                 } else {
+                    if (isEdit) console.warn('Edit mode but no rowIndex — falling back to add. editExpense:', editExpense);
+                    onClose();
                     onAdd(data);
                 }
-                onClose();
             };
 
             // Check if form has unsaved user input
@@ -3346,26 +3562,30 @@
             );
         };
 
-        const AccountTabView = ({ accountId, expenses, onUpdate, onReconcile, onDelete, onEdit, onSplit, onLockItems, onClearUnlocked }) => {
+        const AccountTabView = ({ accountId, expenses, onUpdate, onReconcile, onDelete, onEdit, onSplit, onLockItems, onClearUnlocked, deletingRowIndex }) => {
             const account = getAccountById(accountId);
             const accountExpenses = expenses.filter(e => e.account === accountId);
             const displayExpenses = accountExpenses.filter(e => !e._balanceOnly); // exclude balance-only rows from UI
             const [searchTerm, setSearchTerm] = useState('');
 
-            // Only count 2026+ expenses for reconciliation progress
-            const isRecent = (e) => {
+            // Only count 2026+ expenses for reconciliation progress tally
+            const recentExpenses = displayExpenses.filter(e => {
                 const d = parseDateToISO(e.date);
                 return d >= '2026-01-01';
-            };
-            const recentExpenses = displayExpenses.filter(isRecent);
+            });
             const lockedExpenses = recentExpenses.filter(e => e.reconciledLocked);
             const unlockedReconciled = recentExpenses.filter(e => e.reconciled && !e.reconciledLocked);
             const unlockedUnreconciled = recentExpenses.filter(e => !e.reconciled && !e.reconciledLocked);
             const totalReconciled = lockedExpenses.length + unlockedReconciled.length;
 
-            const filteredExpenses = displayExpenses.filter(e =>
-                e.merchant.toLowerCase().includes(searchTerm.toLowerCase())
-            );
+            const filteredExpenses = displayExpenses.filter(e => {
+                if (!searchTerm) return true;
+                const q = searchTerm.toLowerCase();
+                return e.merchant.toLowerCase().includes(q) ||
+                    String(e.amount).includes(q) ||
+                    (e.category && e.category.toLowerCase().includes(q)) ||
+                    (e.date && e.date.includes(q));
+            });
             const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
             // Reset visible count when search or account changes
             const prevAcctSearch = React.useRef(searchTerm + accountId);
@@ -3469,6 +3689,7 @@
                                         showReconcile={true}
                                         hideAccount={true}
                                         showDateSeparator={idx === 0 || getDateKey(item) !== getDateKey(arr[idx - 1])}
+                                        deletingRowIndex={deletingRowIndex}
                                     />
                                 ))}
                                 {hasMore && (
@@ -4700,15 +4921,19 @@
 
         const PAGE_SIZE = 50;
 
-        const AllTab = ({ expenses, onDelete, onUpdate, onEdit, onSplit }) => {
+        const AllTab = ({ expenses, onDelete, onUpdate, onEdit, onSplit, deletingRowIndex }) => {
             const [searchTerm, setSearchTerm] = useState('');
             const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
 
-            const filtered = expenses.filter(e =>
-                !e._balanceOnly &&
-                (e.merchant.toLowerCase().includes(searchTerm.toLowerCase()) ||
-                e.category.includes(searchTerm.toLowerCase()))
-            );
+            const filtered = expenses.filter(e => {
+                if (e._balanceOnly) return false;
+                if (!searchTerm) return true;
+                const q = searchTerm.toLowerCase();
+                return e.merchant.toLowerCase().includes(q) ||
+                    (e.category && e.category.toLowerCase().includes(q)) ||
+                    String(e.amount).includes(q) ||
+                    (e.date && e.date.includes(q));
+            });
 
             // Reset visible count when search changes
             const prevSearch = React.useRef(searchTerm);
@@ -4752,6 +4977,7 @@
                                         onSplit={onSplit}
                                         showReconcile={false}
                                         showDateSeparator={idx === 0 || getDateKey(item) !== getDateKey(arr[idx - 1])}
+                                        deletingRowIndex={deletingRowIndex}
                                     />
                                 ))}
                                 {hasMore && (
@@ -4834,6 +5060,7 @@
                             >
                                 <LogOutIcon size={18} /> Sign Out
                             </button>
+                            <div className="px-4 py-2 text-[10px] text-gray-400 text-center border-t border-gray-100">{APP_VERSION}</div>
                         </div>
                     )}
                 </div>
@@ -5063,26 +5290,40 @@
                 }
             };
 
+            const [mtaSaving, setMtaSaving] = useState(false);
+            const handlePullRefresh = useCallback(async () => {
+                if (token) await fetchExpenses(true);
+            }, [token, fetchExpenses]);
+            const { containerRef: scrollContainerRef, PullIndicator } = usePullToRefresh(handlePullRefresh);
             const handleQuickMetrocard = async () => {
-                // Get current date in ET timezone
-                const etDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-                pushUndo(expenses);
-                await appendExpense({
-                    merchant: 'Metrocard',
-                    amount: 3.00,
-                    category: 'transit',
-                    account: 'reserve_chase',
-                    notes: '',
-                    receipt: '',
-                    txnType: 'charge',
-                    isCredit: false,
-                    originalCurrency: 'USD',
-                    originalAmount: 3.00,
-                    person: user?.name || 'Taly',
-                    date: etDate,
-                });
-                setToast('🚇 Metrocard added');
-                setTimeout(() => setToast(''), 5000);
+                if (mtaSaving) return; // prevent double-tap
+                setMtaSaving(true);
+                try {
+                    // Get current date in ET timezone
+                    const etDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+                    pushUndo(expenses);
+                    await appendExpense({
+                        merchant: 'Metrocard',
+                        amount: 3.00,
+                        category: 'transit',
+                        account: 'reserve_chase',
+                        notes: '',
+                        receipt: '',
+                        txnType: 'charge',
+                        isCredit: false,
+                        originalCurrency: 'USD',
+                        originalAmount: 3.00,
+                        person: user?.name || 'Taly',
+                        date: etDate,
+                    });
+                    setToast('🚇 Metrocard added');
+                    setTimeout(() => setToast(''), 5000);
+                } catch (err) {
+                    setToast(err.message || 'MTA add failed');
+                    setTimeout(() => setToast(''), 5000);
+                } finally {
+                    setMtaSaving(false);
+                }
             };
 
             useEffect(() => {
@@ -5102,16 +5343,30 @@
                 return () => document.removeEventListener('visibilitychange', handleVisibility);
             }, [token, fetchExpenses]);
 
+            const handleReconnect = useCallback(() => {
+                reconnect().catch(err => {
+                    console.error('Reconnect failed:', err);
+                    setToast('Reconnect failed — try signing out and back in.');
+                    setTimeout(() => setToast(''), 8000);
+                });
+            }, [reconnect]);
+
             const handleAddExpense = async (expenseData) => {
                 // If token expired, auto-trigger reconnect and queue the save for retry
                 if (!token || needsReconnect) {
                     pendingSaveRef.current = expenseData;
                     setIsSaving(true);
                     setToast('Reconnecting to Google...');
-                    reconnect();
+                    reconnect().catch(err => {
+                        console.error('Reconnect failed during save:', err);
+                        setToast('Reconnect failed — tap Reconnect and try again.');
+                        setTimeout(() => setToast(''), 8000);
+                        setIsSaving(false);
+                    });
                     return;
                 }
                 setIsSaving(true);
+                const spinnerStart = Date.now();
                 try {
                     pushUndo(expenses);
                     if (expenseData._dual) {
@@ -5120,6 +5375,9 @@
                             const isLast = i === entries.length - 1;
                             await appendExpense(entries[i], { skipRefresh: !isLast });
                         }
+                        const elapsed = Date.now() - spinnerStart;
+                        if (elapsed < 600) await new Promise(r => setTimeout(r, 600 - elapsed));
+                        setIsSaving(false);
                         setConfirmationData({
                             isDual: true,
                             entries: entries,
@@ -5127,8 +5385,12 @@
                         });
                     } else {
                         await appendExpense(expenseData);
+                        const elapsed = Date.now() - spinnerStart;
+                        if (elapsed < 600) await new Promise(r => setTimeout(r, 600 - elapsed));
+                        setIsSaving(false);
                         setConfirmationData({
                             isDual: false,
+                            isNew: true,
                             merchant: expenseData.merchant,
                             amount: expenseData.amount,
                             category: expenseData.category,
@@ -5143,9 +5405,9 @@
                     setTimeout(() => setConfirmationData(null), 10000);
                 } catch (err) {
                     console.error('Save failed:', err);
-                    alert(err.message || 'Failed to save expense. Please try again.');
-                } finally {
                     setIsSaving(false);
+                    setToast(err.message || 'Failed to save expense. Please try again.');
+                    setTimeout(() => setToast(''), 8000);
                 }
             };
 
@@ -5160,29 +5422,86 @@
             }, [token]);
 
             const handleUpdateExpense = async (rowIndex, updated) => {
+                setIsSaving(true);
+                const spinnerStart = Date.now();
                 try {
                     pushUndo(expenses);
                     await updateExpense(rowIndex, updated);
-                    setToast('Saved');
-                    setTimeout(() => setToast(''), 2000);
+                    // Ensure spinner shows for at least 600ms so user sees it
+                    const elapsed = Date.now() - spinnerStart;
+                    if (elapsed < 600) await new Promise(r => setTimeout(r, 600 - elapsed));
+                    setIsSaving(false);
+                    setConfirmationData({
+                        isDual: false,
+                        isNew: false,
+                        merchant: updated.merchant,
+                        amount: updated.amount,
+                        category: updated.category,
+                        account: updated.account,
+                        txnType: updated.txnType,
+                        date: updated.date,
+                        receipt: updated.receipt || null,
+                        person: updated.person,
+                        timestamp: new Date().toLocaleString(),
+                    });
+                    setTimeout(() => setConfirmationData(null), 10000);
                 } catch (err) {
                     console.error('Update failed:', err);
+                    setIsSaving(false);
                     setToast(err.message || 'Save failed');
                     setTimeout(() => setToast(''), 5000);
                 }
             };
 
+            const [deletingRowIndex, setDeletingRowIndex] = useState(null);
             const handleDeleteExpense = async (rowIndex) => {
-                pushUndo(expenses);
-                // Optimistically remove from state immediately (don't wait for sheet roundtrip)
-                setExpenses(prev => prev.filter(e => e.rowIndex !== rowIndex));
-                setToast('Expense deleted — tap Undo to restore');
-                setTimeout(() => setToast(''), 5000);
+                setDeletingRowIndex(rowIndex);
                 try {
+                    pushUndo(expenses);
+                    // Check if this is a split child — if so, we may need to unsplit the remaining sibling
+                    const deletedExpense = expenses.find(e => e.rowIndex === rowIndex);
+                    const splitGroup = deletedExpense?._splitGroup;
+                    const siblings = splitGroup ? expenses.filter(e => e._splitGroup === splitGroup && e.rowIndex !== rowIndex) : [];
+
                     await deleteExpense(rowIndex);
+
+                    // Handle split group cleanup after deleting a split child
+                    if (siblings.length === 1) {
+                        // Only one sibling left — unsplit it (remove [N/M] tag)
+                        const remaining = siblings[0];
+                        const baseMerchant = remaining.merchant; // already stripped of [N/M] by parser
+                        try {
+                            await updateExpense(remaining.rowIndex, { ...remaining, merchantRaw: baseMerchant });
+                            setToast('Split deleted — remaining entry unsplit');
+                        } catch (err) {
+                            console.warn('Failed to unsplit remaining entry:', err);
+                            setToast('Expense deleted — tap Undo to restore');
+                        }
+                    } else if (siblings.length > 1) {
+                        // Multiple siblings remain — renumber them [1/N], [2/N], etc.
+                        const sorted = [...siblings].sort((a, b) => (a._splitIndex || 0) - (b._splitIndex || 0));
+                        const newTotal = sorted.length;
+                        try {
+                            for (let i = 0; i < sorted.length; i++) {
+                                const sib = sorted[i];
+                                const newMerchantRaw = `${sib.merchant} [${i + 1}/${newTotal}]`;
+                                await updateExpense(sib.rowIndex, { ...sib, merchantRaw: newMerchantRaw });
+                            }
+                            setToast(`Deleted — ${newTotal} splits remaining`);
+                        } catch (err) {
+                            console.warn('Failed to renumber split siblings:', err);
+                            setToast('Expense deleted — tap Undo to restore');
+                        }
+                    } else {
+                        setToast('Expense deleted — tap Undo to restore');
+                    }
+                    setTimeout(() => setToast(''), 5000);
                 } catch (err) {
                     console.error('Delete failed:', err);
-                    // If sheet delete fails, the next fetch will restore it
+                    setToast(err.message || 'Delete failed');
+                    setTimeout(() => setToast(''), 5000);
+                } finally {
+                    setDeletingRowIndex(null);
                 }
             };
 
@@ -5274,18 +5593,18 @@
 
             return (
                 <div className="flex flex-col h-screen bg-gray-50">
-                    {/* Google token expired — inline reconnect banner (not full-screen) */}
-                    {user && (!token || needsReconnect) && (
+                    {/* Google token expired — small top banner (supplementary to the full disconnected overlay) */}
+                    {user && (!token || needsReconnect) && loading && (
                         <div className="bg-amber-500 text-white text-center py-2 px-4 text-xs font-medium z-40 relative flex items-center justify-center gap-2">
                             <span>🔄 Google connection expired</span>
-                            <button onClick={reconnect} className="ml-1 bg-white text-amber-600 px-3 py-0.5 rounded-full text-xs font-bold hover:bg-amber-50 transition-colors">Reconnect</button>
+                            <button onClick={handleReconnect} className="ml-1 bg-white text-amber-600 px-3 py-0.5 rounded-full text-xs font-bold hover:bg-amber-50 transition-colors">Reconnect</button>
                         </div>
                     )}
                     {/* API Error Banner */}
                     {apiError && (
                         <div className="bg-red-500 text-white text-center py-2 px-4 text-xs font-medium z-40 relative">
                             ⚠️ {apiError}
-                            <button onClick={reconnect} className="ml-2 underline font-bold">Reconnect</button>
+                            <button onClick={handleReconnect} className="ml-2 underline font-bold">Reconnect</button>
                         </div>
                     )}
                     {/* Test Mode Banner */}
@@ -5312,10 +5631,11 @@
                             )}
                             <button
                                 onClick={handleQuickMetrocard}
-                                className="px-2.5 py-2 bg-cyan-50 text-cyan-700 rounded-lg hover:bg-cyan-100 text-xs font-semibold flex items-center gap-1"
+                                disabled={mtaSaving}
+                                className={`px-2.5 py-2 rounded-lg text-xs font-semibold flex items-center gap-1 transition-all ${mtaSaving ? 'bg-cyan-200 text-cyan-500' : 'bg-cyan-50 text-cyan-700 hover:bg-cyan-100'}`}
                                 title="Quick add Metrocard $3"
                             >
-                                🚇 MTA
+                                {mtaSaving ? (<><RefreshCwIcon size={14} className="animate-spin" /> MTA</>) : '🚇 MTA'}
                             </button>
                             <button
                                 onClick={() => { setEditExpense(null); setShowAddModal(true); }}
@@ -5334,8 +5654,24 @@
                     </div>
 
                     {/* Content */}
-                    <div className="flex-1 overflow-y-auto">
-                        {loading ? (
+                    <div className="flex-1 overflow-y-auto" ref={scrollContainerRef}>
+                        <PullIndicator />
+                        {/* Disconnected overlay — shown when token expired AND we have no data (or stale data) */}
+                        {user && (!token || needsReconnect) && !loading ? (
+                            <div className="flex items-center justify-center h-full">
+                                <div className="text-center px-8 py-12">
+                                    <div className="text-5xl mb-4">🔌</div>
+                                    <h2 className="text-xl font-bold text-gray-800 mb-2">Disconnected from Google</h2>
+                                    <p className="text-sm text-gray-500 mb-6 max-w-xs mx-auto">Your session expired. Tap reconnect to refresh your data — nothing has been lost.</p>
+                                    <button
+                                        onClick={handleReconnect}
+                                        className="px-6 py-3 bg-blue-600 text-white rounded-xl font-bold text-sm hover:bg-blue-700 transition-colors shadow-lg"
+                                    >
+                                        🔄 Reconnect to Google
+                                    </button>
+                                </div>
+                            </div>
+                        ) : loading ? (
                             <div className="flex items-center justify-center h-full">
                                 <div className="text-center">
                                     <div className="inline-block animate-spin mb-4">
@@ -5391,6 +5727,7 @@
                                         onUpdate={handleUpdateExpense}
                                         onEdit={handleEditExpense}
                                         onSplit={(e) => setSplitExpense(e)}
+                                        deletingRowIndex={deletingRowIndex}
                                     />
                                 )}
 
@@ -5417,6 +5754,7 @@
                                             onSplit={(e) => setSplitExpense(e)}
                                             onLockItems={handleLockItems}
                                             onClearUnlocked={handleClearUnlocked}
+                                            deletingRowIndex={deletingRowIndex}
                                         />
                                     </div>
                                 )}
@@ -5444,6 +5782,7 @@
                                             onSplit={(e) => setSplitExpense(e)}
                                             onLockItems={handleLockItems}
                                             onClearUnlocked={handleClearUnlocked}
+                                            deletingRowIndex={deletingRowIndex}
                                         />
                                     </div>
                                 )}
@@ -5548,7 +5887,7 @@
                                 <div className="flex items-center justify-between mb-3">
                                     <div className="flex items-center gap-2">
                                         <span className="text-green-500 text-lg">✓</span>
-                                        <span className="font-bold text-sm text-gray-800">Expense Added</span>
+                                        <span className="font-bold text-sm text-gray-800">{d.isNew ? 'Expense Added' : 'Expense Updated'}</span>
                                     </div>
                                     <button onClick={() => setConfirmationData(null)} className="text-gray-400 hover:text-gray-600 text-xs">✕</button>
                                 </div>
