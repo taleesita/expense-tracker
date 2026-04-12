@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v2.9-apr11';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v3.3-apr11';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
         const TEST_PARENT_FOLDER_ID = '1LJ57lHUhuLigB1NKuko39saGCRVqs8Ya';
@@ -1340,7 +1340,7 @@
                     ];
                     console.log('Writing row to sheet:', { merchant: expense.merchant, account: expense.account, txnType: expense.txnType, charge: chargeAmt, deposit: depositAmt, receipt: expense.receipt || '(none)' });
                     const resp = await fetch(
-                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A:I:append?valueInputOption=USER_ENTERED`,
+                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A1:I1:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
                         {
                             method: 'POST',
                             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
@@ -2358,11 +2358,6 @@
                     </div>
                     {(() => {
                         if (!showReconcile) return null;
-                        const dateISO = parseDateToISO(expense.date);
-                        const isPre2026 = dateISO < '2026-01-01';
-                        if (isPre2026) {
-                            return <div className="ml-1 flex-shrink-0"><CircleIcon size={18} className="text-gray-200" /></div>;
-                        }
                         // Locked = cemented reconciliation, can't be toggled
                         if (expense.reconciledLocked) {
                             return (
@@ -2910,9 +2905,11 @@
                     person: userName,
                     date,
                 };
-                if (isEdit && editExpense) {
+                if (isEdit && editExpense && editExpense.rowIndex) {
+                    console.log('Edit mode: updating row', editExpense.rowIndex, 'with', data);
                     onUpdate(editExpense.rowIndex, { ...editExpense, ...data });
                 } else {
+                    if (isEdit) console.warn('Edit mode but no rowIndex — falling back to add. editExpense:', editExpense);
                     onAdd(data);
                 }
                 onClose();
@@ -3570,12 +3567,11 @@
             const displayExpenses = accountExpenses.filter(e => !e._balanceOnly); // exclude balance-only rows from UI
             const [searchTerm, setSearchTerm] = useState('');
 
-            // Only count 2026+ expenses for reconciliation progress
-            const isRecent = (e) => {
+            // Only count 2026+ expenses for reconciliation progress tally
+            const recentExpenses = displayExpenses.filter(e => {
                 const d = parseDateToISO(e.date);
                 return d >= '2026-01-01';
-            };
-            const recentExpenses = displayExpenses.filter(isRecent);
+            });
             const lockedExpenses = recentExpenses.filter(e => e.reconciledLocked);
             const unlockedReconciled = recentExpenses.filter(e => e.reconciled && !e.reconciledLocked);
             const unlockedUnreconciled = recentExpenses.filter(e => !e.reconciled && !e.reconciledLocked);
@@ -5385,6 +5381,7 @@
                         await appendExpense(expenseData);
                         setConfirmationData({
                             isDual: false,
+                            isNew: true,
                             merchant: expenseData.merchant,
                             amount: expenseData.amount,
                             category: expenseData.category,
@@ -5864,7 +5861,7 @@
                                 <div className="flex items-center justify-between mb-3">
                                     <div className="flex items-center gap-2">
                                         <span className="text-green-500 text-lg">✓</span>
-                                        <span className="font-bold text-sm text-gray-800">Expense Added</span>
+                                        <span className="font-bold text-sm text-gray-800">{d.isNew ? 'Expense Added' : 'Expense Updated'}</span>
                                     </div>
                                     <button onClick={() => setConfirmationData(null)} className="text-gray-400 hover:text-gray-600 text-xs">✕</button>
                                 </div>
