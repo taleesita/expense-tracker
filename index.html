@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v2.8-apr11';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v2.9-apr11';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
         const TEST_PARENT_FOLDER_ID = '1LJ57lHUhuLigB1NKuko39saGCRVqs8Ya';
@@ -2348,7 +2348,6 @@
                             )}
                         </div>
                         <div className="text-[11px] text-gray-400 flex items-center gap-1.5 mt-0.5">
-                            <span>{expense.date || expense.timestamp}</span>
                             {!hideAccount && account && <span className="font-medium" style={{ color: account.color }}>{account.shortName}</span>}
                         </div>
                     </div>
@@ -2449,7 +2448,6 @@
                                     </span>
                                 </div>
                                 <div className="text-[11px] text-gray-400 flex items-center gap-1.5 mt-0.5">
-                                    <span>{item.date || item.timestamp}</span>
                                     {!hideAccount && account && <span className="font-medium" style={{ color: account.color }}>{account.shortName}</span>}
                                 </div>
                             </div>
