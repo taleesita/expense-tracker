@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v3.7-apr11';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v3.8-apr12';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
         const TEST_PARENT_FOLDER_ID = '1LJ57lHUhuLigB1NKuko39saGCRVqs8Ya';
@@ -1339,64 +1339,71 @@
                         expense.receipt || '',                             // I: Receipt
                     ];
                     console.log('Writing row to sheet:', { merchant: expense.merchant, account: expense.account, txnType: expense.txnType, charge: chargeAmt, deposit: depositAmt, receipt: expense.receipt || '(none)' });
+
+                    // Step 1: Find next empty row by reading column A to find last row with data
+                    const colResp = await fetch(
+                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A:A?majorDimension=COLUMNS`,
+                        { headers: { 'Authorization': `Bearer ${token}` } }
+                    );
+                    if (!colResp.ok) {
+                        const errBody = await colResp.text();
+                        throw new Error(colResp.status === 401 ? 'Google connection expired — tap Reconnect, then try again.' : `Save failed (${colResp.status}). Please try again.`);
+                    }
+                    const colData = await colResp.json();
+                    const colValues = (colData.values && colData.values[0]) || [];
+                    const newRowNum = colValues.length + 1; // next row after last data
+                    console.log('Next empty row:', newRowNum);
+
+                    // Step 2: Write directly to that specific row (A{n}:I{n}) — avoids table auto-detection
                     const resp = await fetch(
-                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A1:I1:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A${newRowNum}:I${newRowNum}?valueInputOption=USER_ENTERED`,
                         {
-                            method: 'POST',
+                            method: 'PUT',
                             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
                             body: JSON.stringify({ values: [row] })
                         }
                     );
                     if (!resp.ok) {
                         const errBody = await resp.text();
-                        console.error('Sheet append failed:', resp.status, errBody);
+                        console.error('Sheet write failed:', resp.status, errBody);
                         throw new Error(resp.status === 401 ? 'Google connection expired — tap Reconnect, then try again.' : `Save failed (${resp.status}). Please try again.`);
                     }
-                    const result = await resp.json();
-                    console.log('Sheet append result:', result);
+                    console.log('Sheet write result: row', newRowNum);
 
-                    // Copy data validation (dropdowns) and formatting from row 2 to the new row
+                    // Step 3: Copy data validation (dropdowns) and formatting from row 2
                     try {
-                        const updatedRange = result?.updates?.updatedRange || '';
-                        const rowMatch = updatedRange.match(/!A(\d+):/);
-                        if (rowMatch) {
-                            const newRowNum = parseInt(rowMatch[1]);
-                            // Get the sheetId for the 💸 tab
-                            const metaResp = await fetch(
-                                `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}?fields=sheets(properties)`,
-                                { headers: { 'Authorization': `Bearer ${token}` } }
-                            );
-                            const metaData = await metaResp.json();
-                            const tabSheet = (metaData.sheets || []).find(s => s.properties?.title === SHEET_TAB);
-                            const sheetId = tabSheet?.properties?.sheetId ?? 0;
+                        const metaResp = await fetch(
+                            `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}?fields=sheets(properties)`,
+                            { headers: { 'Authorization': `Bearer ${token}` } }
+                        );
+                        const metaData = await metaResp.json();
+                        const tabSheet = (metaData.sheets || []).find(s => s.properties?.title === SHEET_TAB);
+                        const sheetId = tabSheet?.properties?.sheetId ?? 0;
 
-                            // CopyPaste just data validation from row 2 to new row (cols A-I = 0-8)
-                            await fetch(
-                                `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}:batchUpdate`,
-                                {
-                                    method: 'POST',
-                                    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ requests: [
-                                        {
-                                            copyPaste: {
-                                                source: { sheetId, startRowIndex: 1, endRowIndex: 2, startColumnIndex: 0, endColumnIndex: 9 },
-                                                destination: { sheetId, startRowIndex: newRowNum - 1, endRowIndex: newRowNum, startColumnIndex: 0, endColumnIndex: 9 },
-                                                pasteType: 'PASTE_DATA_VALIDATION'
-                                            }
-                                        },
-                                        // Left-align column I (Receipt link) in the new row
-                                        {
-                                            repeatCell: {
-                                                range: { sheetId, startRowIndex: newRowNum - 1, endRowIndex: newRowNum, startColumnIndex: 8, endColumnIndex: 9 },
-                                                cell: { userEnteredFormat: { horizontalAlignment: 'LEFT' } },
-                                                fields: 'userEnteredFormat.horizontalAlignment'
-                                            }
+                        await fetch(
+                            `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}:batchUpdate`,
+                            {
+                                method: 'POST',
+                                headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ requests: [
+                                    {
+                                        copyPaste: {
+                                            source: { sheetId, startRowIndex: 1, endRowIndex: 2, startColumnIndex: 0, endColumnIndex: 9 },
+                                            destination: { sheetId, startRowIndex: newRowNum - 1, endRowIndex: newRowNum, startColumnIndex: 0, endColumnIndex: 9 },
+                                            pasteType: 'PASTE_DATA_VALIDATION'
                                         }
-                                    ]})
-                                }
-                            );
-                            console.log('Applied data validation & alignment to row', newRowNum);
-                        }
+                                    },
+                                    {
+                                        repeatCell: {
+                                            range: { sheetId, startRowIndex: newRowNum - 1, endRowIndex: newRowNum, startColumnIndex: 8, endColumnIndex: 9 },
+                                            cell: { userEnteredFormat: { horizontalAlignment: 'LEFT' } },
+                                            fields: 'userEnteredFormat.horizontalAlignment'
+                                        }
+                                    }
+                                ]})
+                            }
+                        );
+                        console.log('Applied data validation & alignment to row', newRowNum);
                     } catch (fmtErr) {
                         console.warn('Could not apply formatting to new row:', fmtErr);
                     }
