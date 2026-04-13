@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v3.9-apr12';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.0-apr12';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
         const TEST_PARENT_FOLDER_ID = '1LJ57lHUhuLigB1NKuko39saGCRVqs8Ya';
@@ -2898,8 +2898,14 @@
                     return;
                 }
 
+                // Append original foreign amount to merchant name: "SmartEx (28740 yen)"
+                const CURRENCY_NAMES = { JPY: 'yen', EUR: 'euro', GBP: 'pounds', ILS: 'shekels', CAD: 'CAD', AUD: 'AUD', CHF: 'CHF', MXN: 'pesos', BRL: 'reais' };
+                const displayMerchant = originalCurrency !== 'USD' && originalAmount
+                    ? `${merchant.trim()} (${Math.round(parseFloat(originalAmount))} ${CURRENCY_NAMES[originalCurrency] || originalCurrency})`
+                    : merchant.trim();
+
                 const data = {
-                    merchant: merchant.trim(),
+                    merchant: displayMerchant,
                     amount: parseFloat(amount),
                     category,
                     account,
@@ -3242,19 +3248,40 @@
                             {!isDualEntry && (
                                 <>
                                     {originalCurrency !== 'USD' && (
-                                        <input
-                                            type="number"
-                                            placeholder="Original amount"
-                                            step="0.01"
-                                            value={originalAmount}
-                                            onChange={(e) => setOriginalAmount(e.target.value)}
-                                            className="w-full border rounded-lg px-4 py-2.5"
-                                        />
+                                        <div className="flex gap-2 items-center">
+                                            <input
+                                                type="number"
+                                                placeholder={`Amount in ${originalCurrency}`}
+                                                step="0.01"
+                                                value={originalAmount}
+                                                onChange={(e) => {
+                                                    setOriginalAmount(e.target.value);
+                                                    const val = parseFloat(e.target.value);
+                                                    if (!isNaN(val) && CURRENCIES[originalCurrency]) {
+                                                        setAmount((val * CURRENCIES[originalCurrency]).toFixed(2));
+                                                    }
+                                                }}
+                                                className="flex-1 border rounded-lg px-4 py-2.5"
+                                            />
+                                            {amount && originalAmount && (
+                                                <span className="text-xs text-gray-400 whitespace-nowrap">≈ ${parseFloat(amount).toFixed(2)} USD</span>
+                                            )}
+                                        </div>
                                     )}
 
                                     <select
                                         value={originalCurrency}
-                                        onChange={(e) => setOriginalCurrency(e.target.value)}
+                                        onChange={(e) => {
+                                            setOriginalCurrency(e.target.value);
+                                            if (e.target.value === 'USD') {
+                                                setOriginalAmount('');
+                                            } else if (originalAmount) {
+                                                const val = parseFloat(originalAmount);
+                                                if (!isNaN(val) && CURRENCIES[e.target.value]) {
+                                                    setAmount((val * CURRENCIES[e.target.value]).toFixed(2));
+                                                }
+                                            }
+                                        }}
                                         className="w-full border rounded-lg px-4 py-2.5 appearance-none bg-white"
                                         style={{ backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236B7280' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E\")", backgroundRepeat: 'no-repeat', backgroundPosition: 'right 12px center' }}
                                     >
