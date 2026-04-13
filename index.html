@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v3.8-apr12';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v3.9-apr12';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
         const TEST_PARENT_FOLDER_ID = '1LJ57lHUhuLigB1NKuko39saGCRVqs8Ya';
@@ -801,7 +801,13 @@
             if (!merchant) return 'other';
             const lower = merchant.toLowerCase().trim();
 
-            // First: check actual data — what category does this merchant usually get?
+            // First: check hardcoded map for known merchants (prevents learning from mislabeled data)
+            const sortedKeys = Object.entries(MERCHANT_TO_CATEGORY).sort((a, b) => b[0].length - a[0].length);
+            for (const [key, catId] of sortedKeys) {
+                if (lower.includes(key)) return catId;
+            }
+
+            // Second: check actual data — what category does this merchant usually get?
             if (_expensesCache.length > 0) {
                 const catCounts = {};
                 // Split input into key words for flexible matching
@@ -825,12 +831,6 @@
                 if (best && best[1] >= 1) return best[0];
             }
 
-            // Fallback: hardcoded map for new merchants
-            // Check longer/more-specific keys first to avoid "amazon" matching before "whole foods"
-            const sortedKeys = Object.entries(MERCHANT_TO_CATEGORY).sort((a, b) => b[0].length - a[0].length);
-            for (const [key, catId] of sortedKeys) {
-                if (lower.includes(key)) return catId;
-            }
             return 'other';
         };
 
@@ -3020,7 +3020,7 @@
                             />
                             <label htmlFor="scan-receipt-camera" className="flex items-center justify-center gap-2 flex-1 bg-blue-600 text-white py-2.5 rounded-lg font-medium hover:bg-blue-700 cursor-pointer text-sm">
                                 <CameraIcon size={16} className="flex-shrink-0" />
-                                <span>Scan Receipt</span>
+                                <span>Scan</span>
                             </label>
                             <input
                                 type="file"
