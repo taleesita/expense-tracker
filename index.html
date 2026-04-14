@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.0-apr12';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.1-apr13';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
         const TEST_PARENT_FOLDER_ID = '1LJ57lHUhuLigB1NKuko39saGCRVqs8Ya';
@@ -1917,7 +1917,7 @@
                     if (merchant && merchant === merchant.toUpperCase() && merchant.length > 3) {
                         merchant = merchant.replace(/\b\w+/g, w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
                     }
-                    merchant = merchant || 'Unknown';
+                    merchant = merchant || '';
 
                     // Merchant detection: Whole Foods vs Amazon
                     // Whole Foods receipts often contain "Amazon" (Prime branding),
