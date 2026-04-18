@@ -65,8 +65,9 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.2-apr14';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.3-apr17';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
+        const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
         const TEST_PARENT_FOLDER_ID = '1LJ57lHUhuLigB1NKuko39saGCRVqs8Ya';
 
@@ -776,6 +777,17 @@
         const ChevronDownIcon = ({ size = 24, className = '' }) => (
             <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
                 <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+        );
+        const InboxIcon = ({ size = 24, className = '' }) => (
+            <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+                <polyline points="22 12 16 12 14 15 10 15 8 12 2 12"></polyline>
+                <path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"></path>
+            </svg>
+        );
+        const ChevronLeftIcon = ({ size = 24, className = '' }) => (
+            <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+                <polyline points="15 18 9 12 15 6"></polyline>
             </svg>
         );
 
@@ -1567,6 +1579,75 @@
             }, [token]);
 
             return { uploadReceipt, deleteFile, renameFile };
+        };
+
+        // ============ EMAIL INBOX HOOK ============
+        const useInbox = (token) => {
+            const [inboxItems, setInboxItems] = useState([]);
+            const [inboxLoading, setInboxLoading] = useState(false);
+            const ocrCacheRef = useRef({}); // fileId → { merchant, amount, date, category, txnType }
+
+            const fetchInbox = useCallback(async () => {
+                if (!token) return;
+                setInboxLoading(true);
+                try {
+                    const resp = await fetch(
+                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(INBOX_TAB)}!A:H`,
+                        { headers: { 'Authorization': `Bearer ${token}` } }
+                    );
+                    if (!resp.ok) {
+                        // Tab might not exist yet — that's fine
+                        console.log('Inbox tab fetch:', resp.status);
+                        setInboxItems([]);
+                        return;
+                    }
+                    const data = await resp.json();
+                    const rows = data.values || [];
+                    const items = [];
+                    for (let i = 1; i < rows.length; i++) {
+                        const row = rows[i];
+                        if (!row || row.length < 7) continue;
+                        if ((row[6] || '').toLowerCase() !== 'pending') continue; // only show pending
+                        items.push({
+                            rowIndex: i + 1,
+                            processedAt: row[0] || '',
+                            emailDate: row[1] || '',
+                            subject: row[2] || '',
+                            from: row[3] || '',
+                            fileId: row[4] || '',
+                            fileUrl: row[5] || '',
+                            status: row[6] || '',
+                            sourceType: row[7] || '',
+                        });
+                    }
+                    setInboxItems(items);
+                } catch (err) {
+                    console.error('Failed to fetch inbox:', err);
+                    setInboxItems([]);
+                } finally {
+                    setInboxLoading(false);
+                }
+            }, [token]);
+
+            const markInboxItem = useCallback(async (rowIndex, newStatus) => {
+                if (!token) return;
+                try {
+                    await fetch(
+                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(INBOX_TAB)}!G${rowIndex}?valueInputOption=USER_ENTERED`,
+                        {
+                            method: 'PUT',
+                            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ values: [[newStatus]] })
+                        }
+                    );
+                    // Remove from local state
+                    setInboxItems(prev => prev.filter(item => item.rowIndex !== rowIndex));
+                } catch (err) {
+                    console.error('Failed to mark inbox item:', err);
+                }
+            }, [token]);
+
+            return { inboxItems, inboxLoading, fetchInbox, markInboxItem, ocrCacheRef };
         };
 
         // Crop receipt from background (keeps color, for Drive upload / display)
@@ -5107,11 +5188,256 @@
             );
         };
 
+        // ============ INBOX REVIEW SCREEN ============
+        const InboxReviewScreen = ({ items, ocrCacheRef, onConfirm, onSkip, onBack, token, userName, expenses, merchantAccountMap }) => {
+            const [currentIndex, setCurrentIndex] = useState(0);
+            const [ocrResults, setOcrResults] = useState({}); // fileId → parsed result
+            const [ocrRunning, setOcrRunning] = useState(new Set());
+            const { scanReceipt } = useOCR();
+
+            // Form state for current item
+            const currentItem = items[currentIndex];
+            const currentOcr = currentItem ? (ocrResults[currentItem.fileId] || ocrCacheRef.current[currentItem.fileId]) : null;
+            const [merchant, setMerchant] = useState('');
+            const [amount, setAmount] = useState('');
+            const [date, setDate] = useState('');
+            const [category, setCategory] = useState('other');
+            const [account, setAccount] = useState('');
+            const [txnType, setTxnType] = useState('charge');
+
+            // Run OCR on all pending items in background
+            useEffect(() => {
+                if (!items.length || !token) return;
+                const runOcrBatch = async () => {
+                    for (const item of items) {
+                        if (ocrResults[item.fileId] || ocrCacheRef.current[item.fileId] || ocrRunning.has(item.fileId)) continue;
+                        setOcrRunning(prev => new Set([...prev, item.fileId]));
+                        try {
+                            // Fetch the file from Drive as a blob
+                            const resp = await fetch(
+                                `https://www.googleapis.com/drive/v3/files/${item.fileId}?alt=media`,
+                                { headers: { 'Authorization': `Bearer ${token}` } }
+                            );
+                            if (!resp.ok) { console.error('Drive fetch failed for', item.fileId, resp.status); continue; }
+                            const blob = await resp.blob();
+                            const file = new File([blob], item.subject + '.pdf', { type: blob.type || 'application/pdf' });
+                            const result = await scanReceipt(file);
+                            if (result) {
+                                ocrCacheRef.current[item.fileId] = result;
+                                setOcrResults(prev => ({ ...prev, [item.fileId]: result }));
+                            }
+                        } catch (err) {
+                            console.error('Background OCR failed for', item.fileId, err);
+                        } finally {
+                            setOcrRunning(prev => { const n = new Set(prev); n.delete(item.fileId); return n; });
+                        }
+                    }
+                };
+                runOcrBatch();
+            }, [items, token]);
+
+            // Pre-fill form when OCR result arrives or when navigating
+            useEffect(() => {
+                if (!currentItem) return;
+                const ocr = ocrResults[currentItem.fileId] || ocrCacheRef.current[currentItem.fileId];
+                if (ocr) {
+                    setMerchant(ocr.merchant || '');
+                    setAmount(ocr.amount ? String(ocr.amount) : '');
+                    setDate(ocr.date || currentItem.emailDate || new Date().toISOString().split('T')[0]);
+                    setCategory(ocr.category || 'other');
+                    setTxnType(ocr.txnType || 'charge');
+                    // Try to suggest account from merchant
+                    const suggestedAcct = suggestAccountForMerchant(ocr.merchant, merchantAccountMap);
+                    setAccount(suggestedAcct || '');
+                } else {
+                    setMerchant('');
+                    setAmount('');
+                    setDate(currentItem.emailDate || new Date().toISOString().split('T')[0]);
+                    setCategory('other');
+                    setTxnType('charge');
+                    setAccount('');
+                }
+            }, [currentIndex, currentItem?.fileId, ocrResults]);
+
+            if (!items.length) {
+                return (
+                    <div className="flex flex-col items-center justify-center py-20 px-4 text-center">
+                        <div className="text-5xl mb-4">✅</div>
+                        <h2 className="text-lg font-bold text-gray-800 mb-2">All caught up!</h2>
+                        <p className="text-sm text-gray-500 mb-6">No receipts waiting for review.</p>
+                        <button onClick={onBack} className="px-5 py-2.5 bg-blue-600 text-white rounded-xl font-semibold text-sm">
+                            Back to Home
+                        </button>
+                    </div>
+                );
+            }
+
+            if (!currentItem) {
+                // Went past the end — all done
+                return (
+                    <div className="flex flex-col items-center justify-center py-20 px-4 text-center">
+                        <div className="text-5xl mb-4">🎉</div>
+                        <h2 className="text-lg font-bold text-gray-800 mb-2">All done!</h2>
+                        <p className="text-sm text-gray-500 mb-6">You've reviewed all {items.length} receipt{items.length !== 1 ? 's' : ''}.</p>
+                        <button onClick={onBack} className="px-5 py-2.5 bg-blue-600 text-white rounded-xl font-semibold text-sm">
+                            Back to Home
+                        </button>
+                    </div>
+                );
+            }
+
+            const isOcrReady = !!currentOcr;
+            const isOcrPending = ocrRunning.has(currentItem.fileId);
+            const thumbnailUrl = `https://drive.google.com/thumbnail?id=${currentItem.fileId}&sz=w800`;
+
+            const handleConfirm = () => {
+                if (!amount || !merchant) return;
+                const expenseData = {
+                    merchant: merchant.trim(),
+                    amount: parseFloat(amount),
+                    date: date,
+                    category: category,
+                    account: account,
+                    txnType: txnType,
+                    receipt: currentItem.fileUrl,
+                    person: userName || '',
+                };
+                onConfirm(currentItem, expenseData);
+                setCurrentIndex(i => i + 1);
+            };
+
+            const handleSkip = () => {
+                onSkip(currentItem);
+                setCurrentIndex(i => i + 1);
+            };
+
+            return (
+                <div className="pb-24 p-4">
+                    {/* Header */}
+                    <div className="flex items-center justify-between mb-3">
+                        <button onClick={onBack} className="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700">
+                            <ChevronLeftIcon size={18} /> Back
+                        </button>
+                        <span className="text-xs text-gray-400 font-medium">
+                            {currentIndex + 1} of {items.length}
+                        </span>
+                    </div>
+
+                    {/* Large receipt thumbnail */}
+                    <div className="bg-gray-50 rounded-xl border border-gray-200 overflow-hidden mb-4" style={{ minHeight: 280 }}>
+                        <img
+                            src={thumbnailUrl}
+                            alt="Receipt"
+                            className="w-full object-contain"
+                            style={{ maxHeight: 400, minHeight: 280 }}
+                            onError={(e) => {
+                                e.target.style.display = 'none';
+                                e.target.parentElement.innerHTML = '<div class="flex items-center justify-center h-64 text-gray-400 text-sm">Could not load preview</div>';
+                            }}
+                        />
+                    </div>
+
+                    {/* Subject line from email */}
+                    <p className="text-xs text-gray-400 mb-3 truncate" title={currentItem.subject}>
+                        📧 {currentItem.subject}
+                    </p>
+
+                    {/* OCR status */}
+                    {isOcrPending && !isOcrReady && (
+                        <div className="flex items-center gap-2 mb-3 px-3 py-2 bg-blue-50 rounded-lg">
+                            <div className="w-4 h-4 border-2 border-blue-200 border-t-blue-500 rounded-full animate-spin" style={{ borderWidth: 2 }}></div>
+                            <span className="text-xs text-blue-600">Extracting details from receipt...</span>
+                        </div>
+                    )}
+
+                    {/* Form fields */}
+                    <div className="space-y-3">
+                        <div>
+                            <label className="text-xs text-gray-500 font-medium mb-1 block">Merchant</label>
+                            <input type="text" value={merchant} onChange={e => {
+                                setMerchant(e.target.value);
+                                setCategory(suggestCategory(e.target.value));
+                                const suggestedAcct = suggestAccountForMerchant(e.target.value, merchantAccountMap);
+                                if (suggestedAcct) setAccount(suggestedAcct);
+                            }} placeholder="Merchant name" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm" />
+                        </div>
+                        <div className="flex gap-3">
+                            <div className="flex-1">
+                                <label className="text-xs text-gray-500 font-medium mb-1 block">Amount</label>
+                                <input type="number" step="0.01" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0.00" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm" />
+                            </div>
+                            <div className="flex-1">
+                                <label className="text-xs text-gray-500 font-medium mb-1 block">Date</label>
+                                <input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm" />
+                            </div>
+                        </div>
+                        <div className="flex gap-3">
+                            <div className="flex-1">
+                                <label className="text-xs text-gray-500 font-medium mb-1 block">Category</label>
+                                <select value={category} onChange={e => setCategory(e.target.value)} className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm bg-white">
+                                    {CATEGORIES.map(c => <option key={c.id} value={c.id}>{c.emoji} {c.name}</option>)}
+                                </select>
+                            </div>
+                            <div className="flex-1">
+                                <label className="text-xs text-gray-500 font-medium mb-1 block">Type</label>
+                                <select value={txnType} onChange={e => setTxnType(e.target.value)} className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm bg-white">
+                                    {TXN_TYPES.filter(t => ['charge', 'deposit', 'credit_refund'].includes(t.id)).map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+                                </select>
+                            </div>
+                        </div>
+                        <div>
+                            <label className="text-xs text-gray-500 font-medium mb-1 block">Account</label>
+                            <select value={account} onChange={e => setAccount(e.target.value)} className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm bg-white">
+                                <option value="">Select account...</option>
+                                <optgroup label="Credit Cards">
+                                    {CREDIT_CARDS.map(c => <option key={c.id} value={c.id}>{c.name} (...{c.last4})</option>)}
+                                </optgroup>
+                                <optgroup label="Bank Accounts">
+                                    {BANK_ACCOUNTS.map(b => <option key={b.id} value={b.id}>{b.name} (...{b.last4})</option>)}
+                                </optgroup>
+                            </select>
+                        </div>
+                    </div>
+
+                    {/* Action buttons */}
+                    <div className="flex gap-3 mt-5">
+                        <button
+                            onClick={handleSkip}
+                            className="flex-1 py-3 rounded-xl border border-gray-200 text-gray-500 font-semibold text-sm hover:bg-gray-50"
+                        >
+                            Not a receipt
+                        </button>
+                        <button
+                            onClick={handleConfirm}
+                            disabled={!merchant || !amount || !account}
+                            className={`flex-[2] py-3 rounded-xl font-semibold text-sm transition-colors ${
+                                merchant && amount && account
+                                    ? 'bg-green-600 text-white hover:bg-green-700'
+                                    : 'bg-gray-200 text-gray-400 cursor-not-allowed'
+                            }`}
+                        >
+                            Confirm & Next →
+                        </button>
+                    </div>
+
+                    {/* Progress dots */}
+                    <div className="flex justify-center gap-1.5 mt-4">
+                        {items.map((_, i) => (
+                            <div key={i} className={`w-2 h-2 rounded-full transition-colors ${
+                                i < currentIndex ? 'bg-green-400' : i === currentIndex ? 'bg-blue-500' : 'bg-gray-200'
+                            }`} />
+                        ))}
+                    </div>
+                </div>
+            );
+        };
+
         // ============ MAIN APP ============
         const App = () => {
             const { user, token, login, logout, authLoading, needsReconnect, reconnect } = useGoogleAuth();
             const { expenses, setExpenses, loading, fetchExpenses, appendExpense, updateExpense, deleteExpense, apiError } = useGoogleSheets(token);
             const { push: pushUndo, undo: undoAction, canUndo } = useUndoStack();
+            const { inboxItems, inboxLoading, fetchInbox, markInboxItem, ocrCacheRef } = useInbox(token);
 
             // Hash-based routing: #home, #all, #cards/amazon_chase, #banks/cap1_jcheck, #review
             const parseHash = () => {
@@ -5369,8 +5695,9 @@
             useEffect(() => {
                 if (user && token) {
                     fetchExpenses();
+                    fetchInbox();
                 }
-            }, [user, token, fetchExpenses]);
+            }, [user, token, fetchExpenses, fetchInbox]);
 
             // Auto-refresh when app becomes visible (e.g., after editing sheet, switching tabs/apps)
             useEffect(() => {
@@ -5758,6 +6085,23 @@
                                         ))}
                                     </div>
                                 )}
+                                {/* Email inbox banner */}
+                                {inboxItems.length > 0 && activeTab === 'home' && (
+                                    <div className="px-4 pt-2 pb-1">
+                                        <button
+                                            onClick={() => setActiveTab('inbox')}
+                                            className="w-full flex items-center gap-3 rounded-xl px-4 py-3 bg-blue-50 border border-blue-200 hover:bg-blue-100 transition-colors"
+                                        >
+                                            <span className="text-lg">📥</span>
+                                            <div className="flex-1 text-left">
+                                                <p className="text-sm font-semibold text-blue-900">{inboxItems.length} receipt{inboxItems.length !== 1 ? 's' : ''} to review</p>
+                                                <p className="text-xs text-blue-600">Tap to review forwarded receipts</p>
+                                            </div>
+                                            <ChevronRightIcon size={18} className="text-blue-400" />
+                                        </button>
+                                    </div>
+                                )}
+
                                 {activeTab === 'home' && <HomeTab expenses={expenses} onEdit={handleEditExpense} onDelete={handleDeleteExpense} onNavigateToCard={(id) => { setSelectedCard(id); setActiveTabRaw('cards'); window.location.hash = 'cards/' + id; }} onNavigateToBank={(id) => { setSelectedBank(id); setActiveTabRaw('banks'); window.location.hash = 'banks/' + id; }} />}
 
                                 {activeTab === 'all' && (
@@ -5831,6 +6175,36 @@
                                     <div className="pb-24 p-4">
                                         <QuarterlyReview token={token} expenses={expenses} />
                                     </div>
+                                )}
+
+                                {activeTab === 'inbox' && (
+                                    <InboxReviewScreen
+                                        items={inboxItems}
+                                        ocrCacheRef={ocrCacheRef}
+                                        token={token}
+                                        userName={user?.name}
+                                        expenses={expenses}
+                                        merchantAccountMap={merchantAccountMap}
+                                        onConfirm={async (item, expenseData) => {
+                                            try {
+                                                pushUndo(expenses);
+                                                setIsSaving(true);
+                                                await appendExpense(expenseData);
+                                                await markInboxItem(item.rowIndex, 'done');
+                                                setIsSaving(false);
+                                                setToast('Receipt saved!');
+                                                setTimeout(() => setToast(''), 3000);
+                                            } catch (err) {
+                                                setIsSaving(false);
+                                                setToast(err.message || 'Save failed');
+                                                setTimeout(() => setToast(''), 5000);
+                                            }
+                                        }}
+                                        onSkip={async (item) => {
+                                            await markInboxItem(item.rowIndex, 'skipped');
+                                        }}
+                                        onBack={() => setActiveTab('home')}
+                                    />
                                 )}
                             </>
                         )}
