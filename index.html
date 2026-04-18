@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.3-apr17';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.3-apr18';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -2161,6 +2161,54 @@
                         }
                     }
 
+                    // ---- ATM / BANK WITHDRAWAL RECEIPT DETECTION ----
+                    // Capital One ATM receipts, bank withdrawal slips, etc.
+                    const atmKeywords = [
+                        /cash\s*withdraw/i, /withdrawal\s*summary/i, /available\s*balance/i,
+                        /total\s*cash/i, /atm/i, /denom\s+qty/i, /capital\s*one\s*n\.?a/i,
+                        /from\s+ck\d?[:\s*]/i, /discover\s*debit/i,
+                    ];
+                    const atmHits = atmKeywords.filter(re => re.test(text)).length;
+                    const isATMReceipt = atmHits >= 2;
+
+                    if (isATMReceipt) {
+                        console.log('ATM/bank withdrawal receipt detected (' + atmHits + ' keyword hits)');
+
+                        // Extract the withdrawal amount — look for "CASH WITHDRAWAL" or "TOTAL CASH" amount
+                        const withdrawalPatterns = [
+                            /\$\s*([\d,]+\.\d{2})\s*cash\s*withdraw/i,
+                            /cash\s*withdraw[a-z]*[:\s]*\$?\s*([\d,]+\.\d{2})/i,
+                            /total\s*cash[:\s]*\$?\s*([\d,]+\.\d{2})/i,
+                        ];
+                        for (const pat of withdrawalPatterns) {
+                            const m = text.match(pat);
+                            if (m) {
+                                amount = parseFloat(m[1].replace(/,/g, ''));
+                                console.log('ATM withdrawal amount:', amount);
+                                break;
+                            }
+                        }
+
+                        // Set merchant based on amount
+                        if (amount === 2700 || amount === 3000) {
+                            merchant = 'Withdrawal - Cash (Nanny Rachel)';
+                        } else {
+                            merchant = 'Withdrawal - Cash';
+                        }
+
+                        // Auto-detect account from receipt text
+                        if (/capital\s*one/i.test(text)) {
+                            // Look for account hint: "FROM CK1:***3871" etc.
+                            // CK = checking
+                            if (/from\s+ck/i.test(text) || /checking/i.test(text)) {
+                                // Default to joint checking for Cap1
+                            }
+                        }
+
+                        date = date; // keep whatever date was already parsed above
+                        console.log('ATM receipt parsed:', { merchant, amount, date });
+                    }
+
                     // ---- PAYSTUB / PAYCHECK DETECTION ----
                     // If the document looks like a paystub, override merchant/amount/category/txnType
                     const lowerText = text.toLowerCase();
@@ -2251,15 +2299,18 @@
                         txnType = 'deposit';
                     }
 
-                    console.log('OCR parsed:', { merchant, amount, date, isPaystub, txnType });
+                    console.log('OCR parsed:', { merchant, amount, date, isPaystub, isATMReceipt, txnType });
 
-                    const cat = isPaystub ? 'work_income' : suggestCategory(merchant);
+                    const cat = isPaystub ? 'work_income'
+                        : isATMReceipt ? ((amount === 2700 || amount === 3000) ? 'nutbear' : 'other')
+                        : suggestCategory(merchant);
                     return {
                         merchant,
                         amount,
                         date,
                         category: cat,
-                        txnType,
+                        txnType: isATMReceipt ? 'charge' : txnType,
+                        account: isATMReceipt && /capital\s*one/i.test(text) ? 'cap1_jcheck' : undefined,
 
                         fullText: text
                     };
@@ -2769,11 +2820,15 @@
                         if (ocrResult.date) setDate(ocrResult.date);
                         if (ocrResult.category) setCategory(ocrResult.category);
                         if (ocrResult.txnType) setTxnType(ocrResult.txnType);
-                        // Suggest account from history
-                        const ocrMerchantForAcct = ocrResult.merchant || merchant;
-                        if (ocrMerchantForAcct) {
-                            const acctSugg = suggestAccountForMerchant(ocrMerchantForAcct, merchantAccountMap);
-                            if (acctSugg) setAccount(acctSugg);
+                        // Use OCR-suggested account if provided (e.g., ATM receipts), otherwise suggest from history
+                        if (ocrResult.account) {
+                            setAccount(ocrResult.account);
+                        } else {
+                            const ocrMerchantForAcct = ocrResult.merchant || merchant;
+                            if (ocrMerchantForAcct) {
+                                const acctSugg = suggestAccountForMerchant(ocrMerchantForAcct, merchantAccountMap);
+                                if (acctSugg) setAccount(acctSugg);
+                            }
                         }
                     }
 
@@ -2872,11 +2927,15 @@
                                     if (ocrResult.date) setDate(ocrResult.date);
                                     if (ocrResult.category) setCategory(ocrResult.category);
                                     if (ocrResult.txnType) setTxnType(ocrResult.txnType);
-                                    // Suggest account from history
-                                    const driveOcrMerchant = ocrResult.merchant || '';
-                                    if (driveOcrMerchant) {
-                                        const acctSugg = suggestAccountForMerchant(driveOcrMerchant, merchantAccountMap);
-                                        if (acctSugg) setAccount(acctSugg);
+                                    // Use OCR-suggested account if provided, otherwise suggest from history
+                                    if (ocrResult.account) {
+                                        setAccount(ocrResult.account);
+                                    } else {
+                                        const driveOcrMerchant = ocrResult.merchant || '';
+                                        if (driveOcrMerchant) {
+                                            const acctSugg = suggestAccountForMerchant(driveOcrMerchant, merchantAccountMap);
+                                            if (acctSugg) setAccount(acctSugg);
+                                        }
                                     }
                                 }
                             } catch (err) {
@@ -3245,7 +3304,7 @@
                                             type="date"
                                             value={date}
                                             onChange={(e) => { setDate(e.target.value); setValidationErrors(prev => ({...prev, date: false})); }}
-                                            className={`flex-1 border rounded-lg px-4 py-2.5 ${validationErrors.date ? 'border-red-500 border-2 bg-red-50' : ''}`}
+                                            className={`flex-1 min-w-0 border rounded-lg px-2 py-2.5 text-sm ${validationErrors.date ? 'border-red-500 border-2 bg-red-50' : ''}`}
                                         />
                                     </div>
                                 </div>
@@ -3326,7 +3385,7 @@
                                             type="date"
                                             value={date}
                                             onChange={(e) => { setDate(e.target.value); setValidationErrors(prev => ({...prev, date: false})); }}
-                                            className={`flex-1 border rounded-lg px-4 py-2.5 ${validationErrors.date ? 'border-red-500 border-2 bg-red-50' : ''}`}
+                                            className={`flex-1 min-w-0 border rounded-lg px-2 py-2.5 text-sm ${validationErrors.date ? 'border-red-500 border-2 bg-red-50' : ''}`}
                                         />
                                     </div>
                                 </>
@@ -5246,9 +5305,13 @@
                     setDate(ocr.date || currentItem.emailDate || new Date().toISOString().split('T')[0]);
                     setCategory(ocr.category || 'other');
                     setTxnType(ocr.txnType || 'charge');
-                    // Try to suggest account from merchant
-                    const suggestedAcct = suggestAccountForMerchant(ocr.merchant, merchantAccountMap);
-                    setAccount(suggestedAcct || '');
+                    // Use OCR-suggested account if provided, otherwise suggest from merchant history
+                    if (ocr.account) {
+                        setAccount(ocr.account);
+                    } else {
+                        const suggestedAcct = suggestAccountForMerchant(ocr.merchant, merchantAccountMap);
+                        setAccount(suggestedAcct || '');
+                    }
                 } else {
                     setMerchant('');
                     setAmount('');
