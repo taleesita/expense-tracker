@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.5-apr18';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.6-apr18';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -3162,7 +3162,7 @@
                             </div>
                         )}
 
-                        <div className="flex gap-2 mb-4">
+                        {!inboxMode && <div className="flex gap-2 mb-4">
                             <input
                                 type="file"
                                 accept="image/*"
@@ -3195,7 +3195,26 @@
                                 <svg width="16" height="16" viewBox="0 0 87.3 78" xmlns="http://www.w3.org/2000/svg"><path d="M6.6 66.85l3.85 6.65c.8 1.4 1.95 2.5 3.3 3.3l13.75-23.8H0c0 1.55.4 3.1 1.2 4.5l5.4 9.35z" fill="#0066DA"/><path d="M43.65 25.15L29.9 1.35c-1.35.8-2.5 1.9-3.3 3.3L1.2 48.2c-.8 1.4-1.2 2.95-1.2 4.5h27.5l16.15-27.55z" fill="#00AC47"/><path d="M73.55 76.8c1.35-.8 2.5-1.9 3.3-3.3l1.6-2.75L84.3 61c.8-1.4 1.2-2.95 1.2-4.5H58.2l6.95 12.2 8.4 8.1z" fill="#EA4335"/><path d="M43.65 25.15L57.4 1.35c-1.35-.8-2.9-1.2-4.5-1.2H34.4c-1.6 0-3.15.45-4.5 1.2l13.75 23.8z" fill="#00832D"/><path d="M58.2 52.7H27.5L13.75 76.5c1.35.8 2.9 1.2 4.5 1.2h35.8c1.6 0 3.15-.45 4.5-1.2L58.2 52.7z" fill="#2684FC"/><path d="M73.4 26.5L60.1 4.65c-.8-1.4-1.95-2.5-3.3-3.3L43.05 25.15l15.15 27.55h27.4c0-1.55-.4-3.1-1.2-4.5L73.4 26.5z" fill="#FFBA00"/></svg>
                                 <span>Drive</span>
                             </button>
-                        </div>
+                        </div>}
+
+                        {/* In inbox mode, show receipt preview prominently before the form */}
+                        {inboxMode && receipt && (() => {
+                            const driveMatch = receipt.match(/(?:id=|\/d\/)([a-zA-Z0-9_-]+)/);
+                            const driveFileId = driveMatch ? driveMatch[1] : null;
+                            if (!driveFileId) return null;
+                            return (
+                                <div className="mb-3 rounded-lg overflow-hidden border border-gray-200 bg-gray-50">
+                                    <div className="overflow-y-auto" style={{ maxHeight: '45vh' }}>
+                                        <PdfPagePreviews driveFileId={driveFileId} token={token} maxPages={3} />
+                                    </div>
+                                    <div className="flex items-center justify-center px-3 py-2 border-t border-gray-100">
+                                        <a href={receipt} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 hover:underline flex items-center gap-1">
+                                            <ExternalLinkIcon size={11} /> Open in Drive
+                                        </a>
+                                    </div>
+                                </div>
+                            );
+                        })()}
 
                         <div className="space-y-3">
                             {/* Transaction Type — first so form adapts */}
@@ -3468,7 +3487,7 @@
                                 className="w-full border rounded-lg px-4 py-2.5 h-16 resize-none text-sm"
                             />
 
-                            {receipt && (() => {
+                            {receipt && !inboxMode && (() => {
                                 // Extract Google Drive file ID for thumbnail
                                 const driveMatch = receipt.match(/(?:id=|\/d\/)([a-zA-Z0-9_-]+)/);
                                 const driveFileId = driveMatch ? driveMatch[1] : null;
@@ -3489,27 +3508,35 @@
                                             </div>
                                         ) : driveFileId ? (
                                             <div className="bg-gray-50">
-                                                <a href={receipt} target="_blank" rel="noopener noreferrer" className="block cursor-pointer">
-                                                <img
-                                                    src={`https://drive.google.com/thumbnail?id=${driveFileId}&sz=w${inboxMode ? 800 : 400}`}
-                                                    alt="Receipt preview"
-                                                    className={`w-full object-contain hover:opacity-80 transition-opacity ${inboxMode ? 'max-h-64' : 'max-h-48'}`}
-                                                    onError={(e) => { e.target.style.display = 'none'; e.target.parentElement.nextSibling.style.display = 'flex'; }}
-                                                />
-                                                </a>
-                                                <div className="items-center gap-3 p-3" style={{ display: 'none' }}>
-                                                    <div className="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center flex-shrink-0">
-                                                        <ExternalLinkIcon size={16} className="text-blue-500" />
+                                                {inboxMode ? (
+                                                    <div className="p-2">
+                                                        <PdfPagePreviews driveFileId={driveFileId} token={token} maxPages={3} />
                                                     </div>
-                                                    <a href={receipt} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 hover:underline truncate">
-                                                        Google Drive receipt
+                                                ) : (
+                                                    <>
+                                                    <a href={receipt} target="_blank" rel="noopener noreferrer" className="block cursor-pointer">
+                                                    <img
+                                                        src={`https://drive.google.com/thumbnail?id=${driveFileId}&sz=w400`}
+                                                        alt="Receipt preview"
+                                                        className="w-full max-h-48 object-contain hover:opacity-80 transition-opacity"
+                                                        onError={(e) => { e.target.style.display = 'none'; e.target.parentElement.nextSibling.style.display = 'flex'; }}
+                                                    />
                                                     </a>
-                                                </div>
+                                                    <div className="items-center gap-3 p-3" style={{ display: 'none' }}>
+                                                        <div className="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center flex-shrink-0">
+                                                            <ExternalLinkIcon size={16} className="text-blue-500" />
+                                                        </div>
+                                                        <a href={receipt} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 hover:underline truncate">
+                                                            Google Drive receipt
+                                                        </a>
+                                                    </div>
+                                                    </>
+                                                )}
                                                 <div className="flex items-center justify-between px-3 py-2 border-t border-gray-100">
                                                     <a href={receipt} target="_blank" rel="noopener noreferrer" className="text-xs text-blue-600 hover:underline flex items-center gap-1">
                                                         <ExternalLinkIcon size={11} /> Open in Drive
                                                     </a>
-                                                    <button type="button" onClick={() => setReceipt('')} className="text-xs text-gray-400 hover:text-red-500">Remove</button>
+                                                    {!inboxMode && <button type="button" onClick={() => setReceipt('')} className="text-xs text-gray-400 hover:text-red-500">Remove</button>}
                                                 </div>
                                             </div>
                                         ) : (
@@ -3556,6 +3583,81 @@
                             </div>
                         </div>
                     </div>
+                </div>
+            );
+        };
+
+        // Multi-page PDF preview — renders first N pages via pdf.js
+        const PdfPagePreviews = ({ driveFileId, token, maxPages = 3 }) => {
+            const [pages, setPages] = useState([]);  // array of data URLs
+            const [loading, setLoading] = useState(true);
+            const [pageCount, setPageCount] = useState(0);
+
+            useEffect(() => {
+                if (!driveFileId || !token || !window.pdfjsLib) { setLoading(false); return; }
+                let cancelled = false;
+                const render = async () => {
+                    try {
+                        const resp = await fetch(
+                            `https://www.googleapis.com/drive/v3/files/${driveFileId}?alt=media`,
+                            { headers: { 'Authorization': `Bearer ${token}` } }
+                        );
+                        if (!resp.ok || cancelled) { setLoading(false); return; }
+                        const buf = await resp.arrayBuffer();
+                        if (cancelled) return;
+                        const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+                        if (cancelled) return;
+                        setPageCount(pdf.numPages);
+                        const numToRender = Math.min(pdf.numPages, maxPages);
+                        const rendered = [];
+                        for (let i = 1; i <= numToRender; i++) {
+                            const page = await pdf.getPage(i);
+                            const scale = 1.5;
+                            const viewport = page.getViewport({ scale });
+                            const canvas = document.createElement('canvas');
+                            canvas.width = viewport.width;
+                            canvas.height = viewport.height;
+                            const ctx = canvas.getContext('2d');
+                            await page.render({ canvasContext: ctx, viewport }).promise;
+                            rendered.push(canvas.toDataURL('image/png'));
+                            if (cancelled) return;
+                        }
+                        setPages(rendered);
+                    } catch (err) {
+                        console.error('PDF preview render failed:', err);
+                    }
+                    setLoading(false);
+                };
+                render();
+                return () => { cancelled = true; };
+            }, [driveFileId, token, maxPages]);
+
+            if (loading) {
+                return (
+                    <div className="flex items-center justify-center py-8 text-gray-400 text-sm">
+                        <RefreshCwIcon size={16} className="animate-spin mr-2" /> Loading receipt preview...
+                    </div>
+                );
+            }
+            if (!pages.length) return null;
+
+            return (
+                <div className="space-y-2">
+                    {pages.map((dataUrl, i) => (
+                        <div key={i} className="relative">
+                            <img src={dataUrl} alt={`Page ${i + 1}`} className="w-full rounded border border-gray-200" />
+                            {pages.length > 1 && (
+                                <span className="absolute top-2 right-2 bg-black bg-opacity-50 text-white text-xs px-2 py-0.5 rounded">
+                                    {i + 1}/{pageCount}
+                                </span>
+                            )}
+                        </div>
+                    ))}
+                    {pageCount > maxPages && (
+                        <p className="text-xs text-gray-400 text-center py-1">
+                            +{pageCount - maxPages} more page{pageCount - maxPages > 1 ? 's' : ''} — open in Drive to view all
+                        </p>
+                    )}
                 </div>
             );
         };
