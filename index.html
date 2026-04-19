@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.4-apr18';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.5-apr18';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -2630,8 +2630,8 @@
             );
         };
 
-        const AddExpenseModal = ({ isOpen, onClose, onAdd, onUpdate, editExpense, token, userName, expenses: allExpenses, merchantAccountMap, reconnect }) => {
-            const isEdit = !!editExpense;
+        const AddExpenseModal = ({ isOpen, onClose, onAdd, onUpdate, editExpense, token, userName, expenses: allExpenses, merchantAccountMap, reconnect, inboxMode, inboxProgress, onInboxSkip }) => {
+            const isEdit = !!editExpense && !editExpense._prefill;
             const [merchant, setMerchant] = useState('');
             const [amount, setAmount] = useState('');
             const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
@@ -3146,7 +3146,8 @@
                             </div>
                         )}
                         <div className="flex justify-between items-center mb-4">
-                            <h2 className="text-2xl font-bold">{isEdit ? 'Edit Transaction' : 'Add Transaction'}</h2>
+                            <h2 className="text-2xl font-bold">{inboxMode ? `Review Receipt` : isEdit ? 'Edit Transaction' : 'Add Transaction'}</h2>
+                            {inboxMode && inboxProgress && <span className="text-sm text-gray-400 ml-2">{inboxProgress}</span>}
                             <button onClick={handleCancel} className="p-1 hover:bg-gray-200 rounded">
                                 <XIcon size={24} />
                             </button>
@@ -3490,9 +3491,9 @@
                                             <div className="bg-gray-50">
                                                 <a href={receipt} target="_blank" rel="noopener noreferrer" className="block cursor-pointer">
                                                 <img
-                                                    src={`https://drive.google.com/thumbnail?id=${driveFileId}&sz=w400`}
+                                                    src={`https://drive.google.com/thumbnail?id=${driveFileId}&sz=w${inboxMode ? 800 : 400}`}
                                                     alt="Receipt preview"
-                                                    className="w-full max-h-48 object-contain hover:opacity-80 transition-opacity"
+                                                    className={`w-full object-contain hover:opacity-80 transition-opacity ${inboxMode ? 'max-h-64' : 'max-h-48'}`}
                                                     onError={(e) => { e.target.style.display = 'none'; e.target.parentElement.nextSibling.style.display = 'flex'; }}
                                                 />
                                                 </a>
@@ -3531,17 +3532,26 @@
                             })()}
 
                             <div className="flex gap-2 pt-4">
-                                <button
-                                    onClick={handleCancel}
-                                    className="flex-1 bg-gray-200 text-gray-800 py-2 rounded-lg font-medium hover:bg-gray-300"
-                                >
-                                    Cancel
-                                </button>
+                                {inboxMode ? (
+                                    <button
+                                        onClick={onInboxSkip}
+                                        className="flex-1 bg-gray-200 text-gray-800 py-2 rounded-lg font-medium hover:bg-gray-300"
+                                    >
+                                        Skip
+                                    </button>
+                                ) : (
+                                    <button
+                                        onClick={handleCancel}
+                                        className="flex-1 bg-gray-200 text-gray-800 py-2 rounded-lg font-medium hover:bg-gray-300"
+                                    >
+                                        Cancel
+                                    </button>
+                                )}
                                 <button
                                     onClick={handleAdd}
                                     className="flex-1 bg-blue-600 text-white py-2 rounded-lg font-medium hover:bg-blue-700"
                                 >
-                                    {isEdit ? 'Save Changes' : 'Save'}
+                                    {isEdit ? 'Save Changes' : inboxMode ? 'Save & Next' : 'Save'}
                                 </button>
                             </div>
                         </div>
@@ -5318,8 +5328,10 @@
                 let finalAccount = '';
 
                 if (ocr) {
-                    const ocrMerchantUsable = ocr.merchant && ocr.merchant.length >= 2 && /[a-zA-Z]/.test(ocr.merchant);
-                    finalMerchant = ocrMerchantUsable ? ocr.merchant : (subjectMerchant || ocr.merchant || '');
+                    const ocrMerchantClean = (ocr.merchant || '').replace(/^[\s.,;:!?]+/, '').trim();
+                    const ocrMerchantUsable = ocrMerchantClean.length >= 3 && /^[a-zA-Z]/.test(ocrMerchantClean);
+                    // Prefer subject-extracted merchant when available; fall back to OCR merchant
+                    finalMerchant = subjectMerchant || (ocrMerchantUsable ? ocrMerchantClean : '') || ocrMerchantClean;
                     finalAmount = ocr.amount ? String(ocr.amount) : '';
                     finalDate = ocr.date || finalDate;
                     finalCategory = ocr.category || suggestCategory(finalMerchant) || 'other';
@@ -5468,6 +5480,8 @@
             const [isSaving, setIsSaving] = useState(false);
             const pendingSaveRef = useRef(null);
             const inboxReviewingRef = useRef(null); // tracks inbox item being reviewed via AddExpenseModal
+            const [inboxModeActive, setInboxModeActive] = useState(false);
+            const inboxIndexRef = useRef(0);
             const [testMode, setTestMode] = useState(_testMode);
             const [dismissedReminders, setDismissedReminders] = useState(() => {
                 try { return JSON.parse(localStorage.getItem('dismissed_reminders') || '{}'); } catch { return {}; }
@@ -5605,7 +5619,70 @@
             const handleCloseModal = () => {
                 setShowAddModal(false);
                 setEditExpense(null);
-                inboxReviewingRef.current = null; // clear inbox review tracking if modal dismissed
+                if (inboxModeActive) {
+                    setInboxModeActive(false);
+                    inboxIndexRef.current = 0;
+                }
+                inboxReviewingRef.current = null;
+            };
+
+            // Build prefill for an inbox item from OCR cache + subject merchant
+            const buildInboxPrefill = (item) => {
+                const ocr = ocrCacheRef.current[item.fileId];
+                const subjectMerchant = merchantFromSubject(item.subject);
+                let merchant = '', amount = '', date = item.emailDate || new Date().toISOString().split('T')[0];
+                let category = 'other', txnType = 'charge', account = '';
+                if (ocr) {
+                    const ocrMerchantClean = (ocr.merchant || '').replace(/^[\s.,;:!?]+/, '').trim();
+                    const ocrMerchantUsable = ocrMerchantClean.length >= 3 && /^[a-zA-Z]/.test(ocrMerchantClean);
+                    merchant = subjectMerchant || (ocrMerchantUsable ? ocrMerchantClean : '') || ocrMerchantClean;
+                    amount = ocr.amount ? String(ocr.amount) : '';
+                    date = ocr.date || date;
+                    category = ocr.category || suggestCategory(merchant) || 'other';
+                    txnType = ocr.txnType || 'charge';
+                    account = ocr.account || suggestAccountForMerchant(merchant, merchantAccountMap) || '';
+                } else {
+                    merchant = subjectMerchant || '';
+                    category = subjectMerchant ? suggestCategory(subjectMerchant) : 'other';
+                    account = subjectMerchant ? (suggestAccountForMerchant(subjectMerchant, merchantAccountMap) || '') : '';
+                }
+                return { merchant, amount, date, category, txnType, account };
+            };
+
+            // Open modal for a specific inbox item
+            const openInboxItem = (item, index) => {
+                const prefill = buildInboxPrefill(item);
+                inboxReviewingRef.current = item;
+                inboxIndexRef.current = index;
+                setEditExpense({
+                    _prefill: true,
+                    merchant: prefill.merchant,
+                    amount: prefill.amount,
+                    date: prefill.date,
+                    category: prefill.category,
+                    txnType: prefill.txnType,
+                    account: prefill.account,
+                    receipt: item.fileUrl || '',
+                });
+                setShowAddModal(true);
+                setInboxModeActive(true);
+            };
+
+            // Advance to next inbox item or finish
+            const advanceInbox = () => {
+                const nextIdx = inboxIndexRef.current + 1;
+                if (nextIdx < inboxItems.length) {
+                    openInboxItem(inboxItems[nextIdx], nextIdx);
+                } else {
+                    // All done
+                    setShowAddModal(false);
+                    setEditExpense(null);
+                    setInboxModeActive(false);
+                    inboxReviewingRef.current = null;
+                    inboxIndexRef.current = 0;
+                    setToast('All receipts reviewed!');
+                    setTimeout(() => setToast(''), 3000);
+                }
             };
 
             const handleSplitExpense = async (parentExpense, splitRows) => {
@@ -5693,6 +5770,35 @@
                 }
             }, [user, token, fetchExpenses, fetchInbox]);
 
+            // Background OCR for inbox items — runs when inbox items are loaded
+            const { scanReceipt: inboxScanReceipt } = useOCR();
+            useEffect(() => {
+                if (!inboxItems.length || !token) return;
+                let cancelled = false;
+                const runOcr = async () => {
+                    for (const item of inboxItems) {
+                        if (cancelled || ocrCacheRef.current[item.fileId]) continue;
+                        try {
+                            const resp = await fetch(
+                                `https://www.googleapis.com/drive/v3/files/${item.fileId}?alt=media`,
+                                { headers: { 'Authorization': `Bearer ${token}` } }
+                            );
+                            if (!resp.ok || cancelled) continue;
+                            const blob = await resp.blob();
+                            const file = new File([blob], item.subject + '.pdf', { type: blob.type || 'application/pdf' });
+                            const result = await inboxScanReceipt(file);
+                            if (result && !cancelled) {
+                                ocrCacheRef.current[item.fileId] = result;
+                            }
+                        } catch (err) {
+                            console.error('Background OCR failed for', item.fileId, err);
+                        }
+                    }
+                };
+                runOcr();
+                return () => { cancelled = true; };
+            }, [inboxItems, token]);
+
             // Auto-refresh when app becomes visible (e.g., after editing sheet, switching tabs/apps)
             useEffect(() => {
                 const handleVisibility = () => {
@@ -5765,15 +5871,16 @@
                     }
                     setTimeout(() => setConfirmationData(null), 10000);
 
-                    // If this save came from inbox review, mark the item as done
-                    if (inboxReviewingRef.current) {
+                    // If this save came from inbox review, mark done and advance
+                    if (inboxReviewingRef.current && inboxModeActive) {
                         const reviewItem = inboxReviewingRef.current;
-                        inboxReviewingRef.current = null;
                         try {
                             await markInboxItem(reviewItem.rowIndex, 'done');
                         } catch (e) {
                             console.error('Failed to mark inbox item done:', e);
                         }
+                        advanceInbox();
+                        return; // skip normal confirmation — advanceInbox handles modal state
                     }
                 } catch (err) {
                     console.error('Save failed:', err);
@@ -6010,7 +6117,14 @@
                                 {mtaSaving ? (<><RefreshCwIcon size={14} className="animate-spin" /> MTA</>) : '🚇 MTA'}
                             </button>
                             <button
-                                onClick={() => setActiveTab('inbox')}
+                                onClick={() => {
+                                    if (inboxItems.length > 0) {
+                                        openInboxItem(inboxItems[0], 0);
+                                    } else {
+                                        setToast('No receipts to review');
+                                        setTimeout(() => setToast(''), 2000);
+                                    }
+                                }}
                                 className="relative p-2 bg-gray-100 rounded-lg text-gray-600 hover:bg-gray-200"
                                 title="Review inbox"
                             >
@@ -6104,7 +6218,7 @@
                                 {inboxItems.length > 0 && activeTab === 'home' && (
                                     <div className="px-4 pt-2 pb-1">
                                         <button
-                                            onClick={() => setActiveTab('inbox')}
+                                            onClick={() => inboxItems.length > 0 && openInboxItem(inboxItems[0], 0)}
                                             className="w-full flex items-center gap-3 rounded-xl px-4 py-3 bg-blue-50 border border-blue-200 hover:bg-blue-100 transition-colors"
                                         >
                                             <span className="text-lg">📥</span>
@@ -6192,32 +6306,7 @@
                                     </div>
                                 )}
 
-                                {activeTab === 'inbox' && (
-                                    <InboxReviewScreen
-                                        items={inboxItems}
-                                        ocrCacheRef={ocrCacheRef}
-                                        token={token}
-                                        merchantAccountMap={merchantAccountMap}
-                                        onReview={(item, prefill) => {
-                                            inboxReviewingRef.current = item;
-                                            setEditExpense({
-                                                _prefill: true,
-                                                merchant: prefill.merchant || '',
-                                                amount: prefill.amount || '',
-                                                date: prefill.date || new Date().toISOString().split('T')[0],
-                                                category: prefill.category || 'other',
-                                                txnType: prefill.txnType || 'charge',
-                                                account: prefill.account || '',
-                                                receipt: item.fileUrl || '',
-                                            });
-                                            setShowAddModal(true);
-                                        }}
-                                        onSkip={async (item) => {
-                                            await markInboxItem(item.rowIndex, 'skipped');
-                                        }}
-                                        onBack={() => setActiveTab('home')}
-                                    />
-                                )}
+                                {/* Inbox review now uses AddExpenseModal directly in inbox mode — no separate tab */}
                             </>
                         )}
                     </div>
@@ -6234,6 +6323,18 @@
                         expenses={expenses}
                         merchantAccountMap={merchantAccountMap}
                         reconnect={reconnect}
+                        inboxMode={inboxModeActive}
+                        inboxProgress={inboxModeActive ? `${inboxIndexRef.current + 1} of ${inboxItems.length}` : ''}
+                        onInboxSkip={async () => {
+                            if (inboxReviewingRef.current) {
+                                try {
+                                    await markInboxItem(inboxReviewingRef.current.rowIndex, 'skipped');
+                                } catch (e) {
+                                    console.error('Failed to skip inbox item:', e);
+                                }
+                            }
+                            advanceInbox();
+                        }}
                     />
 
                     <SplitExpenseModal
