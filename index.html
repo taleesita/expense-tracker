@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.3-apr18';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.4-apr18';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -2670,14 +2670,14 @@
                     setOriginalCurrency(editExpense.originalCurrency || 'USD');
                     setOriginalAmount(editExpense.originalAmount?.toString() || '');
                 } else if (editExpense?._prefill && isOpen) {
-                    // Pre-fill from recurring reminder quick-add
+                    // Pre-fill from recurring reminder quick-add or inbox review
                     setMerchant(editExpense.merchant || '');
                     setAmount(editExpense.amount?.toString() || '');
-                    setDate(new Date().toISOString().split('T')[0]);
+                    setDate(editExpense.date || new Date().toISOString().split('T')[0]);
                     setCategory(editExpense.category || 'other');
                     setAccount(editExpense.account || '');
                     setNotes('');
-                    setReceipt('');
+                    setReceipt(editExpense.receipt || '');
                     setTxnType(editExpense.txnType || 'charge');
                     setOriginalCurrency('USD');
                     setOriginalAmount('');
@@ -5248,21 +5248,33 @@
         };
 
         // ============ INBOX REVIEW SCREEN ============
-        const InboxReviewScreen = ({ items, ocrCacheRef, onConfirm, onSkip, onBack, token, userName, expenses, merchantAccountMap }) => {
-            const [currentIndex, setCurrentIndex] = useState(0);
-            const [ocrResults, setOcrResults] = useState({}); // fileId → parsed result
+        // Extract merchant hint from email subject
+        const merchantFromSubject = (subject) => {
+            if (!subject) return '';
+            let s = subject.replace(/^(Fwd?|Re|Fw):\s*/gi, '').trim();
+            const patterns = [
+                /your\s+(.+?)\s+order/i,
+                /order\s+(?:from|confirmation\s+from)\s+(.+?)(?:\s+#|\s+\d|$)/i,
+                /(.+?)\s+(?:order|receipt|confirmation|invoice|payment|billing)/i,
+                /(?:receipt|order|confirmation)\s+(?:from|for)\s+(.+?)(?:\s+#|\s+\d|$)/i,
+            ];
+            for (const pat of patterns) {
+                const m = s.match(pat);
+                if (m) {
+                    let name = m[1].replace(/\.com|\.net|\.org/gi, '').trim();
+                    name = name.replace(/\s*(#|number|no\.?)\s*\d+.*/i, '').trim();
+                    if (name.length >= 2 && name.length <= 40) return name;
+                }
+            }
+            return '';
+        };
+
+        // ============ INBOX REVIEW SCREEN ============
+        // Shows receipt cards with big thumbnails. Tapping "Review" opens the normal AddExpenseModal.
+        const InboxReviewScreen = ({ items, ocrCacheRef, onReview, onSkip, onBack, token, merchantAccountMap }) => {
+            const [ocrResults, setOcrResults] = useState({});
             const [ocrRunning, setOcrRunning] = useState(new Set());
             const { scanReceipt } = useOCR();
-
-            // Form state for current item
-            const currentItem = items[currentIndex];
-            const currentOcr = currentItem ? (ocrResults[currentItem.fileId] || ocrCacheRef.current[currentItem.fileId]) : null;
-            const [merchant, setMerchant] = useState('');
-            const [amount, setAmount] = useState('');
-            const [date, setDate] = useState('');
-            const [category, setCategory] = useState('other');
-            const [account, setAccount] = useState('');
-            const [txnType, setTxnType] = useState('charge');
 
             // Run OCR on all pending items in background
             useEffect(() => {
@@ -5272,7 +5284,6 @@
                         if (ocrResults[item.fileId] || ocrCacheRef.current[item.fileId] || ocrRunning.has(item.fileId)) continue;
                         setOcrRunning(prev => new Set([...prev, item.fileId]));
                         try {
-                            // Fetch the file from Drive as a blob
                             const resp = await fetch(
                                 `https://www.googleapis.com/drive/v3/files/${item.fileId}?alt=media`,
                                 { headers: { 'Authorization': `Bearer ${token}` } }
@@ -5295,64 +5306,33 @@
                 runOcrBatch();
             }, [items, token]);
 
-            // Extract merchant hint from email subject
-            const merchantFromSubject = (subject) => {
-                if (!subject) return '';
-                // Strip "Fwd:", "Re:", etc.
-                let s = subject.replace(/^(Fwd?|Re|Fw):\s*/gi, '').trim();
-                // Known patterns: "Your X Order", "Order from X", "X Order Confirmation", "X Receipt"
-                const patterns = [
-                    /your\s+(.+?)\s+order/i,
-                    /order\s+(?:from|confirmation\s+from)\s+(.+?)(?:\s+#|\s+\d|$)/i,
-                    /(.+?)\s+(?:order|receipt|confirmation|invoice|payment|billing)/i,
-                    /(?:receipt|order|confirmation)\s+(?:from|for)\s+(.+?)(?:\s+#|\s+\d|$)/i,
-                ];
-                for (const pat of patterns) {
-                    const m = s.match(pat);
-                    if (m) {
-                        let name = m[1].replace(/\.com|\.net|\.org/gi, '').trim();
-                        // Remove order numbers and trailing noise
-                        name = name.replace(/\s*(#|number|no\.?)\s*\d+.*/i, '').trim();
-                        if (name.length >= 2 && name.length <= 40) return name;
-                    }
-                }
-                return '';
-            };
-
-            // Pre-fill form when OCR result arrives or when navigating
-            useEffect(() => {
-                if (!currentItem) return;
-                const ocr = ocrResults[currentItem.fileId] || ocrCacheRef.current[currentItem.fileId];
-                // Try to get merchant from email subject as a hint
-                const subjectMerchant = merchantFromSubject(currentItem.subject);
+            // Build prefill data for an item using OCR + subject hints
+            const getPrefill = (item) => {
+                const ocr = ocrResults[item.fileId] || ocrCacheRef.current[item.fileId];
+                const subjectMerchant = merchantFromSubject(item.subject);
+                let finalMerchant = '';
+                let finalAmount = '';
+                let finalDate = item.emailDate || new Date().toISOString().split('T')[0];
+                let finalCategory = 'other';
+                let finalTxnType = 'charge';
+                let finalAccount = '';
 
                 if (ocr) {
-                    // Use OCR merchant, but fall back to subject-derived merchant if OCR got garbage
-                    const ocrMerchantUsable = ocr.merchant && ocr.merchant.length >= 2 && !/^[^a-zA-Z]*$/.test(ocr.merchant);
-                    const finalMerchant = ocrMerchantUsable ? ocr.merchant : (subjectMerchant || ocr.merchant || '');
-                    setMerchant(finalMerchant);
-                    setAmount(ocr.amount ? String(ocr.amount) : '');
-                    setDate(ocr.date || currentItem.emailDate || new Date().toISOString().split('T')[0]);
-                    setCategory(ocr.category || suggestCategory(finalMerchant) || 'other');
-                    setTxnType(ocr.txnType || 'charge');
-                    // Use OCR-suggested account if provided, otherwise suggest from merchant history
-                    if (ocr.account) {
-                        setAccount(ocr.account);
-                    } else {
-                        const suggestedAcct = suggestAccountForMerchant(finalMerchant, merchantAccountMap);
-                        setAccount(suggestedAcct || '');
-                    }
+                    const ocrMerchantUsable = ocr.merchant && ocr.merchant.length >= 2 && /[a-zA-Z]/.test(ocr.merchant);
+                    finalMerchant = ocrMerchantUsable ? ocr.merchant : (subjectMerchant || ocr.merchant || '');
+                    finalAmount = ocr.amount ? String(ocr.amount) : '';
+                    finalDate = ocr.date || finalDate;
+                    finalCategory = ocr.category || suggestCategory(finalMerchant) || 'other';
+                    finalTxnType = ocr.txnType || 'charge';
+                    finalAccount = ocr.account || suggestAccountForMerchant(finalMerchant, merchantAccountMap) || '';
                 } else {
-                    // No OCR yet — use subject hint if available
-                    setMerchant(subjectMerchant || '');
-                    setAmount('');
-                    setDate(currentItem.emailDate || new Date().toISOString().split('T')[0]);
-                    setCategory(subjectMerchant ? suggestCategory(subjectMerchant) : 'other');
-                    setTxnType('charge');
-                    const suggestedAcct = subjectMerchant ? suggestAccountForMerchant(subjectMerchant, merchantAccountMap) : '';
-                    setAccount(suggestedAcct || '');
+                    finalMerchant = subjectMerchant || '';
+                    finalCategory = subjectMerchant ? suggestCategory(subjectMerchant) : 'other';
+                    finalAccount = subjectMerchant ? (suggestAccountForMerchant(subjectMerchant, merchantAccountMap) || '') : '';
                 }
-            }, [currentIndex, currentItem?.fileId, ocrResults]);
+
+                return { merchant: finalMerchant, amount: finalAmount, date: finalDate, category: finalCategory, txnType: finalTxnType, account: finalAccount };
+            };
 
             if (!items.length) {
                 return (
@@ -5367,170 +5347,79 @@
                 );
             }
 
-            if (!currentItem) {
-                // Went past the end — all done
-                return (
-                    <div className="flex flex-col items-center justify-center py-20 px-4 text-center">
-                        <div className="text-5xl mb-4">🎉</div>
-                        <h2 className="text-lg font-bold text-gray-800 mb-2">All done!</h2>
-                        <p className="text-sm text-gray-500 mb-6">You've reviewed all {items.length} receipt{items.length !== 1 ? 's' : ''}.</p>
-                        <button onClick={onBack} className="px-5 py-2.5 bg-blue-600 text-white rounded-xl font-semibold text-sm">
-                            Back to Home
-                        </button>
-                    </div>
-                );
-            }
-
-            const isOcrReady = !!currentOcr;
-            const isOcrPending = ocrRunning.has(currentItem.fileId);
-            const thumbnailUrl = `https://drive.google.com/thumbnail?id=${currentItem.fileId}&sz=w800`;
-
-            const handleConfirm = () => {
-                if (!amount || !merchant) return;
-                const expenseData = {
-                    merchant: merchant.trim(),
-                    amount: parseFloat(amount),
-                    date: date,
-                    category: category,
-                    account: account,
-                    txnType: txnType,
-                    receipt: currentItem.fileUrl,
-                    person: userName || '',
-                };
-                onConfirm(currentItem, expenseData);
-                setCurrentIndex(i => i + 1);
-            };
-
-            const handleSkip = () => {
-                onSkip(currentItem);
-                setCurrentIndex(i => i + 1);
-            };
-
             return (
-                <div className="pb-24 p-4">
+                <div className="pb-24 p-4 space-y-4">
                     {/* Header */}
-                    <div className="flex items-center justify-between mb-3">
+                    <div className="flex items-center justify-between">
                         <button onClick={onBack} className="flex items-center gap-1 text-sm text-gray-500 hover:text-gray-700">
                             <ChevronLeftIcon size={18} /> Back
                         </button>
-                        <span className="text-xs text-gray-400 font-medium">
-                            {currentIndex + 1} of {items.length}
+                        <span className="text-sm font-medium text-gray-600">
+                            {items.length} receipt{items.length !== 1 ? 's' : ''} to review
                         </span>
                     </div>
 
-                    {/* Large receipt thumbnail — tap to open in Drive */}
-                    <a
-                        href={currentItem.fileUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="block bg-gray-50 rounded-xl border border-gray-200 overflow-hidden mb-2 relative"
-                    >
-                        <img
-                            src={`https://drive.google.com/thumbnail?id=${currentItem.fileId}&sz=w1200`}
-                            alt="Receipt"
-                            className="w-full object-contain"
-                            style={{ maxHeight: '55vh', minHeight: 200 }}
-                            onError={(e) => {
-                                e.target.style.display = 'none';
-                                e.target.parentElement.innerHTML = '<div class="flex items-center justify-center h-48 text-gray-400 text-sm">Could not load preview — tap to open in Drive</div>';
-                            }}
-                        />
-                        <div className="absolute bottom-2 right-2 bg-black/50 text-white text-[10px] px-2 py-1 rounded-full flex items-center gap-1">
-                            <ExternalLinkIcon size={10} /> Open in Drive
-                        </div>
-                    </a>
+                    {/* Receipt cards */}
+                    {items.map((item, idx) => {
+                        const ocr = ocrResults[item.fileId] || ocrCacheRef.current[item.fileId];
+                        const isRunning = ocrRunning.has(item.fileId);
+                        const prefill = getPrefill(item);
+                        const subject = (item.subject || '').replace(/^Fwd?:\s*/i, '');
 
-                    {/* Subject line from email */}
-                    <p className="text-xs text-gray-400 mb-3 truncate" title={currentItem.subject}>
-                        📧 {currentItem.subject.replace(/^Fwd?:\s*/i, '')}
-                    </p>
+                        return (
+                            <div key={item.rowIndex} className="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
+                                {/* Thumbnail — tap to open in Drive */}
+                                <a href={item.fileUrl} target="_blank" rel="noopener noreferrer" className="block relative bg-gray-50">
+                                    <img
+                                        src={`https://drive.google.com/thumbnail?id=${item.fileId}&sz=w1200`}
+                                        alt="Receipt"
+                                        className="w-full object-contain"
+                                        style={{ maxHeight: '45vh', minHeight: 160 }}
+                                        onError={(e) => { e.target.style.display = 'none'; }}
+                                    />
+                                    <div className="absolute bottom-2 right-2 bg-black/50 text-white text-[10px] px-2 py-1 rounded-full flex items-center gap-1">
+                                        <ExternalLinkIcon size={10} /> View full
+                                    </div>
+                                </a>
 
-                    {/* OCR status */}
-                    {isOcrPending && !isOcrReady && (
-                        <div className="flex items-center gap-2 mb-3 px-3 py-2 bg-blue-50 rounded-lg">
-                            <div className="w-4 h-4 border-2 border-blue-200 border-t-blue-500 rounded-full animate-spin" style={{ borderWidth: 2 }}></div>
-                            <span className="text-xs text-blue-600">Extracting details from receipt...</span>
-                        </div>
-                    )}
+                                {/* Info + actions */}
+                                <div className="p-3">
+                                    <p className="text-xs text-gray-400 truncate mb-2" title={subject}>📧 {subject}</p>
 
-                    {/* Form fields */}
-                    <div className="space-y-3">
-                        <div>
-                            <label className="text-xs text-gray-500 font-medium mb-1 block">Merchant</label>
-                            <input type="text" value={merchant} onChange={e => {
-                                setMerchant(e.target.value);
-                                setCategory(suggestCategory(e.target.value));
-                                const suggestedAcct = suggestAccountForMerchant(e.target.value, merchantAccountMap);
-                                if (suggestedAcct) setAccount(suggestedAcct);
-                            }} placeholder="Merchant name" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm" />
-                        </div>
-                        <div className="flex gap-3">
-                            <div className="flex-1">
-                                <label className="text-xs text-gray-500 font-medium mb-1 block">Amount</label>
-                                <input type="number" step="0.01" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0.00" className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm" />
+                                    {/* OCR preview — show what was extracted */}
+                                    {isRunning && !ocr && (
+                                        <div className="flex items-center gap-2 mb-2">
+                                            <div className="w-3 h-3 border-2 border-blue-200 border-t-blue-500 rounded-full animate-spin" style={{ borderWidth: 2 }}></div>
+                                            <span className="text-xs text-blue-500">Reading receipt...</span>
+                                        </div>
+                                    )}
+                                    {ocr && (
+                                        <div className="flex items-center gap-3 mb-2 text-xs text-gray-600">
+                                            {prefill.merchant && <span className="font-medium">{prefill.merchant}</span>}
+                                            {prefill.amount && <span className="text-green-700 font-semibold">${parseFloat(prefill.amount).toFixed(2)}</span>}
+                                            {prefill.date && <span className="text-gray-400">{prefill.date}</span>}
+                                        </div>
+                                    )}
+
+                                    {/* Action buttons */}
+                                    <div className="flex gap-2">
+                                        <button
+                                            onClick={() => onSkip(item)}
+                                            className="px-3 py-2 rounded-lg border border-gray-200 text-gray-400 text-xs font-medium hover:bg-gray-50"
+                                        >
+                                            Skip
+                                        </button>
+                                        <button
+                                            onClick={() => onReview(item, prefill)}
+                                            className="flex-1 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700"
+                                        >
+                                            Review →
+                                        </button>
+                                    </div>
+                                </div>
                             </div>
-                            <div className="flex-1">
-                                <label className="text-xs text-gray-500 font-medium mb-1 block">Date</label>
-                                <input type="date" value={date} onChange={e => setDate(e.target.value)} className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm" />
-                            </div>
-                        </div>
-                        <div className="flex gap-3">
-                            <div className="flex-1">
-                                <label className="text-xs text-gray-500 font-medium mb-1 block">Category</label>
-                                <select value={category} onChange={e => setCategory(e.target.value)} className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm bg-white">
-                                    {CATEGORIES.map(c => <option key={c.id} value={c.id}>{c.emoji} {c.name}</option>)}
-                                </select>
-                            </div>
-                            <div className="flex-1">
-                                <label className="text-xs text-gray-500 font-medium mb-1 block">Type</label>
-                                <select value={txnType} onChange={e => setTxnType(e.target.value)} className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm bg-white">
-                                    {TXN_TYPES.filter(t => ['charge', 'deposit', 'credit_refund'].includes(t.id)).map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
-                                </select>
-                            </div>
-                        </div>
-                        <div>
-                            <label className="text-xs text-gray-500 font-medium mb-1 block">Account</label>
-                            <select value={account} onChange={e => setAccount(e.target.value)} className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm bg-white">
-                                <option value="">Select account...</option>
-                                <optgroup label="Credit Cards">
-                                    {CREDIT_CARDS.map(c => <option key={c.id} value={c.id}>{c.name} (...{c.last4})</option>)}
-                                </optgroup>
-                                <optgroup label="Bank Accounts">
-                                    {BANK_ACCOUNTS.map(b => <option key={b.id} value={b.id}>{b.name} (...{b.last4})</option>)}
-                                </optgroup>
-                            </select>
-                        </div>
-                    </div>
-
-                    {/* Action buttons */}
-                    <div className="flex gap-3 mt-5">
-                        <button
-                            onClick={handleSkip}
-                            className="flex-1 py-3 rounded-xl border border-gray-200 text-gray-500 font-semibold text-sm hover:bg-gray-50"
-                        >
-                            Not a receipt
-                        </button>
-                        <button
-                            onClick={handleConfirm}
-                            disabled={!merchant || !amount || !account}
-                            className={`flex-[2] py-3 rounded-xl font-semibold text-sm transition-colors ${
-                                merchant && amount && account
-                                    ? 'bg-green-600 text-white hover:bg-green-700'
-                                    : 'bg-gray-200 text-gray-400 cursor-not-allowed'
-                            }`}
-                        >
-                            Confirm & Next →
-                        </button>
-                    </div>
-
-                    {/* Progress dots */}
-                    <div className="flex justify-center gap-1.5 mt-4">
-                        {items.map((_, i) => (
-                            <div key={i} className={`w-2 h-2 rounded-full transition-colors ${
-                                i < currentIndex ? 'bg-green-400' : i === currentIndex ? 'bg-blue-500' : 'bg-gray-200'
-                            }`} />
-                        ))}
-                    </div>
+                        );
+                    })}
                 </div>
             );
         };
@@ -5578,6 +5467,7 @@
             const [confirmationData, setConfirmationData] = useState(null);
             const [isSaving, setIsSaving] = useState(false);
             const pendingSaveRef = useRef(null);
+            const inboxReviewingRef = useRef(null); // tracks inbox item being reviewed via AddExpenseModal
             const [testMode, setTestMode] = useState(_testMode);
             const [dismissedReminders, setDismissedReminders] = useState(() => {
                 try { return JSON.parse(localStorage.getItem('dismissed_reminders') || '{}'); } catch { return {}; }
@@ -5715,6 +5605,7 @@
             const handleCloseModal = () => {
                 setShowAddModal(false);
                 setEditExpense(null);
+                inboxReviewingRef.current = null; // clear inbox review tracking if modal dismissed
             };
 
             const handleSplitExpense = async (parentExpense, splitRows) => {
@@ -5873,6 +5764,17 @@
                         });
                     }
                     setTimeout(() => setConfirmationData(null), 10000);
+
+                    // If this save came from inbox review, mark the item as done
+                    if (inboxReviewingRef.current) {
+                        const reviewItem = inboxReviewingRef.current;
+                        inboxReviewingRef.current = null;
+                        try {
+                            await markInboxItem(reviewItem.rowIndex, 'done');
+                        } catch (e) {
+                            console.error('Failed to mark inbox item done:', e);
+                        }
+                    }
                 } catch (err) {
                     console.error('Save failed:', err);
                     setIsSaving(false);
@@ -6295,23 +6197,20 @@
                                         items={inboxItems}
                                         ocrCacheRef={ocrCacheRef}
                                         token={token}
-                                        userName={user?.name}
-                                        expenses={expenses}
                                         merchantAccountMap={merchantAccountMap}
-                                        onConfirm={async (item, expenseData) => {
-                                            try {
-                                                pushUndo(expenses);
-                                                setIsSaving(true);
-                                                await appendExpense(expenseData);
-                                                await markInboxItem(item.rowIndex, 'done');
-                                                setIsSaving(false);
-                                                setToast('Receipt saved!');
-                                                setTimeout(() => setToast(''), 3000);
-                                            } catch (err) {
-                                                setIsSaving(false);
-                                                setToast(err.message || 'Save failed');
-                                                setTimeout(() => setToast(''), 5000);
-                                            }
+                                        onReview={(item, prefill) => {
+                                            inboxReviewingRef.current = item;
+                                            setEditExpense({
+                                                _prefill: true,
+                                                merchant: prefill.merchant || '',
+                                                amount: prefill.amount || '',
+                                                date: prefill.date || new Date().toISOString().split('T')[0],
+                                                category: prefill.category || 'other',
+                                                txnType: prefill.txnType || 'charge',
+                                                account: prefill.account || '',
+                                                receipt: item.fileUrl || '',
+                                            });
+                                            setShowAddModal(true);
                                         }}
                                         onSkip={async (item) => {
                                             await markInboxItem(item.rowIndex, 'skipped');
