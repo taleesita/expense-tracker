@@ -3070,7 +3070,7 @@
                     onUpdate(editExpense.rowIndex, { ...editExpense, ...data });
                 } else {
                     if (isEdit) console.warn('Edit mode but no rowIndex — falling back to add. editExpense:', editExpense);
-                    onClose();
+                    if (!inboxMode) onClose();
                     onAdd(data);
                 }
             };
@@ -3204,7 +3204,7 @@
                             if (!driveFileId) return null;
                             return (
                                 <div className="mb-3 rounded-lg overflow-hidden border border-gray-200 bg-gray-50">
-                                    <div className="overflow-y-auto" style={{ maxHeight: '45vh' }}>
+                                    <div className="overflow-y-auto" style={{ maxHeight: '28vh' }}>
                                         <PdfPagePreviews driveFileId={driveFileId} token={token} maxPages={3} />
                                     </div>
                                     <div className="flex items-center justify-center px-3 py-2 border-t border-gray-100">
@@ -3612,7 +3612,7 @@
                         const rendered = [];
                         for (let i = 1; i <= numToRender; i++) {
                             const page = await pdf.getPage(i);
-                            const scale = 1.5;
+                            const scale = 1.0;
                             const viewport = page.getViewport({ scale });
                             const canvas = document.createElement('canvas');
                             canvas.width = viewport.width;
