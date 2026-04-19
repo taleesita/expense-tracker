@@ -5295,30 +5295,62 @@
                 runOcrBatch();
             }, [items, token]);
 
+            // Extract merchant hint from email subject
+            const merchantFromSubject = (subject) => {
+                if (!subject) return '';
+                // Strip "Fwd:", "Re:", etc.
+                let s = subject.replace(/^(Fwd?|Re|Fw):\s*/gi, '').trim();
+                // Known patterns: "Your X Order", "Order from X", "X Order Confirmation", "X Receipt"
+                const patterns = [
+                    /your\s+(.+?)\s+order/i,
+                    /order\s+(?:from|confirmation\s+from)\s+(.+?)(?:\s+#|\s+\d|$)/i,
+                    /(.+?)\s+(?:order|receipt|confirmation|invoice|payment|billing)/i,
+                    /(?:receipt|order|confirmation)\s+(?:from|for)\s+(.+?)(?:\s+#|\s+\d|$)/i,
+                ];
+                for (const pat of patterns) {
+                    const m = s.match(pat);
+                    if (m) {
+                        let name = m[1].replace(/\.com|\.net|\.org/gi, '').trim();
+                        // Remove order numbers and trailing noise
+                        name = name.replace(/\s*(#|number|no\.?)\s*\d+.*/i, '').trim();
+                        if (name.length >= 2 && name.length <= 40) return name;
+                    }
+                }
+                return '';
+            };
+
             // Pre-fill form when OCR result arrives or when navigating
             useEffect(() => {
                 if (!currentItem) return;
                 const ocr = ocrResults[currentItem.fileId] || ocrCacheRef.current[currentItem.fileId];
+                // Try to get merchant from email subject as a hint
+                const subjectMerchant = merchantFromSubject(currentItem.subject);
+
                 if (ocr) {
-                    setMerchant(ocr.merchant || '');
+                    // Use OCR merchant, but fall back to subject-derived merchant if OCR got garbage
+                    const ocrMerchantUsable = ocr.merchant && ocr.merchant.length >= 2 && !/^[^a-zA-Z]*$/.test(ocr.merchant);
+                    const finalMerchant = ocrMerchantUsable ? ocr.merchant : (subjectMerchant || ocr.merchant || '');
+                    setMerchant(finalMerchant);
                     setAmount(ocr.amount ? String(ocr.amount) : '');
                     setDate(ocr.date || currentItem.emailDate || new Date().toISOString().split('T')[0]);
-                    setCategory(ocr.category || 'other');
+                    setCategory(ocr.category || suggestCategory(finalMerchant) || 'other');
                     setTxnType(ocr.txnType || 'charge');
                     // Use OCR-suggested account if provided, otherwise suggest from merchant history
                     if (ocr.account) {
                         setAccount(ocr.account);
                     } else {
-                        const suggestedAcct = suggestAccountForMerchant(ocr.merchant, merchantAccountMap);
+                        const suggestedAcct = suggestAccountForMerchant(finalMerchant, merchantAccountMap);
                         setAccount(suggestedAcct || '');
                     }
                 } else {
-                    setMerchant('');
+                    // No OCR yet — use subject hint if available
+                    setMerchant(subjectMerchant || '');
                     setAmount('');
                     setDate(currentItem.emailDate || new Date().toISOString().split('T')[0]);
-                    setCategory('other');
+                    setCategory(subjectMerchant ? suggestCategory(subjectMerchant) : 'other');
                     setTxnType('charge');
-                    setAccount('');
+                    const suggestedAcct = subjectMerchant ? suggestAccountForMerchant(subjectMerchant, merchantAccountMap) : '';
+                    setAccount(suggestedAcct || '');
                 }
             }, [currentIndex, currentItem?.fileId, ocrResults]);
 
@@ -5386,23 +5418,31 @@
                         </span>
                     </div>
 
-                    {/* Large receipt thumbnail */}
-                    <div className="bg-gray-50 rounded-xl border border-gray-200 overflow-hidden mb-4" style={{ minHeight: 280 }}>
+                    {/* Large receipt thumbnail — tap to open in Drive */}
+                    <a
+                        href={currentItem.fileUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="block bg-gray-50 rounded-xl border border-gray-200 overflow-hidden mb-2 relative"
+                    >
                         <img
-                            src={thumbnailUrl}
+                            src={`https://drive.google.com/thumbnail?id=${currentItem.fileId}&sz=w1200`}
                             alt="Receipt"
                             className="w-full object-contain"
-                            style={{ maxHeight: 400, minHeight: 280 }}
+                            style={{ maxHeight: '55vh', minHeight: 200 }}
                             onError={(e) => {
                                 e.target.style.display = 'none';
-                                e.target.parentElement.innerHTML = '<div class="flex items-center justify-center h-64 text-gray-400 text-sm">Could not load preview</div>';
+                                e.target.parentElement.innerHTML = '<div class="flex items-center justify-center h-48 text-gray-400 text-sm">Could not load preview — tap to open in Drive</div>';
                             }}
                         />
-                    </div>
+                        <div className="absolute bottom-2 right-2 bg-black/50 text-white text-[10px] px-2 py-1 rounded-full flex items-center gap-1">
+                            <ExternalLinkIcon size={10} /> Open in Drive
+                        </div>
+                    </a>
 
                     {/* Subject line from email */}
                     <p className="text-xs text-gray-400 mb-3 truncate" title={currentItem.subject}>
-                        📧 {currentItem.subject}
+                        📧 {currentItem.subject.replace(/^Fwd?:\s*/i, '')}
                     </p>
 
                     {/* OCR status */}
@@ -6066,6 +6106,16 @@
                                 title="Quick add Metrocard $3"
                             >
                                 {mtaSaving ? (<><RefreshCwIcon size={14} className="animate-spin" /> MTA</>) : '🚇 MTA'}
+                            </button>
+                            <button
+                                onClick={() => setActiveTab('inbox')}
+                                className="relative p-2 bg-gray-100 rounded-lg text-gray-600 hover:bg-gray-200"
+                                title="Review inbox"
+                            >
+                                <InboxIcon size={18} />
+                                <span className={`absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] flex items-center justify-center rounded-full text-[10px] font-bold leading-none px-1 ${
+                                    inboxItems.length > 0 ? 'bg-red-500 text-white' : 'bg-gray-300 text-gray-600'
+                                }`}>{inboxItems.length}</span>
                             </button>
                             <button
                                 onClick={() => { setEditExpense(null); setShowAddModal(true); }}
