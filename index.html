@@ -1596,8 +1596,8 @@
                         { headers: { 'Authorization': `Bearer ${token}` } }
                     );
                     if (!resp.ok) {
-                        // Tab might not exist yet — that's fine
-                        console.log('Inbox tab fetch:', resp.status);
+                        const errText = await resp.text().catch(() => '');
+                        console.error('Inbox tab fetch failed:', resp.status, errText);
                         setInboxItems([]);
                         return;
                     }
@@ -5906,6 +5906,7 @@
                 const handleVisibility = () => {
                     if (document.visibilityState === 'visible' && token) {
                         fetchExpenses(true); // silent refresh
+                        fetchInbox(); // also refresh inbox items
                     }
                 };
                 document.addEventListener('visibilitychange', handleVisibility);
