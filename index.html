@@ -2821,7 +2821,17 @@
                             }
                         }
                         if (!amount && ocrResult.amount) setAmount(ocrResult.amount.toString());
-                        if (ocrResult.date) setDate(ocrResult.date);
+                        if (ocrResult.date) {
+                            // For scanned receipts, future dates are suspicious — use today instead
+                            const ocrDate = new Date(ocrResult.date + 'T00:00:00');
+                            const today = new Date();
+                            today.setHours(0, 0, 0, 0);
+                            if (ocrDate > today) {
+                                setDate(today.toISOString().split('T')[0]);
+                            } else {
+                                setDate(ocrResult.date);
+                            }
+                        }
                         if (ocrResult.category) setCategory(ocrResult.category);
                         if (ocrResult.txnType) setTxnType(ocrResult.txnType);
                         // Use OCR-suggested account if provided (e.g., ATM receipts), otherwise suggest from history
@@ -3382,7 +3392,7 @@
                                             className={`w-full border rounded-lg px-4 py-2.5 ${validationErrors.merchant ? 'border-red-500 border-2 bg-red-50 placeholder-red-400' : ''}`}
                                         />
                                         {showSuggestions && merchant.length >= 2 && (() => {
-                                            const matches = frequentMerchants.filter(m => m.toLowerCase().includes(merchant.toLowerCase()) && m.toLowerCase() !== merchant.toLowerCase());
+                                            const matches = frequentMerchants.filter(m => m.toLowerCase().includes(merchant.toLowerCase()));
                                             return matches.length > 0 ? (
                                                 <div className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-40 overflow-y-auto">
                                                     {matches.slice(0, 6).map((m, i) => (
@@ -5743,17 +5753,26 @@
             // Detect gibberish merchant names — random letters, too many consonants, etc.
             const isGibberishMerchant = (name) => {
                 if (!name || name.length < 2) return true;
-                const clean = name.replace(/[^a-zA-Z]/g, '').toLowerCase();
+                const trimmed = name.trim();
+                const clean = trimmed.replace(/[^a-zA-Z]/g, '').toLowerCase();
                 if (clean.length < 2) return true;
+                // Mostly digits — register/terminal info, not a merchant
+                const digitCount = trimmed.replace(/[^0-9]/g, '').length;
+                if (digitCount / trimmed.length > 0.35) return true;
+                // Too many "words" that are pure numbers (e.g., "a 5307951 AVL 3079")
+                const words = trimmed.split(/\s+/);
+                const numericWords = words.filter(w => /^\d+\.?\d*$/.test(w)).length;
+                if (words.length >= 3 && numericWords / words.length > 0.4) return true;
                 // Too many single-letter "words" (e.g., "a b c d e")
-                const words = name.trim().split(/\s+/);
                 const singleLetterWords = words.filter(w => w.replace(/[^a-zA-Z]/g, '').length <= 1).length;
                 if (words.length >= 3 && singleLetterWords / words.length > 0.5) return true;
                 // Consonant-heavy: real words have vowels. If <15% vowels, likely garbage
                 const vowels = clean.replace(/[^aeiou]/g, '').length;
                 if (clean.length >= 4 && vowels / clean.length < 0.15) return true;
-                // Common OCR garbage patterns: starts with punctuation/numbers followed by random chars
-                if (/^[^a-zA-Z]{2,}/.test(name.trim())) return true;
+                // Starts with non-letters (punctuation/numbers)
+                if (/^[^a-zA-Z]{2,}/.test(trimmed)) return true;
+                // Too long — real merchant names are rarely 50+ chars
+                if (trimmed.length > 50) return true;
                 return false;
             };
 
