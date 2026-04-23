@@ -2630,7 +2630,7 @@
             );
         };
 
-        const AddExpenseModal = ({ isOpen, onClose, onAdd, onUpdate, editExpense, token, userName, expenses: allExpenses, merchantAccountMap, reconnect, inboxMode, inboxProgress, onInboxSkip }) => {
+        const AddExpenseModal = ({ isOpen, onClose, onAdd, onUpdate, editExpense, token, userName, expenses: allExpenses, merchantAccountMap, reconnect, inboxMode, inboxProgress, inboxIsLast, onInboxSkip, onInboxClose }) => {
             const isEdit = !!editExpense && !editExpense._prefill;
             const [merchant, setMerchant] = useState('');
             const [amount, setAmount] = useState('');
@@ -2813,8 +2813,12 @@
                                 const knownNames = [...new Set((allExpenses || []).map(e => e.merchant).filter(Boolean))];
                                 corrected = fuzzyMatchMerchant(corrected, knownNames);
                             }
-                            setMerchant(corrected);
-                            if (!isEdit) setCategory(ocrResult.category || suggestCategory(corrected));
+                            if (!isGibberishMerchant(corrected)) {
+                                setMerchant(corrected);
+                                if (!isEdit) setCategory(ocrResult.category || suggestCategory(corrected));
+                            } else if (ocrResult.category) {
+                                if (!isEdit) setCategory(ocrResult.category);
+                            }
                         }
                         if (!amount && ocrResult.amount) setAmount(ocrResult.amount.toString());
                         if (ocrResult.date) setDate(ocrResult.date);
@@ -2921,7 +2925,7 @@
                                             const knownNames = [...new Set((allExpenses || []).map(e => e.merchant).filter(Boolean))];
                                             corrected = fuzzyMatchMerchant(corrected, knownNames);
                                         }
-                                        setMerchant(corrected);
+                                        if (!isGibberishMerchant(corrected)) setMerchant(corrected);
                                     }
                                     if (ocrResult.amount) setAmount(ocrResult.amount.toString());
                                     if (ocrResult.date) setDate(ocrResult.date);
@@ -3578,9 +3582,17 @@
                                     onClick={handleAdd}
                                     className="flex-1 bg-blue-600 text-white py-2 rounded-lg font-medium hover:bg-blue-700"
                                 >
-                                    {isEdit ? 'Save Changes' : inboxMode ? 'Save & Next' : 'Save'}
+                                    {isEdit ? 'Save Changes' : inboxMode ? (inboxIsLast ? 'Save & Close' : 'Save & Next') : 'Save'}
                                 </button>
                             </div>
+                            {inboxMode && (
+                                <button
+                                    onClick={onInboxClose}
+                                    className="w-full text-center text-xs text-gray-400 hover:text-gray-600 pt-2 pb-1"
+                                >
+                                    Done for now — finish the rest later
+                                </button>
+                            )}
                         </div>
                     </div>
                 </div>
@@ -5431,9 +5443,8 @@
 
                 if (ocr) {
                     const ocrMerchantClean = (ocr.merchant || '').replace(/^[\s.,;:!?]+/, '').trim();
-                    const ocrMerchantUsable = ocrMerchantClean.length >= 3 && /^[a-zA-Z]/.test(ocrMerchantClean);
-                    // Prefer subject-extracted merchant when available; fall back to OCR merchant
-                    finalMerchant = subjectMerchant || (ocrMerchantUsable ? ocrMerchantClean : '') || ocrMerchantClean;
+                    const ocrMerchantGood = !isGibberishMerchant(ocrMerchantClean);
+                    finalMerchant = subjectMerchant || (ocrMerchantGood ? ocrMerchantClean : '');
                     finalAmount = ocr.amount ? String(ocr.amount) : '';
                     finalDate = ocr.date || finalDate;
                     finalCategory = ocr.category || suggestCategory(finalMerchant) || 'other';
@@ -5729,6 +5740,23 @@
             };
 
             // Build prefill for an inbox item from OCR cache + subject merchant
+            // Detect gibberish merchant names — random letters, too many consonants, etc.
+            const isGibberishMerchant = (name) => {
+                if (!name || name.length < 2) return true;
+                const clean = name.replace(/[^a-zA-Z]/g, '').toLowerCase();
+                if (clean.length < 2) return true;
+                // Too many single-letter "words" (e.g., "a b c d e")
+                const words = name.trim().split(/\s+/);
+                const singleLetterWords = words.filter(w => w.replace(/[^a-zA-Z]/g, '').length <= 1).length;
+                if (words.length >= 3 && singleLetterWords / words.length > 0.5) return true;
+                // Consonant-heavy: real words have vowels. If <15% vowels, likely garbage
+                const vowels = clean.replace(/[^aeiou]/g, '').length;
+                if (clean.length >= 4 && vowels / clean.length < 0.15) return true;
+                // Common OCR garbage patterns: starts with punctuation/numbers followed by random chars
+                if (/^[^a-zA-Z]{2,}/.test(name.trim())) return true;
+                return false;
+            };
+
             const buildInboxPrefill = (item) => {
                 const ocr = ocrCacheRef.current[item.fileId];
                 const subjectMerchant = merchantFromSubject(item.subject);
@@ -5736,13 +5764,14 @@
                 let category = 'other', txnType = 'charge', account = '';
                 if (ocr) {
                     const ocrMerchantClean = (ocr.merchant || '').replace(/^[\s.,;:!?]+/, '').trim();
-                    const ocrMerchantUsable = ocrMerchantClean.length >= 3 && /^[a-zA-Z]/.test(ocrMerchantClean);
-                    merchant = subjectMerchant || (ocrMerchantUsable ? ocrMerchantClean : '') || ocrMerchantClean;
+                    const ocrMerchantGood = !isGibberishMerchant(ocrMerchantClean);
+                    // Prefer subject merchant; fall back to OCR only if it looks real
+                    merchant = subjectMerchant || (ocrMerchantGood ? ocrMerchantClean : '');
                     amount = ocr.amount ? String(ocr.amount) : '';
                     date = ocr.date || date;
-                    category = ocr.category || suggestCategory(merchant) || 'other';
+                    category = ocr.category || (merchant ? suggestCategory(merchant) : 'other') || 'other';
                     txnType = ocr.txnType || 'charge';
-                    account = ocr.account || suggestAccountForMerchant(merchant, merchantAccountMap) || '';
+                    account = ocr.account || (merchant ? suggestAccountForMerchant(merchant, merchantAccountMap) : '') || '';
                 } else {
                     merchant = subjectMerchant || '';
                     category = subjectMerchant ? suggestCategory(subjectMerchant) : 'other';
@@ -6427,7 +6456,15 @@
                         merchantAccountMap={merchantAccountMap}
                         reconnect={reconnect}
                         inboxMode={inboxModeActive}
-                        inboxProgress={inboxModeActive ? `${inboxIndexRef.current + 1} of ${inboxItems.length}` : ''}
+                        inboxProgress={inboxModeActive ? `${Math.min(inboxIndexRef.current + 1, inboxItems.length)} of ${inboxItems.length}` : ''}
+                        inboxIsLast={inboxModeActive && inboxIndexRef.current >= inboxItems.length - 1}
+                        onInboxClose={() => {
+                            setShowAddModal(false);
+                            setEditExpense(null);
+                            setInboxModeActive(false);
+                            inboxReviewingRef.current = null;
+                            inboxIndexRef.current = 0;
+                        }}
                         onInboxSkip={async () => {
                             if (inboxReviewingRef.current) {
                                 try {
