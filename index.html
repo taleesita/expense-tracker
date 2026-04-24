@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.7-apr23';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.8-apr24';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -315,6 +315,32 @@
             const parsed = new Date(dateStr);
             if (!isNaN(parsed)) return parsed.toISOString().split('T')[0];
             return new Date().toISOString().split('T')[0];
+        };
+
+        // Detect gibberish merchant names — random letters, too many consonants, etc.
+        const isGibberishMerchant = (name) => {
+            if (!name || name.length < 2) return true;
+            const trimmed = name.trim();
+            const clean = trimmed.replace(/[^a-zA-Z]/g, '').toLowerCase();
+            if (clean.length < 2) return true;
+            // Mostly digits — register/terminal info, not a merchant
+            const digitCount = trimmed.replace(/[^0-9]/g, '').length;
+            if (digitCount / trimmed.length > 0.35) return true;
+            // Too many "words" that are pure numbers (e.g., "a 5307951 AVL 3079")
+            const words = trimmed.split(/\s+/);
+            const numericWords = words.filter(w => /^\d+\.?\d*$/.test(w)).length;
+            if (words.length >= 3 && numericWords / words.length > 0.4) return true;
+            // Too many single-letter "words" (e.g., "a b c d e")
+            const singleLetterWords = words.filter(w => w.replace(/[^a-zA-Z]/g, '').length <= 1).length;
+            if (words.length >= 3 && singleLetterWords / words.length > 0.5) return true;
+            // Consonant-heavy: real words have vowels. If <15% vowels, likely garbage
+            const vowels = clean.replace(/[^aeiou]/g, '').length;
+            if (clean.length >= 4 && vowels / clean.length < 0.15) return true;
+            // Starts with non-letters (punctuation/numbers)
+            if (/^[^a-zA-Z]{2,}/.test(trimmed)) return true;
+            // Too long — real merchant names are rarely 50+ chars
+            if (trimmed.length > 50) return true;
+            return false;
         };
 
         // Balance anchors: one-time zero-out points per account
@@ -5772,32 +5798,6 @@
             };
 
             // Build prefill for an inbox item from OCR cache + subject merchant
-            // Detect gibberish merchant names — random letters, too many consonants, etc.
-            const isGibberishMerchant = (name) => {
-                if (!name || name.length < 2) return true;
-                const trimmed = name.trim();
-                const clean = trimmed.replace(/[^a-zA-Z]/g, '').toLowerCase();
-                if (clean.length < 2) return true;
-                // Mostly digits — register/terminal info, not a merchant
-                const digitCount = trimmed.replace(/[^0-9]/g, '').length;
-                if (digitCount / trimmed.length > 0.35) return true;
-                // Too many "words" that are pure numbers (e.g., "a 5307951 AVL 3079")
-                const words = trimmed.split(/\s+/);
-                const numericWords = words.filter(w => /^\d+\.?\d*$/.test(w)).length;
-                if (words.length >= 3 && numericWords / words.length > 0.4) return true;
-                // Too many single-letter "words" (e.g., "a b c d e")
-                const singleLetterWords = words.filter(w => w.replace(/[^a-zA-Z]/g, '').length <= 1).length;
-                if (words.length >= 3 && singleLetterWords / words.length > 0.5) return true;
-                // Consonant-heavy: real words have vowels. If <15% vowels, likely garbage
-                const vowels = clean.replace(/[^aeiou]/g, '').length;
-                if (clean.length >= 4 && vowels / clean.length < 0.15) return true;
-                // Starts with non-letters (punctuation/numbers)
-                if (/^[^a-zA-Z]{2,}/.test(trimmed)) return true;
-                // Too long — real merchant names are rarely 50+ chars
-                if (trimmed.length > 50) return true;
-                return false;
-            };
-
             const buildInboxPrefill = (item) => {
                 const ocr = ocrCacheRef.current[item.fileId];
                 const subjectMerchant = merchantFromSubject(item.subject);
