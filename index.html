@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.11-apr24';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.12-apr24';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -273,7 +273,7 @@
         };
 
         // Format money with commas
-        const fmt = (n) => Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        const fmt = (n) => { const v = isNaN(n) ? 0 : n; return Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
 
         // Fuzzy match: find closest known merchant name
         const levenshtein = (a, b) => {
@@ -579,7 +579,10 @@
                 });
             }
             return starting + expenses.reduce((sum, e) => {
-                return sum + (e.rawDeposit || 0) - (e.rawCharge || 0) - (e.fee || 0);
+                const dep = parseFloat(e.rawDeposit) || 0;
+                const chg = parseFloat(e.rawCharge) || 0;
+                const fee = parseFloat(e.fee) || 0;
+                return sum + dep - chg - fee;
             }, 0);
         };
 
