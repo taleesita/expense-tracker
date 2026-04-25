@@ -626,6 +626,8 @@
             'airbnb': 'travel',
         };
 
+        // Exchange rates: value = how many USD per 1 unit of foreign currency
+        // Fallback rates used until live rates load (or if fetch fails)
         const CURRENCIES = {
             'USD': 1,
             'EUR': 1.08,
@@ -638,6 +640,41 @@
             'MXN': 0.058,
             'BRL': 0.20,
         };
+
+        // Fetch live exchange rates from Frankfurter (free, no API key)
+        // Caches in localStorage for 12 hours to avoid redundant fetches
+        const RATES_CACHE_KEY = 'fx_rates_cache';
+        const RATES_CACHE_TTL = 12 * 60 * 60 * 1000; // 12 hours
+        const fetchLiveRates = async () => {
+            try {
+                // Check cache first
+                const cached = localStorage.getItem(RATES_CACHE_KEY);
+                if (cached) {
+                    const { rates, timestamp } = JSON.parse(cached);
+                    if (Date.now() - timestamp < RATES_CACHE_TTL) {
+                        Object.assign(CURRENCIES, rates);
+                        console.log('FX rates loaded from cache:', rates);
+                        return;
+                    }
+                }
+                // Fetch from Frankfurter: returns rates relative to USD (e.g., USD→JPY = 149)
+                const codes = Object.keys(CURRENCIES).filter(c => c !== 'USD').join(',');
+                const resp = await fetch(`https://api.frankfurter.dev/latest?base=USD&symbols=${codes}`);
+                if (!resp.ok) throw new Error(`FX API ${resp.status}`);
+                const data = await resp.json();
+                // Invert: we need "1 foreign unit = ? USD"
+                const liveRates = { 'USD': 1 };
+                for (const [code, perUSD] of Object.entries(data.rates || {})) {
+                    if (perUSD > 0) liveRates[code] = Math.round((1 / perUSD) * 1e8) / 1e8;
+                }
+                Object.assign(CURRENCIES, liveRates);
+                localStorage.setItem(RATES_CACHE_KEY, JSON.stringify({ rates: liveRates, timestamp: Date.now() }));
+                console.log('FX rates updated from Frankfurter:', liveRates);
+            } catch (err) {
+                console.log('FX rate fetch failed, using fallback rates:', err.message);
+            }
+        };
+        fetchLiveRates();
 
         // ============ QUARTERLY REVIEW CONSTANTS ============
         const QR_SHEET_ID = '17auoyzXlLJDtT7-P7JSdJG6-ozv5-jxKFG55cx7xxP0';
@@ -2406,7 +2443,100 @@
                         txnType = 'deposit';
                     }
 
-                    console.log('OCR parsed:', { merchant, amount, date, isPaystub, isATMReceipt, txnType });
+                    // ---- FOREIGN CURRENCY DETECTION ----
+                    // Detect foreign currency symbols/codes and amounts.
+                    // If both USD and foreign are found, prefer USD (amount already extracted above).
+                    // If only foreign is found, set originalCurrency + originalAmount and auto-convert.
+                    let detectedCurrency = null;
+                    let foreignAmount = 0;
+
+                    // Currency symbol → code mapping
+                    const currencySymbols = {
+                        '¥': 'JPY', '￥': 'JPY', '€': 'EUR', '£': 'GBP',
+                        '₪': 'ILS', 'C$': 'CAD', 'A$': 'AUD', 'CHF': 'CHF',
+                        'MX$': 'MXN', 'R$': 'BRL',
+                    };
+                    // Currency code patterns (e.g., "JPY 1,500" or "1,500 JPY")
+                    const currencyCodes = ['JPY', 'EUR', 'GBP', 'ILS', 'CAD', 'AUD', 'CHF', 'MXN', 'BRL'];
+
+                    // Check if USD amounts are present ($ symbol is ambiguous — could be USD, CAD, AUD, etc.)
+                    const hasUSDAmount = /\$\s*\d/.test(text) || /USD/i.test(text);
+
+                    if (!isPaystub && !isATMReceipt) {
+                        // Strategy 1: Symbol-based detection (¥1,500 or 1,500¥)
+                        for (const [sym, code] of Object.entries(currencySymbols)) {
+                            // Symbol before amount: ¥1,500 or ¥ 1,500
+                            const symEsc = sym.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                            const beforeRe = new RegExp(symEsc + '\\s*(\\d{1,3}(?:[,.]\\d{3})*(?:\\.\\d{1,2})?|\\d+(?:\\.\\d{1,2})?)', 'g');
+                            const afterRe = new RegExp('(\\d{1,3}(?:[,.]\\d{3})*(?:\\.\\d{1,2})?|\\d+(?:\\.\\d{1,2})?)\\s*' + symEsc, 'g');
+
+                            const matches = [...text.matchAll(beforeRe), ...text.matchAll(afterRe)];
+                            if (matches.length > 0) {
+                                // Pick the largest amount (likely the total)
+                                let best = 0;
+                                for (const m of matches) {
+                                    let raw = m[1].replace(/,/g, '');
+                                    // For JPY, amounts like "1.500" use period as thousands separator
+                                    if (code === 'JPY' && /^\d+\.\d{3}$/.test(raw)) {
+                                        raw = raw.replace('.', '');
+                                    }
+                                    const val = parseFloat(raw);
+                                    if (val > best) best = val;
+                                }
+                                if (best > 0) {
+                                    detectedCurrency = code;
+                                    foreignAmount = best;
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Strategy 2: Currency code near amount (e.g., "JPY 1,500" or "1,500 JPY" or "Total: 1500 (JPY)")
+                        if (!detectedCurrency) {
+                            for (const code of currencyCodes) {
+                                const codeBeforeRe = new RegExp('\\b' + code + '\\s*(\\d{1,3}(?:[,.]\\d{3})*(?:\\.\\d{1,2})?|\\d+(?:\\.\\d{1,2})?)', 'gi');
+                                const codeAfterRe = new RegExp('(\\d{1,3}(?:[,.]\\d{3})*(?:\\.\\d{1,2})?|\\d+(?:\\.\\d{1,2})?)\\s*' + code + '\\b', 'gi');
+
+                                const matches = [...text.matchAll(codeBeforeRe), ...text.matchAll(codeAfterRe)];
+                                if (matches.length > 0) {
+                                    let best = 0;
+                                    for (const m of matches) {
+                                        let raw = m[1].replace(/,/g, '');
+                                        if (code === 'JPY' && /^\d+\.\d{3}$/.test(raw)) raw = raw.replace('.', '');
+                                        const val = parseFloat(raw);
+                                        if (val > best) best = val;
+                                    }
+                                    if (best > 0) {
+                                        detectedCurrency = code;
+                                        foreignAmount = best;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        // If we found foreign currency AND USD, prefer USD (already in `amount`)
+                        // If we found foreign currency but NO USD, use foreign + auto-convert
+                        if (detectedCurrency && foreignAmount > 0) {
+                            if (hasUSDAmount && amount > 0) {
+                                // Both present — keep USD amount, note foreign for display
+                                console.log(`OCR currency: found ${detectedCurrency} ${foreignAmount} AND USD $${amount}, keeping USD`);
+                                detectedCurrency = null; // don't override
+                            } else {
+                                // Only foreign currency — auto-convert
+                                const rate = CURRENCIES[detectedCurrency];
+                                if (rate) {
+                                    amount = Math.round(foreignAmount * rate * 100) / 100;
+                                    console.log(`OCR currency: ${detectedCurrency} ${foreignAmount} → USD $${amount} (rate: ${rate})`);
+                                } else {
+                                    console.log(`OCR currency: ${detectedCurrency} detected but no rate available`);
+                                    detectedCurrency = null;
+                                }
+                            }
+                        }
+                    }
+
+                    console.log('OCR parsed:', { merchant, amount, date, isPaystub, isATMReceipt, txnType, detectedCurrency, foreignAmount });
 
                     const cat = isPaystub ? 'work_income'
                         : isATMReceipt ? ((amount === 2700 || amount === 3000) ? 'nutbear' : 'other')
@@ -2418,7 +2548,8 @@
                         category: cat,
                         txnType: isATMReceipt ? 'charge' : txnType,
                         account: isATMReceipt && /capital\s*one/i.test(text) ? 'cap1_jcheck' : undefined,
-
+                        originalCurrency: detectedCurrency || undefined,
+                        originalAmount: detectedCurrency ? foreignAmount : undefined,
                         fullText: text
                     };
                 } catch (err) {
@@ -2969,6 +3100,11 @@
                             }
                         }
                         if (!amount && ocrResult.amount) setAmount(ocrResult.amount.toString());
+                        // Pre-fill foreign currency if detected
+                        if (ocrResult.originalCurrency && ocrResult.originalAmount) {
+                            setOriginalCurrency(ocrResult.originalCurrency);
+                            setOriginalAmount(ocrResult.originalAmount.toString());
+                        }
                         if (ocrResult.date) {
                             // For scanned receipts, future dates are suspicious — use today instead
                             const ocrDate = new Date(ocrResult.date + 'T00:00:00');
