@@ -355,6 +355,7 @@
         const BALANCE_ANCHORS = {
             'united_chase': { afterDate: '2026-03-20', startingBalance: 0 },
             'cap1_cc': { afterDate: '2026-03-20', startingBalance: 0 },
+            'reserve_chase': { afterDate: '2026-04-25', startingBalance: 0 },
         };
 
         // ============ RECURRING TRANSACTIONS ============
@@ -4112,9 +4113,10 @@
                 onLockItems(unlockedReconciled.map(e => e.rowIndex));
             };
 
+            const clearableItems = [...unlockedReconciled, ...pendingExpenses];
             const handleClear = () => {
-                if (unlockedReconciled.length === 0) return;
-                onClearUnlocked(unlockedReconciled.map(e => e.rowIndex));
+                if (clearableItems.length === 0) return;
+                onClearUnlocked(clearableItems.map(e => e.rowIndex));
             };
 
             if (!account) return null;
@@ -4150,20 +4152,24 @@
                                 {unlockedReconciled.length > 0 && <span className="text-green-600">{unlockedReconciled.length} unlocked</span>}
                             </div>
                         )}
-                        {unlockedReconciled.length > 0 && (
+                        {(unlockedReconciled.length > 0 || clearableItems.length > 0) && (
                             <div className="flex gap-2">
-                                <button
-                                    onClick={handleLock}
-                                    className="flex-1 bg-amber-100 text-amber-700 py-2 rounded-lg font-medium hover:bg-amber-200 text-sm flex items-center justify-center gap-1.5"
-                                >
-                                    <LockIcon size={14} /> Lock {unlockedReconciled.length}
-                                </button>
-                                <button
-                                    onClick={handleClear}
-                                    className="flex-1 bg-red-100 text-red-700 py-2 rounded-lg font-medium hover:bg-red-200 text-sm"
-                                >
-                                    Clear {unlockedReconciled.length}
-                                </button>
+                                {unlockedReconciled.length > 0 && (
+                                    <button
+                                        onClick={handleLock}
+                                        className="flex-1 bg-amber-100 text-amber-700 py-2 rounded-lg font-medium hover:bg-amber-200 text-sm flex items-center justify-center gap-1.5"
+                                    >
+                                        <LockIcon size={14} /> Lock {unlockedReconciled.length}
+                                    </button>
+                                )}
+                                {clearableItems.length > 0 && (
+                                    <button
+                                        onClick={handleClear}
+                                        className="flex-1 bg-red-100 text-red-700 py-2 rounded-lg font-medium hover:bg-red-200 text-sm"
+                                    >
+                                        Clear {clearableItems.length}
+                                    </button>
+                                )}
                             </div>
                         )}
                     </div>
