@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.10-apr24';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.11-apr24';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -738,6 +738,12 @@
                 <circle cx="12" cy="12" r="10"></circle>
             </svg>
         );
+        const ClockIcon = ({ size = 24, className = '' }) => (
+            <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+                <circle cx="12" cy="12" r="10"></circle>
+                <polyline points="12 6 12 12 16 14"></polyline>
+            </svg>
+        );
         const SearchIcon = ({ size = 24, className = '' }) => (
             <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
                 <circle cx="11" cy="11" r="8"></circle>
@@ -1335,7 +1341,27 @@
                             reconciled: (() => {
                                 // Key by timestamp+merchant for stable identity across row shifts
                                 const recKey = 'rec_' + btoa(unescape(encodeURIComponent((row[0] || '') + '|' + (row[3] || '')))).slice(0, 24);
-                                try { return JSON.parse(localStorage.getItem(recKey)) || false; } catch { return false; }
+                                try {
+                                    const val = localStorage.getItem(recKey);
+                                    if (!val) return false;
+                                    const parsed = JSON.parse(val);
+                                    // Backward compat: old boolean true → 'reconciled'
+                                    if (parsed === true) return true;
+                                    if (parsed === 'reconciled') return true;
+                                    return false;
+                                } catch { return false; }
+                            })(),
+                            reconcileStatus: (() => {
+                                // 'reconciled', 'pending', or '' (empty/unreconciled)
+                                const recKey = 'rec_' + btoa(unescape(encodeURIComponent((row[0] || '') + '|' + (row[3] || '')))).slice(0, 24);
+                                try {
+                                    const val = localStorage.getItem(recKey);
+                                    if (!val) return '';
+                                    const parsed = JSON.parse(val);
+                                    if (parsed === true || parsed === 'reconciled') return 'reconciled';
+                                    if (parsed === 'pending') return 'pending';
+                                    return '';
+                                } catch { return ''; }
                             })(),
                             reconciledLocked: (() => {
                                 const recKey = 'rec_locked_' + btoa(unescape(encodeURIComponent((row[0] || '') + '|' + (row[3] || '')))).slice(0, 24);
@@ -2536,7 +2562,7 @@
 
         // ============ MAIN COMPONENTS ============
 
-        const ExpenseRow = ({ expense, onDelete, onUpdate, onReconcile, showReconcile, onEdit, onSplit, hideAccount = false, showDateSeparator = false, isSplitChild = false, isDeleting = false }) => {
+        const ExpenseRow = ({ expense, onDelete, onUpdate, onReconcile, showReconcile, onEdit, onSplit, hideAccount = false, showDateSeparator = false, isSplitChild = false, isDeleting = false, sortMode = 'purchase', dateSeparatorLabel = '' }) => {
             const category = getCategoryById(expense.category);
             const account = getAccountById(expense.account);
             const isPaymentOrTransfer = expense.category === 'card_payment' || expense.category === 'transfer';
@@ -2546,7 +2572,7 @@
                 <>
                 {showDateSeparator && (
                     <div className="bg-gray-50 px-3 py-1.5 border-b-2 border-gray-200">
-                        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">{expense.date || expense.timestamp}</span>
+                        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">{dateSeparatorLabel || expense.date || expense.timestamp}</span>
                     </div>
                 )}
                 <div className={`flex items-center gap-2.5 py-2.5 border-b border-gray-100 hover:bg-gray-50 group cursor-pointer ${isSplitChild ? 'pl-8 pr-3 bg-gray-50/50' : 'px-3'}`} onClick={() => onEdit && onEdit(expense)}>
@@ -2572,6 +2598,18 @@
                         <div className="text-[11px] text-gray-400 flex items-center gap-1.5 mt-0.5">
                             {!hideAccount && account && <span className="font-medium" style={{ color: account.color }}>{account.shortName}</span>}
                         </div>
+                        {sortMode === 'added' && expense.timestamp && (
+                            <div className="text-[10px] text-gray-400 mt-0.5 flex gap-3">
+                                <span>Purchased: {expense.date || '—'}</span>
+                                <span>Added: {(() => {
+                                    try {
+                                        const d = new Date(expense.timestamp);
+                                        return d.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' }) + ' ' +
+                                               d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+                                    } catch { return expense.timestamp; }
+                                })()}</span>
+                            </div>
+                        )}
                     </div>
                     <div className="text-right flex-shrink-0">
                         <span className={`font-semibold text-sm ${isPaymentOrTransfer ? 'text-gray-500' : isInflow ? 'text-green-600' : 'text-red-600'}`}>
@@ -2588,14 +2626,17 @@
                                 </div>
                             );
                         }
-                        // Unlocked = can toggle
+                        // 3-state: empty → reconciled → pending → empty
+                        const status = expense.reconcileStatus || '';
                         return (
                             <button
-                                onClick={(e) => { e.stopPropagation(); onReconcile(expense.rowIndex, !expense.reconciled); }}
+                                onClick={(e) => { e.stopPropagation(); onReconcile(expense.rowIndex); }}
                                 className="ml-1 flex-shrink-0"
                             >
-                                {expense.reconciled ? (
+                                {status === 'reconciled' ? (
                                     <CheckCircleIcon size={18} className="text-green-600" />
+                                ) : status === 'pending' ? (
+                                    <ClockIcon size={18} className="text-amber-500" />
                                 ) : (
                                     <CircleIcon size={18} className="text-gray-300" />
                                 )}
@@ -2636,13 +2677,29 @@
             );
         };
 
-        // Helper: get date key for grouping
-        const getDateKey = (expense) => {
+        // Helper: get date key for grouping — supports purchase date or added date
+        const getDateKey = (expense, sortMode = 'purchase') => {
+            if (sortMode === 'added' && expense.timestamp) {
+                try {
+                    const d = new Date(expense.timestamp);
+                    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+                } catch { /* fallthrough */ }
+            }
             return parseDateToISO(expense.date || expense.timestamp);
+        };
+        // Format a date key into a human-readable label for date separators
+        const formatDateLabel = (expense, sortMode = 'purchase') => {
+            if (sortMode === 'added' && expense.timestamp) {
+                try {
+                    const d = new Date(expense.timestamp);
+                    return 'Added ' + d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+                } catch { /* fallthrough */ }
+            }
+            return expense.date || expense.timestamp;
         };
 
         // Renders a single expense or a split group (header + indented children)
-        const ExpenseOrSplitGroup = ({ item, onDelete, onUpdate, onReconcile, showReconcile, onEdit, onSplit, hideAccount, showDateSeparator, deletingRowIndex }) => {
+        const ExpenseOrSplitGroup = ({ item, onDelete, onUpdate, onReconcile, showReconcile, onEdit, onSplit, hideAccount, showDateSeparator, deletingRowIndex, sortMode = 'purchase', dateSeparatorLabel = '' }) => {
             if (item._isSplitHeader) {
                 const category = getCategoryById(item.category);
                 const account = getAccountById(item.account);
@@ -2652,7 +2709,7 @@
                     <>
                         {showDateSeparator && (
                             <div className="bg-gray-50 px-3 py-1.5 border-b-2 border-gray-200">
-                                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">{item.date || item.timestamp}</span>
+                                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">{dateSeparatorLabel || item.date || item.timestamp}</span>
                             </div>
                         )}
                         <div className="flex items-center gap-2.5 py-2.5 px-3 border-b border-gray-100 bg-purple-50/30">
@@ -2686,6 +2743,7 @@
                                 hideAccount={hideAccount}
                                 isSplitChild={true}
                                 isDeleting={deletingRowIndex === child.rowIndex}
+                                sortMode={sortMode}
                             />
                         ))}
                     </>
@@ -2703,6 +2761,8 @@
                     hideAccount={hideAccount}
                     showDateSeparator={showDateSeparator}
                     isDeleting={deletingRowIndex === item.rowIndex}
+                    sortMode={sortMode}
+                    dateSeparatorLabel={dateSeparatorLabel}
                 />
             );
         };
@@ -3958,6 +4018,9 @@
             const accountExpenses = expenses.filter(e => e.account === accountId);
             const displayExpenses = accountExpenses.filter(e => !e._balanceOnly); // exclude balance-only rows from UI
             const [searchTerm, setSearchTerm] = useState('');
+            const [reconcileFilter, setReconcileFilter] = useState('all'); // all, unreconciled, pending, reconciled
+            const [sortMode, setSortMode] = useState('purchase'); // purchase, added
+            const [showSortPopover, setShowSortPopover] = useState(false);
 
             // Only count 2026+ expenses for reconciliation progress tally
             const recentExpenses = displayExpenses.filter(e => {
@@ -3965,28 +4028,50 @@
                 return d >= '2026-01-01';
             });
             const lockedExpenses = recentExpenses.filter(e => e.reconciledLocked);
-            const unlockedReconciled = recentExpenses.filter(e => e.reconciled && !e.reconciledLocked);
-            const unlockedUnreconciled = recentExpenses.filter(e => !e.reconciled && !e.reconciledLocked);
+            const unlockedReconciled = recentExpenses.filter(e => e.reconcileStatus === 'reconciled' && !e.reconciledLocked);
+            const unlockedUnreconciled = recentExpenses.filter(e => !e.reconcileStatus && !e.reconciledLocked);
+            const pendingExpenses = recentExpenses.filter(e => e.reconcileStatus === 'pending' && !e.reconciledLocked);
             const totalReconciled = lockedExpenses.length + unlockedReconciled.length;
 
+            // Balance excluding pending items
+            const pendingAccountExpenses = accountExpenses.filter(e => e.reconcileStatus === 'pending');
+            const hasPending = pendingAccountExpenses.length > 0;
+            const pendingAmount = pendingAccountExpenses.reduce((sum, e) => sum + (e.rawDeposit || 0) - (e.rawCharge || 0) - (e.fee || 0), 0);
+            const balanceExclPending = total - pendingAmount;
+
             const filteredExpenses = displayExpenses.filter(e => {
+                // Reconcile status filter
+                if (reconcileFilter === 'unreconciled' && (e.reconcileStatus || e.reconciledLocked)) return false;
+                if (reconcileFilter === 'pending' && e.reconcileStatus !== 'pending') return false;
+                if (reconcileFilter === 'reconciled' && e.reconcileStatus !== 'reconciled' && !e.reconciledLocked) return false;
+                // Search filter
                 if (!searchTerm) return true;
                 const q = searchTerm.toLowerCase();
                 return e.merchant.toLowerCase().includes(q) ||
                     String(e.amount).includes(q) ||
                     (e.category && e.category.toLowerCase().includes(q)) ||
                     (e.date && e.date.includes(q));
+            }).sort((a, b) => {
+                if (sortMode === 'added') {
+                    // Sort by timestamp (date added) descending
+                    return (b.timestamp || '').localeCompare(a.timestamp || '');
+                }
+                // Default: sort by purchase date descending, then by timestamp as tiebreaker
+                const da = parseDateToISO(a.date || a.timestamp);
+                const db = parseDateToISO(b.date || b.timestamp);
+                if (da !== db) return db.localeCompare(da);
+                return (b.timestamp || '').localeCompare(a.timestamp || '');
             });
             const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
-            // Reset visible count when search or account changes
-            const prevAcctSearch = React.useRef(searchTerm + accountId);
+            // Reset visible count when search, account, filter, or sort changes
+            const prevAcctSearch = React.useRef(searchTerm + accountId + reconcileFilter + sortMode);
             React.useEffect(() => {
-                const key = searchTerm + accountId;
+                const key = searchTerm + accountId + reconcileFilter + sortMode;
                 if (prevAcctSearch.current !== key) {
                     setVisibleCount(PAGE_SIZE);
                     prevAcctSearch.current = key;
                 }
-            }, [searchTerm, accountId]);
+            }, [searchTerm, accountId, reconcileFilter, sortMode]);
             const visibleExpenses = filteredExpenses.slice(0, visibleCount);
             const hasMore = filteredExpenses.length > visibleCount;
 
@@ -4012,7 +4097,10 @@
                         <div className="flex justify-between items-center mb-2">
                             <h3 className="font-bold text-lg">{account.name}</h3>
                         </div>
-                        <div className={`text-2xl font-bold mb-3 ${isCreditCard ? (total < 0 ? 'text-red-600' : 'text-green-600') : (total >= 0 ? 'text-green-600' : 'text-red-600')}`}>${fmt(total)}</div>
+                        <div className={`text-2xl font-bold ${hasPending ? 'mb-1' : 'mb-3'} ${isCreditCard ? (total < 0 ? 'text-red-600' : 'text-green-600') : (total >= 0 ? 'text-green-600' : 'text-red-600')}`}>${fmt(total)}</div>
+                        {hasPending && (
+                            <div className="text-sm text-amber-600 mb-3">${fmt(balanceExclPending)} excl. {pendingExpenses.length} pending</div>
+                        )}
                         <div className="w-full bg-gray-200 rounded-full h-2 mb-2">
                             <div
                                 className="h-2 rounded-full transition-all"
@@ -4025,7 +4113,7 @@
                             />
                         </div>
                         <div className="text-sm text-gray-600 mb-1">
-                            {totalReconciled} of {recentExpenses.length} reconciled (2026)
+                            {totalReconciled} of {recentExpenses.length} reconciled{pendingExpenses.length > 0 ? ` · ${pendingExpenses.length} pending` : ''} (2026)
                         </div>
                         {(lockedExpenses.length > 0 || unlockedReconciled.length > 0) && (
                             <div className="text-xs text-gray-400 mb-3">
@@ -4063,6 +4151,52 @@
                         />
                     </div>
 
+                    {/* Reconcile filter pills + Sort toggle */}
+                    <div className="flex items-center justify-between">
+                        <div className="flex gap-1.5 flex-wrap">
+                            {['all', 'unreconciled', 'pending', 'reconciled'].map(f => (
+                                <button
+                                    key={f}
+                                    onClick={() => setReconcileFilter(f)}
+                                    className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
+                                        reconcileFilter === f
+                                            ? 'bg-blue-100 text-blue-700 border border-blue-300'
+                                            : 'bg-gray-100 text-gray-500 border border-gray-200 hover:bg-gray-200'
+                                    }`}
+                                >
+                                    {f === 'all' ? 'All' : f.charAt(0).toUpperCase() + f.slice(1)}
+                                </button>
+                            ))}
+                        </div>
+                        <div className="relative">
+                            <button
+                                onClick={() => setShowSortPopover(!showSortPopover)}
+                                className="px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-600 border border-gray-200 hover:bg-gray-200 transition-colors whitespace-nowrap"
+                            >
+                                Sort: {sortMode === 'purchase' ? 'Purchase date' : 'Date added'}
+                            </button>
+                            {showSortPopover && (
+                                <>
+                                    <div className="fixed inset-0 z-40" onClick={() => setShowSortPopover(false)} />
+                                    <div className="absolute right-0 top-8 z-50 bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-[150px]">
+                                        <button
+                                            onClick={() => { setSortMode('purchase'); setShowSortPopover(false); }}
+                                            className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-50 ${sortMode === 'purchase' ? 'text-blue-600 font-medium' : 'text-gray-700'}`}
+                                        >
+                                            Purchase date
+                                        </button>
+                                        <button
+                                            onClick={() => { setSortMode('added'); setShowSortPopover(false); }}
+                                            className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-50 ${sortMode === 'added' ? 'text-blue-600 font-medium' : 'text-gray-700'}`}
+                                        >
+                                            Date added
+                                        </button>
+                                    </div>
+                                </>
+                            )}
+                        </div>
+                    </div>
+
                     <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
                         {filteredExpenses.length === 0 ? (
                             <div className="p-4 text-center text-gray-500">No expenses</div>
@@ -4079,7 +4213,9 @@
                                         onSplit={onSplit}
                                         showReconcile={true}
                                         hideAccount={true}
-                                        showDateSeparator={idx === 0 || getDateKey(item) !== getDateKey(arr[idx - 1])}
+                                        showDateSeparator={idx === 0 || getDateKey(item, sortMode) !== getDateKey(arr[idx - 1], sortMode)}
+                                        dateSeparatorLabel={formatDateLabel(item, sortMode)}
+                                        sortMode={sortMode}
                                         deletingRowIndex={deletingRowIndex}
                                     />
                                 ))}
@@ -5314,26 +5450,41 @@
 
         const AllTab = ({ expenses, onDelete, onUpdate, onEdit, onSplit, deletingRowIndex }) => {
             const [searchTerm, setSearchTerm] = useState('');
+            const [reconcileFilter, setReconcileFilter] = useState('all');
+            const [sortMode, setSortMode] = useState('purchase');
+            const [showSortPopover, setShowSortPopover] = useState(false);
             const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
 
             const filtered = expenses.filter(e => {
                 if (e._balanceOnly) return false;
+                if (reconcileFilter === 'unreconciled' && (e.reconcileStatus || e.reconciledLocked)) return false;
+                if (reconcileFilter === 'pending' && e.reconcileStatus !== 'pending') return false;
+                if (reconcileFilter === 'reconciled' && e.reconcileStatus !== 'reconciled' && !e.reconciledLocked) return false;
                 if (!searchTerm) return true;
                 const q = searchTerm.toLowerCase();
                 return e.merchant.toLowerCase().includes(q) ||
                     (e.category && e.category.toLowerCase().includes(q)) ||
                     String(e.amount).includes(q) ||
                     (e.date && e.date.includes(q));
+            }).sort((a, b) => {
+                if (sortMode === 'added') {
+                    return (b.timestamp || '').localeCompare(a.timestamp || '');
+                }
+                const da = parseDateToISO(a.date || a.timestamp);
+                const db = parseDateToISO(b.date || b.timestamp);
+                if (da !== db) return db.localeCompare(da);
+                return (b.timestamp || '').localeCompare(a.timestamp || '');
             });
 
-            // Reset visible count when search changes
-            const prevSearch = React.useRef(searchTerm);
+            // Reset visible count when search, filter, or sort changes
+            const prevSearch = React.useRef(searchTerm + reconcileFilter + sortMode);
             React.useEffect(() => {
-                if (prevSearch.current !== searchTerm) {
+                const key = searchTerm + reconcileFilter + sortMode;
+                if (prevSearch.current !== key) {
                     setVisibleCount(PAGE_SIZE);
-                    prevSearch.current = searchTerm;
+                    prevSearch.current = key;
                 }
-            }, [searchTerm]);
+            }, [searchTerm, reconcileFilter, sortMode]);
 
             const visible = filtered.slice(0, visibleCount);
             const hasMore = filtered.length > visibleCount;
@@ -5353,6 +5504,53 @@
                             <span className="text-xs text-gray-400 self-center whitespace-nowrap">{filtered.length}</span>
                         )}
                     </div>
+
+                    {/* Reconcile filter pills + Sort toggle */}
+                    <div className="flex items-center justify-between px-3 py-2 bg-gray-50 border-b border-gray-200">
+                        <div className="flex gap-1.5 flex-wrap">
+                            {['all', 'unreconciled', 'pending', 'reconciled'].map(f => (
+                                <button
+                                    key={f}
+                                    onClick={() => setReconcileFilter(f)}
+                                    className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
+                                        reconcileFilter === f
+                                            ? 'bg-blue-100 text-blue-700 border border-blue-300'
+                                            : 'bg-gray-100 text-gray-500 border border-gray-200 hover:bg-gray-200'
+                                    }`}
+                                >
+                                    {f === 'all' ? 'All' : f.charAt(0).toUpperCase() + f.slice(1)}
+                                </button>
+                            ))}
+                        </div>
+                        <div className="relative">
+                            <button
+                                onClick={() => setShowSortPopover(!showSortPopover)}
+                                className="px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-600 border border-gray-200 hover:bg-gray-200 transition-colors whitespace-nowrap"
+                            >
+                                Sort: {sortMode === 'purchase' ? 'Purchase date' : 'Date added'}
+                            </button>
+                            {showSortPopover && (
+                                <>
+                                    <div className="fixed inset-0 z-40" onClick={() => setShowSortPopover(false)} />
+                                    <div className="absolute right-0 top-8 z-50 bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-[150px]">
+                                        <button
+                                            onClick={() => { setSortMode('purchase'); setShowSortPopover(false); }}
+                                            className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-50 ${sortMode === 'purchase' ? 'text-blue-600 font-medium' : 'text-gray-700'}`}
+                                        >
+                                            Purchase date
+                                        </button>
+                                        <button
+                                            onClick={() => { setSortMode('added'); setShowSortPopover(false); }}
+                                            className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-50 ${sortMode === 'added' ? 'text-blue-600 font-medium' : 'text-gray-700'}`}
+                                        >
+                                            Date added
+                                        </button>
+                                    </div>
+                                </>
+                            )}
+                        </div>
+                    </div>
+
                     <div className="bg-white border border-gray-200 overflow-hidden">
                         {filtered.length === 0 ? (
                             <div className="p-4 text-center text-gray-500">No expenses</div>
@@ -5367,7 +5565,9 @@
                                         onEdit={onEdit}
                                         onSplit={onSplit}
                                         showReconcile={false}
-                                        showDateSeparator={idx === 0 || getDateKey(item) !== getDateKey(arr[idx - 1])}
+                                        showDateSeparator={idx === 0 || getDateKey(item, sortMode) !== getDateKey(arr[idx - 1], sortMode)}
+                                        dateSeparatorLabel={formatDateLabel(item, sortMode)}
+                                        sortMode={sortMode}
                                         deletingRowIndex={deletingRowIndex}
                                     />
                                 ))}
@@ -6204,15 +6404,23 @@
                 }
             };
 
-            const handleReconcile = (rowIndex, reconciled) => {
+            // 3-state cycle: empty → reconciled → pending → empty
+            const handleReconcile = (rowIndex) => {
                 const expense = expenses.find(e => e.rowIndex === rowIndex);
                 if (expense) {
                     pushUndo(expenses);
-                    // Save reconcile state to localStorage keyed by stable identity
                     const key = expense._recKey;
-                    try { localStorage.setItem('rec_' + key, JSON.stringify(reconciled)); } catch {}
-                    // Update in-memory state instantly — no network call needed
-                    setExpenses(prev => prev.map(e => e.rowIndex === rowIndex ? { ...e, reconciled } : e));
+                    const current = expense.reconcileStatus || '';
+                    let next;
+                    if (current === '') next = 'reconciled';
+                    else if (current === 'reconciled') next = 'pending';
+                    else next = ''; // pending → empty
+                    try { localStorage.setItem('rec_' + key, JSON.stringify(next || false)); } catch {}
+                    setExpenses(prev => prev.map(e => e.rowIndex === rowIndex ? {
+                        ...e,
+                        reconciled: next === 'reconciled',
+                        reconcileStatus: next,
+                    } : e));
                 }
             };
 
@@ -6228,14 +6436,14 @@
                 setTimeout(() => setToast(''), 3000);
             };
 
-            // Clear only unlocked reconciled items
+            // Clear only unlocked reconciled/pending items
             const handleClearUnlocked = (rowIndexes) => {
                 pushUndo(expenses);
                 rowIndexes.forEach(ri => {
                     const exp = expenses.find(e => e.rowIndex === ri);
                     if (exp) try { localStorage.setItem('rec_' + exp._recKey, JSON.stringify(false)); } catch {}
                 });
-                setExpenses(prev => prev.map(e => rowIndexes.includes(e.rowIndex) ? { ...e, reconciled: false } : e));
+                setExpenses(prev => prev.map(e => rowIndexes.includes(e.rowIndex) ? { ...e, reconciled: false, reconcileStatus: '' } : e));
                 setToast(`Cleared ${rowIndexes.length} reconciliation${rowIndexes.length === 1 ? '' : 's'}`);
                 setTimeout(() => setToast(''), 3000);
             };
