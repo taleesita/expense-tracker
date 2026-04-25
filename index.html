@@ -336,9 +336,12 @@
             const words = trimmed.split(/\s+/);
             const numericWords = words.filter(w => /^\d+\.?\d*$/.test(w)).length;
             if (words.length >= 3 && numericWords / words.length > 0.4) return true;
-            // Too many single-letter "words" (e.g., "a b c d e")
+            // Too many single-letter "words" (e.g., "a b c d e", "ei J ET Sa a Pa a 2")
             const singleLetterWords = words.filter(w => w.replace(/[^a-zA-Z]/g, '').length <= 1).length;
-            if (words.length >= 3 && singleLetterWords / words.length > 0.5) return true;
+            if (words.length >= 3 && singleLetterWords / words.length >= 0.4) return true;
+            // Too many very short words (1-2 letters) — OCR noise like "ei J ET Sa a Pa"
+            const shortWords = words.filter(w => { const l = w.replace(/[^a-zA-Z]/g, ''); return l.length >= 1 && l.length <= 2; }).length;
+            if (words.length >= 4 && shortWords / words.length >= 0.6) return true;
             // Consonant-heavy: real words have vowels. If <15% vowels, likely garbage
             const vowels = clean.replace(/[^aeiou]/g, '').length;
             if (clean.length >= 4 && vowels / clean.length < 0.15) return true;
