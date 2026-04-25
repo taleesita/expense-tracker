@@ -2847,12 +2847,19 @@
             const frequentMerchants = useMemo(() => {
                 if (!allExpenses) return [];
                 const counts = {};
+                // Strip suffixes like " - Refund", " - Return", " [1/2]" to get base merchant names
+                const cleanMerchant = (name) => name
+                    .replace(/\s*\[\d+\/\d+\]\s*$/, '')  // split tags
+                    .replace(/\s*-\s*(Refund|Return|Credit|Reversal|Adjustment)\s*$/i, '')
+                    .trim();
                 allExpenses.forEach(e => {
-                    const name = (e.merchant || '').trim();
-                    if (name) counts[name] = (counts[name] || 0) + 1;
+                    const raw = (e.merchant || '').trim();
+                    if (!raw) return;
+                    const clean = cleanMerchant(raw);
+                    if (clean) counts[clean] = (counts[clean] || 0) + 1;
                 });
                 return Object.entries(counts)
-                    .filter(([, count]) => count >= 5)
+                    .filter(([, count]) => count >= 2)
                     .sort((a, b) => b[1] - a[1])
                     .map(([name]) => name);
             }, [allExpenses]);
@@ -4036,42 +4043,65 @@
             // Balance excluding pending items
             const pendingAccountExpenses = accountExpenses.filter(e => e.reconcileStatus === 'pending');
             const hasPending = pendingAccountExpenses.length > 0;
-            const pendingAmount = pendingAccountExpenses.reduce((sum, e) => sum + (e.rawDeposit || 0) - (e.rawCharge || 0) - (e.fee || 0), 0);
+            const pendingAmount = pendingAccountExpenses.reduce((sum, e) => {
+                const dep = parseFloat(e.rawDeposit) || 0;
+                const chg = parseFloat(e.rawCharge) || 0;
+                const fee = parseFloat(e.fee) || 0;
+                return sum + dep - chg - fee;
+            }, 0);
             const balanceExclPending = total - pendingAmount;
 
-            const filteredExpenses = displayExpenses.filter(e => {
-                // Reconcile status filter
+            // Snapshot which rows matched the filter — only re-snapshot when filter/search/sort changes,
+            // NOT when reconcile status changes (so you can tap through the 3-state cycle without the row vanishing)
+            const filterKey = searchTerm + accountId + reconcileFilter + sortMode;
+            const prevFilterKey = React.useRef(filterKey);
+            const [pinnedRowIndexes, setPinnedRowIndexes] = useState(null);
+
+            const matchesFilter = (e) => {
                 if (reconcileFilter === 'unreconciled' && (e.reconcileStatus || e.reconciledLocked)) return false;
                 if (reconcileFilter === 'pending' && e.reconcileStatus !== 'pending') return false;
                 if (reconcileFilter === 'reconciled' && e.reconcileStatus !== 'reconciled' && !e.reconciledLocked) return false;
-                // Search filter
                 if (!searchTerm) return true;
                 const q = searchTerm.toLowerCase();
                 return e.merchant.toLowerCase().includes(q) ||
                     String(e.amount).includes(q) ||
                     (e.category && e.category.toLowerCase().includes(q)) ||
                     (e.date && e.date.includes(q));
+            };
+
+            const filteredExpenses = displayExpenses.filter(e => {
+                // If we have pinned rows and filter hasn't changed, keep pinned rows visible
+                if (pinnedRowIndexes && prevFilterKey.current === filterKey) {
+                    return pinnedRowIndexes.has(e.rowIndex) || matchesFilter(e);
+                }
+                return matchesFilter(e);
             }).sort((a, b) => {
                 if (sortMode === 'added') {
-                    // Sort by timestamp (date added) descending
                     return (b.timestamp || '').localeCompare(a.timestamp || '');
                 }
-                // Default: sort by purchase date descending, then by timestamp as tiebreaker
                 const da = parseDateToISO(a.date || a.timestamp);
                 const db = parseDateToISO(b.date || b.timestamp);
                 if (da !== db) return db.localeCompare(da);
                 return (b.timestamp || '').localeCompare(a.timestamp || '');
             });
-            const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
-            // Reset visible count when search, account, filter, or sort changes
-            const prevAcctSearch = React.useRef(searchTerm + accountId + reconcileFilter + sortMode);
+
+            // Snapshot pinned rows when filter/search/sort changes
             React.useEffect(() => {
-                const key = searchTerm + accountId + reconcileFilter + sortMode;
-                if (prevAcctSearch.current !== key) {
-                    setVisibleCount(PAGE_SIZE);
-                    prevAcctSearch.current = key;
+                if (prevFilterKey.current !== filterKey) {
+                    const matching = new Set(displayExpenses.filter(matchesFilter).map(e => e.rowIndex));
+                    setPinnedRowIndexes(matching);
+                    prevFilterKey.current = filterKey;
                 }
-            }, [searchTerm, accountId, reconcileFilter, sortMode]);
+            }, [filterKey]);
+
+            const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+            const prevAcctSearch = React.useRef(filterKey);
+            React.useEffect(() => {
+                if (prevAcctSearch.current !== filterKey) {
+                    setVisibleCount(PAGE_SIZE);
+                    prevAcctSearch.current = filterKey;
+                }
+            }, [filterKey]);
             const visibleExpenses = filteredExpenses.slice(0, visibleCount);
             const hasMore = filteredExpenses.length > visibleCount;
 
@@ -5455,7 +5485,11 @@
             const [showSortPopover, setShowSortPopover] = useState(false);
             const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
 
-            const filtered = expenses.filter(e => {
+            const filterKey = searchTerm + reconcileFilter + sortMode;
+            const prevFilterKey = React.useRef(filterKey);
+            const [pinnedRowIndexes, setPinnedRowIndexes] = useState(null);
+
+            const matchesFilter = (e) => {
                 if (e._balanceOnly) return false;
                 if (reconcileFilter === 'unreconciled' && (e.reconcileStatus || e.reconciledLocked)) return false;
                 if (reconcileFilter === 'pending' && e.reconcileStatus !== 'pending') return false;
@@ -5466,6 +5500,14 @@
                     (e.category && e.category.toLowerCase().includes(q)) ||
                     String(e.amount).includes(q) ||
                     (e.date && e.date.includes(q));
+            };
+
+            const filtered = expenses.filter(e => {
+                if (e._balanceOnly) return false;
+                if (pinnedRowIndexes && prevFilterKey.current === filterKey) {
+                    return pinnedRowIndexes.has(e.rowIndex) || matchesFilter(e);
+                }
+                return matchesFilter(e);
             }).sort((a, b) => {
                 if (sortMode === 'added') {
                     return (b.timestamp || '').localeCompare(a.timestamp || '');
@@ -5476,11 +5518,18 @@
                 return (b.timestamp || '').localeCompare(a.timestamp || '');
             });
 
-            // Reset visible count when search, filter, or sort changes
-            const prevSearch = React.useRef(searchTerm + reconcileFilter + sortMode);
             React.useEffect(() => {
-                const key = searchTerm + reconcileFilter + sortMode;
-                if (prevSearch.current !== key) {
+                if (prevFilterKey.current !== filterKey) {
+                    const matching = new Set(expenses.filter(matchesFilter).map(e => e.rowIndex));
+                    setPinnedRowIndexes(matching);
+                    prevFilterKey.current = filterKey;
+                }
+            }, [filterKey]);
+
+            // Reset visible count when search, filter, or sort changes
+            const prevSearch = React.useRef(filterKey);
+            React.useEffect(() => {
+                if (prevSearch.current !== filterKey) {
                     setVisibleCount(PAGE_SIZE);
                     prevSearch.current = key;
                 }
