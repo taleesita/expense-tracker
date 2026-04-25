@@ -4043,16 +4043,11 @@
             const pendingExpenses = recentExpenses.filter(e => e.reconcileStatus === 'pending' && !e.reconciledLocked);
             const totalReconciled = lockedExpenses.length + unlockedReconciled.length;
 
-            // Balance excluding pending items
+            // Balance excluding pending items — recalculate without them
             const pendingAccountExpenses = accountExpenses.filter(e => e.reconcileStatus === 'pending');
             const hasPending = pendingAccountExpenses.length > 0;
-            const pendingAmount = pendingAccountExpenses.reduce((sum, e) => {
-                const dep = parseFloat(e.rawDeposit) || 0;
-                const chg = parseFloat(e.rawCharge) || 0;
-                const fee = parseFloat(e.fee) || 0;
-                return sum + dep - chg - fee;
-            }, 0);
-            const balanceExclPending = total - pendingAmount;
+            const nonPendingExpenses = accountExpenses.filter(e => e.reconcileStatus !== 'pending');
+            const balanceExclPending = hasPending ? calcAccountBalance(nonPendingExpenses, accountId) : total;
 
             // Snapshot which rows matched the filter — only re-snapshot when filter/search/sort changes,
             // NOT when reconcile status changes (so you can tap through the 3-state cycle without the row vanishing)
@@ -4132,7 +4127,7 @@
                         </div>
                         <div className={`text-2xl font-bold ${hasPending ? 'mb-1' : 'mb-3'} ${isCreditCard ? (total < 0 ? 'text-red-600' : 'text-green-600') : (total >= 0 ? 'text-green-600' : 'text-red-600')}`}>${fmt(total)}</div>
                         {hasPending && (
-                            <div className="text-sm text-amber-600 mb-3">${fmt(balanceExclPending)} excl. {pendingExpenses.length} pending</div>
+                            <div className="text-sm text-amber-600 mb-3">${fmt(balanceExclPending)} excl. {pendingAccountExpenses.length} pending</div>
                         )}
                         <div className="w-full bg-gray-200 rounded-full h-2 mb-2">
                             <div
