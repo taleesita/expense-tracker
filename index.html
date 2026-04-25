@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.8-apr24';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.10-apr24';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -304,7 +304,7 @@
 
         // Date parser (needed early for balance anchors)
         const parseDateToISO = (dateStr) => {
-            if (!dateStr) return new Date().toISOString().split('T')[0];
+            if (!dateStr) return todayLocalStr();
             if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return dateStr;
             const mdyMatch = dateStr.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
             if (mdyMatch) {
@@ -314,7 +314,13 @@
             }
             const parsed = new Date(dateStr);
             if (!isNaN(parsed)) return parsed.toISOString().split('T')[0];
-            return new Date().toISOString().split('T')[0];
+            return todayLocalStr();
+        };
+
+        // Get today's date in local timezone as YYYY-MM-DD (avoids UTC offset issues with toISOString)
+        const todayLocalStr = () => {
+            const d = new Date();
+            return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
         };
 
         // Detect gibberish merchant names — random letters, too many consonants, etc.
@@ -1468,7 +1474,7 @@
                         console.warn('Could not apply formatting to new row:', fmtErr);
                     }
 
-                    if (!skipRefresh) await fetchExpenses();
+                    if (!skipRefresh) await fetchExpenses(true);
                 } catch (err) {
                     console.error('Failed to append expense:', err);
                     throw err;
@@ -1998,7 +2004,7 @@
                     const lines = text.split('\n').filter(l => l.trim());
                     let merchant = '';
                     let amount = 0;
-                    let date = new Date().toISOString().split('T')[0];
+                    let date = todayLocalStr();
 
                     // Smart merchant name extraction
                     const cleanMerchantName = (raw) => {
@@ -2188,12 +2194,25 @@
                     for (const { re, parse } of datePatterns) {
                         const dm = text.match(re);
                         if (dm) {
-                            const { mo, d, y } = parse(dm);
+                            let { mo, d, y } = parse(dm);
                             let fullYear = y.length <= 2 ? parseInt('20' + y) : parseInt(y);
                             if (fullYear >= 2020 && fullYear <= 2030) {
+                                let parsedMonth = parseInt(mo);
+                                let parsedDay = parseInt(d);
+
+                                // Handle DD/MM format: if month > 12 but day <= 12, swap them
+                                if (parsedMonth > 12 && parsedDay <= 12) {
+                                    console.log(`OCR date: swapping month/day (${parsedMonth}/${parsedDay} → ${parsedDay}/${parsedMonth})`);
+                                    [parsedMonth, parsedDay] = [parsedDay, parsedMonth];
+                                }
+
+                                // Validate: month 1-12, day 1-31
+                                if (parsedMonth < 1 || parsedMonth > 12 || parsedDay < 1 || parsedDay > 31) {
+                                    console.log(`OCR date invalid: month=${parsedMonth} day=${parsedDay}, skipping`);
+                                    continue;
+                                }
+
                                 const currentYear = new Date().getFullYear();
-                                const parsedMonth = parseInt(mo);
-                                const parsedDay = parseInt(d);
                                 const currentMonth = new Date().getMonth() + 1;
                                 // If year != current year but month/day are close to today, OCR probably misread the year
                                 if (fullYear !== currentYear) {
@@ -2203,7 +2222,17 @@
                                         fullYear = currentYear;
                                     }
                                 }
-                                date = `${fullYear}-${String(mo).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+
+                                const candidate = `${fullYear}-${String(parsedMonth).padStart(2, '0')}-${String(parsedDay).padStart(2, '0')}`;
+                                // Reject future dates — receipts are for past/today purchases
+                                const candidateDate = new Date(candidate + 'T00:00:00');
+                                const today = new Date();
+                                today.setHours(23, 59, 59, 999); // end of today
+                                if (candidateDate > today) {
+                                    console.log(`OCR date ${candidate} is in the future, skipping`);
+                                    continue;
+                                }
+                                date = candidate;
                                 break;
                             }
                         }
@@ -2682,7 +2711,7 @@
             const isEdit = !!editExpense && !editExpense._prefill;
             const [merchant, setMerchant] = useState('');
             const [amount, setAmount] = useState('');
-            const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
+            const [date, setDate] = useState(todayLocalStr());
             const [category, setCategory] = useState('other');
             const [account, setAccount] = useState('');
             const [notes, setNotes] = useState('');
@@ -2721,7 +2750,7 @@
                     // Pre-fill from recurring reminder quick-add or inbox review
                     setMerchant(editExpense.merchant || '');
                     setAmount(editExpense.amount?.toString() || '');
-                    setDate(editExpense.date || new Date().toISOString().split('T')[0]);
+                    setDate(editExpense.date || todayLocalStr());
                     setCategory(editExpense.category || 'other');
                     setAccount(editExpense.account || '');
                     setNotes('');
@@ -2735,7 +2764,7 @@
                 } else if (!editExpense && isOpen) {
                     setMerchant('');
                     setAmount('');
-                    setDate(new Date().toISOString().split('T')[0]);
+                    setDate(todayLocalStr());
                     setCategory('other');
                     setAccount('');
                     setNotes('');
@@ -5494,7 +5523,7 @@
                 const subjectMerchant = merchantFromSubject(item.subject);
                 let finalMerchant = '';
                 let finalAmount = '';
-                let finalDate = item.emailDate || new Date().toISOString().split('T')[0];
+                let finalDate = item.emailDate || todayLocalStr();
                 let finalCategory = 'other';
                 let finalTxnType = 'charge';
                 let finalAccount = '';
@@ -5653,6 +5682,8 @@
             const inboxReviewingRef = useRef(null); // tracks inbox item being reviewed via AddExpenseModal
             const [inboxModeActive, setInboxModeActive] = useState(false);
             const inboxIndexRef = useRef(0);
+            const inboxTotalRef = useRef(0);    // total items when review started
+            const inboxReviewedRef = useRef(0); // how many reviewed so far
             const [testMode, setTestMode] = useState(_testMode);
             const [dismissedReminders, setDismissedReminders] = useState(() => {
                 try { return JSON.parse(localStorage.getItem('dismissed_reminders') || '{}'); } catch { return {}; }
@@ -5801,7 +5832,7 @@
             const buildInboxPrefill = (item) => {
                 const ocr = ocrCacheRef.current[item.fileId];
                 const subjectMerchant = merchantFromSubject(item.subject);
-                let merchant = '', amount = '', date = item.emailDate || new Date().toISOString().split('T')[0];
+                let merchant = '', amount = '', date = item.emailDate || todayLocalStr();
                 let category = 'other', txnType = 'charge', account = '';
                 if (ocr) {
                     const ocrMerchantClean = (ocr.merchant || '').replace(/^[\s.,;:!?]+/, '').trim();
@@ -5841,10 +5872,17 @@
             };
 
             // Advance to next inbox item or finish
+            // markInboxItem calls setInboxItems(filter) which is async — the closure
+            // still sees the OLD array. The next unreviewed item is at currentIdx + 1
+            // in the old array. But after the filter lands, it'll be at currentIdx.
+            // So: grab from old array at +1, but set index to currentIdx (not +1).
             const advanceInbox = () => {
+                inboxReviewedRef.current += 1;
                 const nextIdx = inboxIndexRef.current + 1;
                 if (nextIdx < inboxItems.length) {
-                    openInboxItem(inboxItems[nextIdx], nextIdx);
+                    // Open next item but keep index at currentIdx (array will shift down
+                    // after markInboxItem's async setState lands)
+                    openInboxItem(inboxItems[nextIdx], inboxIndexRef.current);
                 } else {
                     // All done
                     setShowAddModal(false);
@@ -5852,6 +5890,8 @@
                     setInboxModeActive(false);
                     inboxReviewingRef.current = null;
                     inboxIndexRef.current = 0;
+                    inboxReviewedRef.current = 0;
+                    inboxTotalRef.current = 0;
                     setToast('All receipts reviewed!');
                     setTimeout(() => setToast(''), 3000);
                 }
@@ -5860,6 +5900,9 @@
             const handleSplitExpense = async (parentExpense, splitRows) => {
                 if (!token) return;
                 setIsSaving(true);
+                // Save scroll position so we can restore it after the data refreshes
+                const scrollEl = scrollContainerRef?.current || document.scrollingElement || document.documentElement;
+                const savedScroll = scrollEl ? scrollEl.scrollTop : 0;
                 try {
                     pushUndo(expenses);
                     // 1. Delete the parent row (clear ALL columns so it doesn't linger as balance-only)
@@ -5888,6 +5931,10 @@
                             person: parentExpense.person || '',
                         }, { skipRefresh: !isLast });
                     }
+                    // Restore scroll position after React re-renders with new data
+                    requestAnimationFrame(() => {
+                        if (scrollEl) scrollEl.scrollTop = savedScroll;
+                    });
                     setToast(`Split into ${total} entries`);
                     setTimeout(() => setToast(''), 3000);
                 } catch (err) {
@@ -6292,6 +6339,8 @@
                             <button
                                 onClick={() => {
                                     if (inboxItems.length > 0) {
+                                        inboxTotalRef.current = inboxItems.length;
+                                        inboxReviewedRef.current = 0;
                                         openInboxItem(inboxItems[0], 0);
                                     } else {
                                         setToast('No receipts to review');
@@ -6391,7 +6440,7 @@
                                 {inboxItems.length > 0 && activeTab === 'home' && (
                                     <div className="px-4 pt-2 pb-1">
                                         <button
-                                            onClick={() => inboxItems.length > 0 && openInboxItem(inboxItems[0], 0)}
+                                            onClick={() => { if (inboxItems.length > 0) { inboxTotalRef.current = inboxItems.length; inboxReviewedRef.current = 0; openInboxItem(inboxItems[0], 0); } }}
                                             className="w-full flex items-center gap-3 rounded-xl px-4 py-3 bg-blue-50 border border-blue-200 hover:bg-blue-100 transition-colors"
                                         >
                                             <span className="text-lg">📥</span>
@@ -6497,14 +6546,16 @@
                         merchantAccountMap={merchantAccountMap}
                         reconnect={reconnect}
                         inboxMode={inboxModeActive}
-                        inboxProgress={inboxModeActive ? `${Math.min(inboxIndexRef.current + 1, inboxItems.length)} of ${inboxItems.length}` : ''}
-                        inboxIsLast={inboxModeActive && inboxIndexRef.current >= inboxItems.length - 1}
+                        inboxProgress={inboxModeActive ? `${inboxReviewedRef.current + 1} of ${inboxTotalRef.current}` : ''}
+                        inboxIsLast={inboxModeActive && inboxReviewedRef.current + 1 >= inboxTotalRef.current}
                         onInboxClose={() => {
                             setShowAddModal(false);
                             setEditExpense(null);
                             setInboxModeActive(false);
                             inboxReviewingRef.current = null;
                             inboxIndexRef.current = 0;
+                            inboxReviewedRef.current = 0;
+                            inboxTotalRef.current = 0;
                         }}
                         onInboxSkip={async () => {
                             if (inboxReviewingRef.current) {
