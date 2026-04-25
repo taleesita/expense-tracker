@@ -2073,6 +2073,41 @@
                     let amount = 0;
                     let date = todayLocalStr();
 
+                    // ---- AMAZON ORDER PAGE DETECTION (early exit) ----
+                    // Amazon "Order Details" pages have very consistent structure.
+                    // Detect early and parse directly to avoid issues with multi-column PDF text.
+                    const isAmazonOrderPage = /amazon\.com/i.test(text) && /order\s*(#|placed|summary)/i.test(text);
+                    const amazonOrderNum = text.match(/(\d{3}-\d{7}-\d{7})/);
+                    if (isAmazonOrderPage && amazonOrderNum) {
+                        merchant = `Amazon - ${amazonOrderNum[1]}`;
+                        // Extract Grand Total (or just Total) amount
+                        const grandTotalMatch = text.match(/grand\s*total[:\s]*\$?\s*([\d,]+\.\d{2})/i)
+                            || text.match(/\btotal[:\s]*\$\s*([\d,]+\.\d{2})/i);
+                        if (grandTotalMatch) {
+                            amount = parseFloat(grandTotalMatch[1].replace(/,/g, ''));
+                        }
+                        // Extract order date: "Order placed April 25, 2026" or "Order placed 4/25/26"
+                        const orderDateMatch = text.match(/order\s+placed\s+((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*[\s.,]+\d{1,2}[\s.,]+\d{2,4})/i)
+                            || text.match(/order\s+placed\s+(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
+                        if (orderDateMatch) {
+                            try {
+                                const d = new Date(orderDateMatch[1]);
+                                if (!isNaN(d)) {
+                                    date = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+                                }
+                            } catch {}
+                        }
+                        console.log('Amazon order page detected:', { merchant, amount, date, orderNum: amazonOrderNum[1] });
+                        const cat = suggestCategory('Amazon');
+                        return {
+                            merchant, amount, date,
+                            category: cat,
+                            txnType: 'charge',
+                            account: undefined,
+                            fullText: text
+                        };
+                    }
+
                     // Smart merchant name extraction
                     const cleanMerchantName = (raw) => {
                         let name = raw;
@@ -5920,7 +5955,9 @@
                 if (ocr) {
                     const ocrMerchantClean = (ocr.merchant || '').replace(/^[\s.,;:!?]+/, '').trim();
                     const ocrMerchantGood = !isGibberishMerchant(ocrMerchantClean);
-                    finalMerchant = subjectMerchant || (ocrMerchantGood ? ocrMerchantClean : '');
+                    // Prefer OCR merchant for Amazon orders (subject is just "Order Details")
+                    const ocrIsAmazon = /^Amazon\s*-\s*\d{3}-\d{7}-\d{7}$/.test(ocrMerchantClean);
+                    finalMerchant = ocrIsAmazon ? ocrMerchantClean : (subjectMerchant || (ocrMerchantGood ? ocrMerchantClean : ''));
                     finalAmount = ocr.amount ? String(ocr.amount) : '';
                     finalDate = ocr.date || finalDate;
                     finalCategory = ocr.category || suggestCategory(finalMerchant) || 'other';
