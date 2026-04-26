@@ -5709,7 +5709,7 @@
             React.useEffect(() => {
                 if (prevSearch.current !== filterKey) {
                     setVisibleCount(PAGE_SIZE);
-                    prevSearch.current = key;
+                    prevSearch.current = filterKey;
                 }
             }, [searchTerm, reconcileFilter, sortMode]);
 
