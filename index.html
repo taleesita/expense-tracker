@@ -2467,6 +2467,29 @@
                             merchant = 'Paycheck Deposit';
                         }
 
+                        // Extract check date (the actual pay date, NOT pay period start)
+                        // Look for "Check Date", "Pay Date", "Payment Date" followed by a date
+                        const checkDatePatterns = [
+                            /check\s*date[:\s]*(\d{1,2}\/\d{1,2}\/\d{2,4})/i,
+                            /pay\s*date[:\s]*(\d{1,2}\/\d{1,2}\/\d{2,4})/i,
+                            /payment\s*date[:\s]*(\d{1,2}\/\d{1,2}\/\d{2,4})/i,
+                            /check\s*date[:\s]*((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*[\s.,]+\d{1,2}[\s.,]+\d{2,4})/i,
+                            /pay\s*date[:\s]*((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*[\s.,]+\d{1,2}[\s.,]+\d{2,4})/i,
+                        ];
+                        for (const pat of checkDatePatterns) {
+                            const m = text.match(pat);
+                            if (m) {
+                                try {
+                                    const d = new Date(m[1]);
+                                    if (!isNaN(d) && d.getFullYear() >= 2020) {
+                                        date = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+                                        console.log('Paystub check date:', date, '(from:', m[0], ')');
+                                        break;
+                                    }
+                                } catch {}
+                            }
+                        }
+
                     }
 
                     // ---- PAYMENT CONFIRMATION DETECTION ----
