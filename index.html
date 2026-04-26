@@ -4250,7 +4250,9 @@
                 return matchesFilter(e);
             }).sort((a, b) => {
                 if (sortMode === 'added') {
-                    return (b.timestamp || '').localeCompare(a.timestamp || '');
+                    const ta = new Date(a.timestamp || 0).getTime();
+                    const tb = new Date(b.timestamp || 0).getTime();
+                    return tb - ta; // newest first
                 }
                 const da = parseDateToISO(a.date || a.timestamp);
                 const db = parseDateToISO(b.date || b.timestamp);
@@ -5688,7 +5690,9 @@
                 return matchesFilter(e);
             }).sort((a, b) => {
                 if (sortMode === 'added') {
-                    return (b.timestamp || '').localeCompare(a.timestamp || '');
+                    const ta = new Date(a.timestamp || 0).getTime();
+                    const tb = new Date(b.timestamp || 0).getTime();
+                    return tb - ta; // newest first
                 }
                 const da = parseDateToISO(a.date || a.timestamp);
                 const db = parseDateToISO(b.date || b.timestamp);
