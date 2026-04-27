@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.12-apr24';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.13-apr26';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -3726,29 +3726,38 @@
                                         })()}
                                     </div>
 
-                                    <div className="relative">
+                                    <div className="flex gap-2">
+                                        <div className="relative flex-1">
+                                            <input
+                                                type="text"
+                                                placeholder={validationErrors.merchant ? '⚠ Merchant' : 'Merchant name'}
+                                                value={merchant}
+                                                onChange={(e) => { setMerchant(e.target.value); setShowSuggestions(true); setValidationErrors(prev => ({...prev, merchant: false})); }}
+                                                onFocus={() => setShowSuggestions(true)}
+                                                onBlur={() => { setTimeout(() => setShowSuggestions(false), 200); if (!isEdit) setCategory(suggestCategory(merchant)); }}
+                                                className={`w-full border rounded-lg px-3 py-2.5 ${validationErrors.merchant ? 'border-red-500 border-2 bg-red-50 placeholder-red-400' : ''}`}
+                                            />
+                                            {showSuggestions && merchant.length >= 2 && (() => {
+                                                const matches = frequentMerchants.filter(m => m.toLowerCase().includes(merchant.toLowerCase()));
+                                                return matches.length > 0 ? (
+                                                    <div className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-40 overflow-y-auto">
+                                                        {matches.slice(0, 6).map((m, i) => (
+                                                            <button key={i} type="button"
+                                                                onMouseDown={(e) => { e.preventDefault(); setMerchant(m); setShowSuggestions(false); if (!isEdit) setCategory(suggestCategory(m)); }}
+                                                                className="w-full text-left px-4 py-2.5 text-sm hover:bg-blue-50 border-b border-gray-100 last:border-0"
+                                                            >{m}</button>
+                                                        ))}
+                                                    </div>
+                                                ) : null;
+                                            })()}
+                                        </div>
                                         <input
-                                            type="text"
-                                            placeholder={validationErrors.merchant ? '⚠ Merchant name required' : 'Merchant name'}
-                                            value={merchant}
-                                            onChange={(e) => { setMerchant(e.target.value); setShowSuggestions(true); setValidationErrors(prev => ({...prev, merchant: false})); }}
-                                            onFocus={() => setShowSuggestions(true)}
-                                            onBlur={() => { setTimeout(() => setShowSuggestions(false), 200); if (!isEdit) setCategory(suggestCategory(merchant)); }}
-                                            className={`w-full border rounded-lg px-4 py-2.5 ${validationErrors.merchant ? 'border-red-500 border-2 bg-red-50 placeholder-red-400' : ''}`}
+                                            type="date"
+                                            value={date}
+                                            onChange={(e) => { setDate(e.target.value); setValidationErrors(prev => ({...prev, date: false})); }}
+                                            className={`min-w-0 border rounded-lg px-2 py-2.5 text-sm ${validationErrors.date ? 'border-red-500 border-2 bg-red-50' : ''}`}
+                                            style={{ width: '130px' }}
                                         />
-                                        {showSuggestions && merchant.length >= 2 && (() => {
-                                            const matches = frequentMerchants.filter(m => m.toLowerCase().includes(merchant.toLowerCase()));
-                                            return matches.length > 0 ? (
-                                                <div className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-40 overflow-y-auto">
-                                                    {matches.slice(0, 6).map((m, i) => (
-                                                        <button key={i} type="button"
-                                                            onMouseDown={(e) => { e.preventDefault(); setMerchant(m); setShowSuggestions(false); if (!isEdit) setCategory(suggestCategory(m)); }}
-                                                            className="w-full text-left px-4 py-2.5 text-sm hover:bg-blue-50 border-b border-gray-100 last:border-0"
-                                                        >{m}</button>
-                                                    ))}
-                                                </div>
-                                            ) : null;
-                                        })()}
                                     </div>
 
                                     <div className="flex gap-2">
@@ -3758,14 +3767,28 @@
                                             step="0.01"
                                             value={amount}
                                             onChange={(e) => { setAmount(e.target.value); setValidationErrors(prev => ({...prev, amount: false})); }}
-                                            className={`flex-1 border rounded-lg px-4 py-2.5 ${validationErrors.amount ? 'border-red-500 border-2 bg-red-50 placeholder-red-400' : ''}`}
+                                            className={`flex-1 border rounded-lg px-3 py-2.5 ${validationErrors.amount ? 'border-red-500 border-2 bg-red-50 placeholder-red-400' : ''}`}
                                         />
-                                        <input
-                                            type="date"
-                                            value={date}
-                                            onChange={(e) => { setDate(e.target.value); setValidationErrors(prev => ({...prev, date: false})); }}
-                                            className={`flex-1 min-w-0 border rounded-lg px-2 py-2.5 text-sm ${validationErrors.date ? 'border-red-500 border-2 bg-red-50' : ''}`}
-                                        />
+                                        <select
+                                            value={originalCurrency}
+                                            onChange={(e) => {
+                                                setOriginalCurrency(e.target.value);
+                                                if (e.target.value === 'USD') {
+                                                    setOriginalAmount('');
+                                                } else if (originalAmount) {
+                                                    const val = parseFloat(originalAmount);
+                                                    if (!isNaN(val) && CURRENCIES[e.target.value]) {
+                                                        setAmount((val * CURRENCIES[e.target.value]).toFixed(2));
+                                                    }
+                                                }
+                                            }}
+                                            className="border rounded-lg px-2 py-2.5 text-sm appearance-none bg-white"
+                                            style={{ width: '80px', backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%236B7280' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E\")", backgroundRepeat: 'no-repeat', backgroundPosition: 'right 6px center' }}
+                                        >
+                                            {Object.keys(CURRENCIES).map(curr => (
+                                                <option key={curr} value={curr}>{curr}</option>
+                                            ))}
+                                        </select>
                                     </div>
                                 </>
                             )}
@@ -3794,27 +3817,6 @@
                                         </div>
                                     )}
 
-                                    <select
-                                        value={originalCurrency}
-                                        onChange={(e) => {
-                                            setOriginalCurrency(e.target.value);
-                                            if (e.target.value === 'USD') {
-                                                setOriginalAmount('');
-                                            } else if (originalAmount) {
-                                                const val = parseFloat(originalAmount);
-                                                if (!isNaN(val) && CURRENCIES[e.target.value]) {
-                                                    setAmount((val * CURRENCIES[e.target.value]).toFixed(2));
-                                                }
-                                            }
-                                        }}
-                                        className="w-full border rounded-lg px-4 py-2.5 appearance-none bg-white"
-                                        style={{ backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%236B7280' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E\")", backgroundRepeat: 'no-repeat', backgroundPosition: 'right 12px center' }}
-                                    >
-                                        {Object.keys(CURRENCIES).map(curr => (
-                                            <option key={curr} value={curr}>{curr}</option>
-                                        ))}
-                                    </select>
-
                                     <div>
                                         <label className={`block text-xs font-medium mb-1.5 ${validationErrors.category ? 'text-red-500 font-bold' : 'text-gray-500'}`}>{validationErrors.category ? '⚠ Select a Category' : 'Category'}</label>
                                         <div className={`grid grid-cols-7 gap-1 ${validationErrors.category ? 'ring-2 ring-red-400 rounded-lg p-0.5' : ''}`}>
@@ -3839,11 +3841,12 @@
                                 </div>
                             )}
 
-                            <textarea
+                            <input
+                                type="text"
                                 placeholder="Notes (optional)"
                                 value={notes}
                                 onChange={(e) => setNotes(e.target.value)}
-                                className="w-full border rounded-lg px-4 py-2.5 h-16 resize-none text-sm"
+                                className="w-full border rounded-lg px-3 py-2 text-sm"
                             />
 
                             {receipt && !inboxMode && (() => {
