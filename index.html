@@ -3012,8 +3012,8 @@
                     setNotes('');
                     setReceipt(editExpense.receipt || '');
                     setTxnType(editExpense.txnType || 'charge');
-                    setOriginalCurrency('USD');
-                    setOriginalAmount('');
+                    setOriginalCurrency(editExpense.originalCurrency || 'USD');
+                    setOriginalAmount(editExpense.originalAmount?.toString() || '');
                     setSecondaryAccount('');
                     setPrimaryMerchantOverride('');
                     setSecondaryMerchantOverride('');
@@ -5985,6 +5985,9 @@
                 let finalTxnType = 'charge';
                 let finalAccount = '';
 
+                let finalOriginalCurrency = null;
+                let finalOriginalAmount = null;
+
                 if (ocr) {
                     const ocrMerchantClean = (ocr.merchant || '').replace(/^[\s.,;:!?]+/, '').trim();
                     const ocrMerchantGood = !isGibberishMerchant(ocrMerchantClean);
@@ -5996,13 +5999,18 @@
                     finalCategory = ocr.category || suggestCategory(finalMerchant) || 'other';
                     finalTxnType = ocr.txnType || 'charge';
                     finalAccount = ocr.account || suggestAccountForMerchant(finalMerchant, merchantAccountMap) || '';
+                    // Pass through foreign currency detection
+                    if (ocr.originalCurrency && ocr.originalAmount) {
+                        finalOriginalCurrency = ocr.originalCurrency;
+                        finalOriginalAmount = ocr.originalAmount;
+                    }
                 } else {
                     finalMerchant = subjectMerchant || '';
                     finalCategory = subjectMerchant ? suggestCategory(subjectMerchant) : 'other';
                     finalAccount = subjectMerchant ? (suggestAccountForMerchant(subjectMerchant, merchantAccountMap) || '') : '';
                 }
 
-                return { merchant: finalMerchant, amount: finalAmount, date: finalDate, category: finalCategory, txnType: finalTxnType, account: finalAccount };
+                return { merchant: finalMerchant, amount: finalAmount, date: finalDate, category: finalCategory, txnType: finalTxnType, account: finalAccount, originalCurrency: finalOriginalCurrency, originalAmount: finalOriginalAmount };
             };
 
             if (!items.length) {
@@ -6293,6 +6301,7 @@
                 const subjectMerchant = merchantFromSubject(item.subject);
                 let merchant = '', amount = '', date = item.emailDate || todayLocalStr();
                 let category = 'other', txnType = 'charge', account = '';
+                let originalCurrency = null, originalAmount = null;
                 if (ocr) {
                     const ocrMerchantClean = (ocr.merchant || '').replace(/^[\s.,;:!?]+/, '').trim();
                     const ocrMerchantGood = !isGibberishMerchant(ocrMerchantClean);
@@ -6303,12 +6312,17 @@
                     category = ocr.category || (merchant ? suggestCategory(merchant) : 'other') || 'other';
                     txnType = ocr.txnType || 'charge';
                     account = ocr.account || (merchant ? suggestAccountForMerchant(merchant, merchantAccountMap) : '') || '';
+                    // Pass through foreign currency detection
+                    if (ocr.originalCurrency && ocr.originalAmount) {
+                        originalCurrency = ocr.originalCurrency;
+                        originalAmount = ocr.originalAmount;
+                    }
                 } else {
                     merchant = subjectMerchant || '';
                     category = subjectMerchant ? suggestCategory(subjectMerchant) : 'other';
                     account = subjectMerchant ? (suggestAccountForMerchant(subjectMerchant, merchantAccountMap) || '') : '';
                 }
-                return { merchant, amount, date, category, txnType, account };
+                return { merchant, amount, date, category, txnType, account, originalCurrency, originalAmount };
             };
 
             // Open modal for a specific inbox item
@@ -6325,6 +6339,8 @@
                     txnType: prefill.txnType,
                     account: prefill.account,
                     receipt: item.fileUrl || '',
+                    originalCurrency: prefill.originalCurrency || undefined,
+                    originalAmount: prefill.originalAmount || undefined,
                 });
                 setShowAddModal(true);
                 setInboxModeActive(true);
@@ -6548,7 +6564,7 @@
                             timestamp: new Date().toLocaleString(),
                         });
                     }
-                    setTimeout(() => setConfirmationData(null), 10000);
+                    setTimeout(() => setConfirmationData(null), inboxModeActive ? 4000 : 10000);
 
                     // If this save came from inbox review, mark done and advance
                     if (inboxReviewingRef.current && inboxModeActive) {
