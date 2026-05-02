@@ -6254,8 +6254,10 @@
                 // For monthly_eom reminders, default date to end of last month
                 let prefillDate = undefined;
                 if (rec.frequency === 'monthly_eom') {
-                    const eom = new Date(new Date().getFullYear(), new Date().getMonth(), 0); // last day of prev month
-                    prefillDate = eom.toISOString().split('T')[0];
+                    // Use NYC time to determine "last month" since accounts are US-based
+                    const nycNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+                    const eom = new Date(nycNow.getFullYear(), nycNow.getMonth(), 0); // last day of prev month in NYC
+                    prefillDate = `${eom.getFullYear()}-${String(eom.getMonth() + 1).padStart(2, '0')}-${String(eom.getDate()).padStart(2, '0')}`;
                 }
                 setEditExpense({
                     _prefill: true,
