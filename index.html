@@ -401,6 +401,18 @@
                 matchAccount: 'cap1_tsaving',
             },
             {
+                id: 'interest_jcheck',
+                label: 'Interest — JCheck',
+                merchant: 'Interest',
+                account: 'cap1_jcheck',
+                category: 'other',
+                txnType: 'deposit',
+                frequency: 'monthly_eom',
+                approxAmount: 1,
+                matchMerchant: 'interest',
+                matchAccount: 'cap1_jcheck',
+            },
+            {
                 id: 'interest_joint_hy',
                 label: 'Interest — Joint HY',
                 merchant: 'Interest',
@@ -2963,7 +2975,7 @@
             );
         };
 
-        const AddExpenseModal = ({ isOpen, onClose, onAdd, onUpdate, editExpense, token, userName, expenses: allExpenses, merchantAccountMap, reconnect, inboxMode, inboxProgress, inboxIsLast, onInboxSkip, onInboxClose }) => {
+        const AddExpenseModal = ({ isOpen, onClose, onAdd, onUpdate, editExpense, token, userName, expenses: allExpenses, merchantAccountMap, reconnect, inboxMode, inboxProgress, inboxIsLast, onInboxSkip, onInboxClose, onDismissReminder }) => {
             const isEdit = !!editExpense && !editExpense._prefill;
             const [merchant, setMerchant] = useState('');
             const [amount, setAmount] = useState('');
@@ -6239,13 +6251,21 @@
 
             // Quick-add from reminder: pre-fill the add modal
             const handleQuickAdd = (rec) => {
+                // For monthly_eom reminders, default date to end of last month
+                let prefillDate = undefined;
+                if (rec.frequency === 'monthly_eom') {
+                    const eom = new Date(new Date().getFullYear(), new Date().getMonth(), 0); // last day of prev month
+                    prefillDate = eom.toISOString().split('T')[0];
+                }
                 setEditExpense({
                     _prefill: true,
+                    _reminderId: rec.id,
                     merchant: rec.merchant,
                     account: rec.account,
                     category: rec.category,
                     txnType: rec.txnType,
                     amount: rec.lastAmount || rec.approxAmount || '',
+                    date: prefillDate,
                 });
                 setShowAddModal(true);
             };
@@ -6565,6 +6585,11 @@
                         });
                     }
                     setTimeout(() => setConfirmationData(null), inboxModeActive ? 4000 : 10000);
+
+                    // If saved from a reminder quick-add, dismiss that reminder immediately
+                    if (editExpense?._reminderId && onDismissReminder) {
+                        onDismissReminder(editExpense._reminderId);
+                    }
 
                     // If this save came from inbox review, mark done and advance
                     if (inboxReviewingRef.current && inboxModeActive) {
@@ -7029,6 +7054,7 @@
                         merchantAccountMap={merchantAccountMap}
                         reconnect={reconnect}
                         inboxMode={inboxModeActive}
+                        onDismissReminder={dismissReminder}
                         inboxProgress={inboxModeActive ? `${inboxReviewedRef.current + 1} of ${inboxTotalRef.current}` : ''}
                         inboxIsLast={inboxModeActive && inboxReviewedRef.current + 1 >= inboxTotalRef.current}
                         onInboxClose={() => {
