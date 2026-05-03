@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.13-apr26';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.14-may4';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -639,6 +639,12 @@
             'airline': 'travel',
             'hotel': 'travel',
             'airbnb': 'travel',
+            't-mobile': 'utilities',
+            'verizon': 'utilities',
+            'at&t': 'utilities',
+            'comcast': 'utilities',
+            'con edison': 'utilities',
+            'national grid': 'utilities',
         };
 
         // Exchange rates: value = how many USD per 1 unit of foreign currency
@@ -2123,6 +2129,37 @@
                         };
                     }
 
+                    // ---- T-MOBILE / PHONE BILL DETECTION (early exit) ----
+                    const isTMobileBill = /t-?mobile/i.test(text) && /total\s*due|amount\s*due|bill\s*issue/i.test(text);
+                    if (isTMobileBill) {
+                        merchant = 'T-Mobile';
+                        const totalDueMatch = text.match(/total\s*due\s*\$?\s*([\d,]+\.\d{2})/i)
+                            || text.match(/amount\s*due\s*\$?\s*([\d,]+\.\d{2})/i);
+                        if (totalDueMatch) {
+                            amount = parseFloat(totalDueMatch[1].replace(/,/g, ''));
+                        }
+                        const billDateMatch = text.match(/bill\s*issue\s*date\s+((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+\d{1,2}[\s,]+\d{4})/i)
+                            || text.match(/billing\s*date[:\s]+((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+\d{1,2}[\s,]+\d{4})/i)
+                            || text.match(/bill\s*issue\s*date\s+(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
+                        if (billDateMatch) {
+                            try {
+                                const d = new Date(billDateMatch[1]);
+                                if (!isNaN(d)) {
+                                    date = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+                                }
+                            } catch {}
+                        }
+                        console.log('T-Mobile bill detected:', { merchant, amount, date });
+                        const cat = suggestCategory('T-Mobile');
+                        return {
+                            merchant, amount, date,
+                            category: cat,
+                            txnType: 'charge',
+                            account: undefined,
+                            fullText: text
+                        };
+                    }
+
                     // Smart merchant name extraction
                     const cleanMerchantName = (raw) => {
                         let name = raw;
@@ -3454,6 +3491,10 @@
                     originalAmount: originalAmount ? parseFloat(originalAmount) : parseFloat(amount),
                     person: userName,
                     date,
+                    // Clear raw fields so updated values are written via getSheet*Name() helpers
+                    accountRaw: null,
+                    categoryRaw: null,
+                    merchantRaw: null,
                 };
                 if (isEdit && editExpense && editExpense.rowIndex) {
                     console.log('Edit mode: updating row', editExpense.rowIndex, 'with', data);
