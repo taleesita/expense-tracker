@@ -2133,29 +2133,41 @@
                     const isTMobileBill = /t-?mobile/i.test(text) && /total\s*due|amount\s*due|bill\s*issue/i.test(text);
                     if (isTMobileBill) {
                         merchant = 'T-Mobile';
-                        const totalDueMatch = text.match(/total\s*due\s*\$?\s*([\d,]+\.\d{2})/i)
-                            || text.match(/amount\s*due\s*\$?\s*([\d,]+\.\d{2})/i);
-                        if (totalDueMatch) {
-                            amount = parseFloat(totalDueMatch[1].replace(/,/g, ''));
+                        // pdf.js produces space-joined text: "TOTAL DUE  $ 177 .98" (split amounts)
+                        // and "Totals   $163.00   $0.00   $14.98   $177.98" (clean amounts in summary table)
+                        // Strategy 1: "Totals" summary row — pick the largest amount (grand total)
+                        let totalsMatch = null;
+                        const totalsIdx = text.indexOf('Totals');
+                        if (totalsIdx >= 0) {
+                            const totalsChunk = text.substring(totalsIdx, totalsIdx + 200);
+                            const allAmts = [...totalsChunk.matchAll(/\$([\d,]+\.\d{2})/g)];
+                            const nonZero = allAmts.filter(m => parseFloat(m[1].replace(/,/g, '')) > 0);
+                            if (nonZero.length) {
+                                totalsMatch = nonZero.reduce((best, m) =>
+                                    parseFloat(m[1].replace(/,/g, '')) > parseFloat(best[1].replace(/,/g, '')) ? m : best
+                                );
+                            }
                         }
-                        const billDateMatch = text.match(/bill\s*issue\s*date\s+((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+\d{1,2}[\s,]+\d{4})/i)
-                            || text.match(/billing\s*date[:\s]+((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s+\d{1,2}[\s,]+\d{4})/i)
-                            || text.match(/bill\s*issue\s*date\s+(\d{1,2}\/\d{1,2}\/\d{2,4})/i);
-                        if (billDateMatch) {
-                            try {
-                                const d = new Date(billDateMatch[1]);
-                                if (!isNaN(d)) {
-                                    date = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-                                }
-                            } catch {}
+                        // Strategy 2: "TOTAL DUE  $ 177 .98" — reassemble split amount
+                        let totalDueSplit = null;
+                        const tduMatch = text.match(/total\s+due\s+\$\s*(\d[\d,]*)\s+\.(\d{2})/i);
+                        if (tduMatch) {
+                            totalDueSplit = { 1: tduMatch[1].replace(/,/g, '') + '.' + tduMatch[2] };
                         }
-                        console.log('T-Mobile bill detected:', { merchant, amount, date });
+                        // Strategy 3: "Amount enclosed" with clean $amount
+                        const amtEnclosed = text.match(/amount\s*enclosed[\s\n]*\$([\d,]+\.\d{2})/i);
+                        const totalMatch = totalsMatch || totalDueSplit || amtEnclosed;
+                        if (totalMatch) {
+                            amount = parseFloat(totalMatch[1].replace(/,/g, ''));
+                        }
+                        // Don't set date — bill issue date ≠ charge date, safer to leave as today
+                        console.log('T-Mobile bill detected:', { merchant, amount, date, textSnippet: text.substring(0, 300) });
                         const cat = suggestCategory('T-Mobile');
                         return {
                             merchant, amount, date,
                             category: cat,
                             txnType: 'charge',
-                            account: undefined,
+                            account: 'cap1_jcheck',
                             fullText: text
                         };
                     }
