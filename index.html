@@ -3123,6 +3123,7 @@
                 const cleanMerchant = (name) => name
                     .replace(/\s*\[\d+\/\d+\]\s*$/, '')  // split tags
                     .replace(/\s*-\s*(Refund|Return|Credit|Reversal|Adjustment)\s*$/i, '')
+                    .replace(/\s*\(\d[\d,]*\s*(?:yen|euro|pounds|shekels|CAD|AUD|CHF|pesos|reais|[A-Z]{3})\)\s*$/i, '')  // foreign currency annotations
                     .trim();
                 allExpenses.forEach(e => {
                     const raw = (e.merchant || '').trim();
