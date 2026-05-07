@@ -3029,7 +3029,7 @@
             const [merchant, setMerchant] = useState('');
             const [amount, setAmount] = useState('');
             const [date, setDate] = useState(todayLocalStr());
-            const [category, setCategory] = useState('other');
+            const [category, setCategory] = useState('');
             const [account, setAccount] = useState('');
             const [notes, setNotes] = useState('');
             const [receipt, setReceipt] = useState('');
@@ -3068,7 +3068,7 @@
                     setMerchant(editExpense.merchant || '');
                     setAmount(editExpense.amount?.toString() || '');
                     setDate(editExpense.date || todayLocalStr());
-                    setCategory(editExpense.category || 'other');
+                    setCategory(editExpense.category && editExpense.category !== 'other' ? editExpense.category : '');
                     setAccount(editExpense.account || '');
                     setNotes('');
                     setReceipt(editExpense.receipt || '');
@@ -3175,7 +3175,8 @@
                     setMerchant(finalMerchant);
                     setAmount(result.amount.toString());
                     setDate(result.date);
-                    setCategory(result.category || suggestCategory(finalMerchant));
+                    const scanCat = result.category || suggestCategory(finalMerchant);
+                    setCategory(scanCat === 'other' ? '' : scanCat);
                     if (result.txnType) setTxnType(result.txnType);
                     // Pre-fill foreign currency if detected
                     if (result.originalCurrency && result.originalAmount) {
@@ -3237,8 +3238,8 @@
                             }
                             if (!isGibberishMerchant(corrected)) {
                                 setMerchant(corrected);
-                                if (!isEdit) setCategory(ocrResult.category || suggestCategory(corrected));
-                            } else if (ocrResult.category) {
+                                if (!isEdit) { const dc = ocrResult.category || suggestCategory(corrected); if (dc && dc !== 'other') setCategory(dc); }
+                            } else if (ocrResult.category && ocrResult.category !== 'other') {
                                 if (!isEdit) setCategory(ocrResult.category);
                             }
                         }
@@ -3845,7 +3846,7 @@
                                                 value={merchant}
                                                 onChange={(e) => { setMerchant(e.target.value); setShowSuggestions(true); setValidationErrors(prev => ({...prev, merchant: false})); }}
                                                 onFocus={() => setShowSuggestions(true)}
-                                                onBlur={() => { setTimeout(() => setShowSuggestions(false), 200); if (!isEdit) setCategory(suggestCategory(merchant)); }}
+                                                onBlur={() => { setTimeout(() => setShowSuggestions(false), 200); if (!isEdit) { const sc = suggestCategory(merchant); if (sc && sc !== 'other') setCategory(sc); } }}
                                                 className={`w-full border rounded-lg px-3 py-2.5 ${validationErrors.merchant ? 'border-red-500 border-2 bg-red-50 placeholder-red-400' : ''}`}
                                             />
                                             {showSuggestions && merchant.length >= 2 && (() => {
@@ -3854,7 +3855,7 @@
                                                     <div className="absolute z-50 left-0 right-0 top-full mt-1 bg-white border border-gray-200 rounded-lg shadow-lg max-h-40 overflow-y-auto">
                                                         {matches.slice(0, 6).map((m, i) => (
                                                             <button key={i} type="button"
-                                                                onMouseDown={(e) => { e.preventDefault(); setMerchant(m); setShowSuggestions(false); if (!isEdit) setCategory(suggestCategory(m)); }}
+                                                                onMouseDown={(e) => { e.preventDefault(); setMerchant(m); setShowSuggestions(false); if (!isEdit) { const sc = suggestCategory(m); if (sc && sc !== 'other') setCategory(sc); } }}
                                                                 className="w-full text-left px-4 py-2.5 text-sm hover:bg-blue-50 border-b border-gray-100 last:border-0"
                                                             >{m}</button>
                                                         ))}
@@ -4068,12 +4069,20 @@
                                         Cancel
                                     </button>
                                 )}
-                                <button
-                                    onClick={handleAdd}
-                                    className="flex-1 bg-blue-600 text-white py-2 rounded-lg font-medium hover:bg-blue-700"
-                                >
-                                    {isEdit ? 'Save Changes' : inboxMode ? (inboxIsLast ? 'Save & Close' : 'Save & Next') : 'Save'}
-                                </button>
+                                {(() => {
+                                    const missingReq = isDualEntry
+                                        ? (!account || !amount || !date || !secondaryAccount || account === secondaryAccount)
+                                        : (!account || !amount || !date || !merchant || !category);
+                                    return (
+                                        <button
+                                            onClick={handleAdd}
+                                            disabled={missingReq}
+                                            className={`flex-1 py-2 rounded-lg font-medium ${missingReq ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-blue-600 text-white hover:bg-blue-700'}`}
+                                        >
+                                            {isEdit ? 'Save Changes' : inboxMode ? (inboxIsLast ? 'Save & Close' : 'Save & Next') : 'Save'}
+                                        </button>
+                                    );
+                                })()}
                             </div>
                             {inboxMode && (
                                 <button
