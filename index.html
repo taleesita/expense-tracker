@@ -3051,6 +3051,7 @@
                     // New modal session — increment counter so stale async uploads are ignored
                     modalSessionId.current += 1;
                     uploadedReceiptUrl.current = null;
+                    setShowOCRSpinner(false);
                 }
                 if (editExpense && isOpen) {
                     setMerchant(editExpense.merchant || '');
@@ -3082,7 +3083,7 @@
                     setMerchant('');
                     setAmount('');
                     setDate(todayLocalStr());
-                    setCategory('other');
+                    setCategory('');
                     setAccount('');
                     setNotes('');
                     setReceipt('');
@@ -3394,6 +3395,9 @@
 
             // Cancel: delete uploaded Drive file if any
             const handleCancel = () => {
+                // Stop any in-progress scan by bumping session ID (stale results will be ignored)
+                modalSessionId.current += 1;
+                setShowOCRSpinner(false);
                 if (uploadedReceiptUrl.current) {
                     deleteFile(uploadedReceiptUrl.current);
                     uploadedReceiptUrl.current = null;
