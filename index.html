@@ -349,6 +349,9 @@
             if (/^[^a-zA-Z]{2,}/.test(trimmed)) return true;
             // Too long — real merchant names are rarely 50+ chars
             if (trimmed.length > 50) return true;
+            // Common non-merchant phrases from email PDF OCR
+            const lower = trimmed.toLowerCase();
+            if (/^(receipt\s+for|thank\s+you|thanks\s+for|dear\s+|hi\s+|hello\s+|your\s+(order|receipt|payment|transaction)|order\s+confirm|transaction\s+detail|payment\s+confirm|purchase\s+summary|billing\s+statement)/i.test(lower)) return true;
             return false;
         };
 
@@ -2181,8 +2184,10 @@
                         name = name.replace(/\S*\.(com|net|org|io|co|shop|store|email)\S*/gi, '');
                         // Remove store/order IDs (long alphanumeric strings)
                         name = name.replace(/\b[a-z0-9]{10,}\b/gi, '');
-                        // Remove common prefixes
+                        // Remove common prefixes and preamble phrases
                         name = name.replace(/^(from|to|by|via|at|order|receipt|invoice|confirmation)\s+/i, '');
+                        name = name.replace(/^(for\s+your\s+(?:recent\s+)?(?:visit|order|purchase)\s+(?:to|at|from)\s+)/i, '');
+                        name = name.replace(/^(for|the|your|dear|hi|hello|thank\s+you)\s+/i, '');
                         // Remove country codes like "US", "UK" at word boundaries after the name
                         name = name.replace(/\s+(US|UK|CA|AU|EU|USA|GBP|USD)\s*$/i, '');
                         // Strip non-name characters but keep &, ', -, spaces
@@ -6219,10 +6224,30 @@
         const merchantFromSubject = (subject) => {
             if (!subject) return '';
             let s = subject.replace(/^(Fwd?|Re|Fw):\s*/gi, '').trim();
+
+            // ---- KNOWN SENDER PATTERNS ----
+            // Venmo: "You paid Junaid Chisty $300.00"
+            const venmo = s.match(/you\s+(?:paid|completed|charged)\s+(.+?)\s+\$[\d,.]+/i);
+            if (venmo) return 'Venmo - ' + venmo[1].trim();
+            // Zelle: "You sent $X to Name" or "Name sent you $X"
+            const zelle = s.match(/you\s+sent\s+\$[\d,.]+\s+to\s+(.+)/i) || s.match(/(.+?)\s+sent\s+you\s+\$/i);
+            if (zelle) return 'Zelle - ' + zelle[1].trim();
+            // United Airlines: "Thanks for your purchase with United"
+            const purchaseWith = s.match(/(?:thanks?\s+for\s+your\s+)?purchase\s+with\s+(.+)/i);
+            if (purchaseWith) { let name = purchaseWith[1].trim(); return name; }
+            // "Your <merchant> receipt" or "receipt from <merchant>"
+            const receiptFrom = s.match(/receipt\s+(?:from|for\s+your\s+(?:recent\s+)?(?:visit|order|purchase)\s+(?:to|at|from))\s+(.+)/i);
+            if (receiptFrom) { let name = receiptFrom[1].replace(/[.!]+$/, '').trim(); if (name.length >= 2 && name.length <= 40) return name; }
+            const yourReceipt = s.match(/your\s+(.+?)\s+receipt/i);
+            if (yourReceipt) { let name = yourReceipt[1].trim(); if (name.length >= 2 && name.length <= 40) return name; }
+            // "Transaction alert from <merchant>"
+            const alertFrom = s.match(/(?:transaction|payment|purchase)\s+(?:alert|notification|notice)\s+(?:from|for)\s+(.+)/i);
+            if (alertFrom) { let name = alertFrom[1].replace(/[.!]+$/, '').trim(); if (name.length >= 2 && name.length <= 40) return name; }
+            // "Your <merchant> order" / "order from <merchant>"
             const patterns = [
                 /your\s+(.+?)\s+order/i,
                 /order\s+(?:from|confirmation\s+from)\s+(.+?)(?:\s+#|\s+\d|$)/i,
-                /(.+?)\s+(?:order|receipt|confirmation|invoice|payment|billing)/i,
+                /(.+?)\s+(?:order|receipt|confirmation|invoice|payment|billing)\b/i,
                 /(?:receipt|order|confirmation)\s+(?:from|for)\s+(.+?)(?:\s+#|\s+\d|$)/i,
             ];
             for (const pat of patterns) {
@@ -6230,6 +6255,8 @@
                 if (m) {
                     let name = m[1].replace(/\.com|\.net|\.org/gi, '').trim();
                     name = name.replace(/\s*(#|number|no\.?)\s*\d+.*/i, '').trim();
+                    // Filter out phrases that aren't merchant names
+                    if (/^(your|the|a|an|this)\s/i.test(name)) continue;
                     if (name.length >= 2 && name.length <= 40) return name;
                 }
             }
