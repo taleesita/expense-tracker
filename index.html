@@ -6492,8 +6492,18 @@
             const inboxTotalRef = useRef(0);    // total items when review started
             const inboxReviewedRef = useRef(0); // how many reviewed so far
             const [testMode, setTestMode] = useState(_testMode);
+            // Session-only dismiss for regular reminders (reappear on next app open)
+            // Permanent dismiss (until next quarter) still stored in localStorage for EOQ
             const [dismissedReminders, setDismissedReminders] = useState(() => {
-                try { return JSON.parse(localStorage.getItem('dismissed_reminders') || '{}'); } catch { return {}; }
+                // Only load EOQ dismissals from localStorage; regular reminders start fresh each session
+                try {
+                    const saved = JSON.parse(localStorage.getItem('dismissed_reminders') || '{}');
+                    const eoqOnly = {};
+                    for (const [k, v] of Object.entries(saved)) {
+                        if (k.startsWith('eoq_')) eoqOnly[k] = v;
+                    }
+                    return eoqOnly;
+                } catch { return {}; }
             });
 
             // Auto-detect completed quarters from the quarterly sheet
@@ -6570,13 +6580,16 @@
                 const dismissedAt = dismissedReminders[r.id];
                 if (!dismissedAt) return true;
                 if (r._isEOQ) return false; // EOQ review: dismiss is permanent (until next quarter)
-                // Regular reminders: re-show after 24 hours
-                return Date.now() - dismissedAt > 24 * 60 * 60 * 1000;
+                // Regular reminders: session-only dismiss (hidden until app is reopened)
+                return false;
             });
             const dismissReminder = (id) => {
                 const updated = { ...dismissedReminders, [id]: Date.now() };
                 setDismissedReminders(updated);
-                localStorage.setItem('dismissed_reminders', JSON.stringify(updated));
+                // Only persist EOQ dismissals to localStorage
+                if (id.startsWith('eoq_')) {
+                    localStorage.setItem('dismissed_reminders', JSON.stringify(updated));
+                }
             };
 
             // Quick-add from reminder: pre-fill the add modal
