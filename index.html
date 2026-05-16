@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.14-may4';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.15-may16';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -352,6 +352,11 @@
             // Common non-merchant phrases from email PDF OCR
             const lower = trimmed.toLowerCase();
             if (/^(receipt\s+for|thank\s+you|thanks\s+for|dear\s+|hi\s+|hello\s+|your\s+(order|receipt|payment|transaction)|order\s+confirm|transaction\s+detail|payment\s+confirm|purchase\s+summary|billing\s+statement)/i.test(lower)) return true;
+            // Single-word non-merchant terms (survey prompts, email boilerplate, generic words)
+            const GIBBERISH_SINGLES = ['review','feedback','survey','unsubscribe','subscribe','forward','reply','view','download','update','summary','details','invoice','confirm','confirmation','notification','alert','reminder','welcome','hello','hi','thanks','total','subtotal','tax','tip','balance','amount','date','description','quantity','item','items','price','discount','shipping','tracking','status','account','profile','settings','help','support','contact','faq','terms','privacy','policy','copyright','powered','sent','from','to','re','fwd','subject','manage','preferences','click','here','order','receipt','payment','transaction','purchase','charge','refund','credit','debit','statement','activity'];
+            if (GIBBERISH_SINGLES.includes(lower)) return true;
+            // Short phrases that are clearly not merchants
+            if (/^(we'?re\s+processing|processing\s+your|how\s+was|rate\s+(your|us|this)|leave\s+a\s+review|write\s+a\s+review|share\s+your|tell\s+us|let\s+us\s+know|click\s+here|view\s+(in|on)|open\s+in|powered\s+by|sent\s+(from|via|by)|manage\s+your|update\s+your)/i.test(lower)) return true;
             return false;
         };
 
@@ -378,6 +383,7 @@
                 dayHint: 'wednesday',       // typical pay day
                 approxAmount: 2127,
                 matchMerchant: 'doug disney paycheck',
+                forUser: 'Doug',           // only show this reminder to Doug
             },
             {
                 id: 'taly_paycheck',
@@ -390,6 +396,7 @@
                 approxAmount: 3916,
                 matchMerchant: 'paystub - companycam',
                 matchAccount: 'cap1_jcheck',
+                forUser: 'Taly',           // only show this reminder to Taly
             },
             {
                 id: 'taly_paycheck_tsav',
@@ -402,6 +409,7 @@
                 approxAmount: 150,
                 matchMerchant: 'paystub - companycam',
                 matchAccount: 'cap1_tsaving',
+                forUser: 'Taly',           // only show this reminder to Taly
             },
             {
                 id: 'interest_jcheck',
@@ -6225,40 +6233,46 @@
             if (!subject) return '';
             let s = subject.replace(/^(Fwd?|Re|Fw):\s*/gi, '').trim();
 
+            // Helper: reject captures that are clearly phrases, not merchant names
+            const isPhrase = (n) => /^(your|the|a|an|this|we|you|i|my|our|here|it)\b/i.test(n)
+                || /^(we're|we've|you've|you're|i'm|here's|it's|thank|thanks|dear|hi|hello)\b/i.test(n)
+                || /\b(processing|confirm|complet|ship|deliver|receiv|plac|prepar|cancel|refund|return|verif|updat|schedul|remind)/.test(n.toLowerCase());
+
             // ---- KNOWN SENDER PATTERNS ----
+            // Apple: "We're processing your order W1590669579"
+            if (/W\d{8,}/i.test(s) && /order|processing/i.test(s)) return 'Apple';
             // Venmo: "You paid Junaid Chisty $300.00"
             const venmo = s.match(/you\s+(?:paid|completed|charged)\s+(.+?)\s+\$[\d,.]+/i);
             if (venmo) return 'Venmo - ' + venmo[1].trim();
             // Zelle: "You sent $X to Name" or "Name sent you $X"
             const zelle = s.match(/you\s+sent\s+\$[\d,.]+\s+to\s+(.+)/i) || s.match(/(.+?)\s+sent\s+you\s+\$/i);
             if (zelle) return 'Zelle - ' + zelle[1].trim();
-            // United Airlines: "Thanks for your purchase with United"
-            const purchaseWith = s.match(/(?:thanks?\s+for\s+your\s+)?purchase\s+with\s+(.+)/i);
-            if (purchaseWith) { let name = purchaseWith[1].trim(); return name; }
-            // "Your <merchant> receipt" or "receipt from <merchant>"
-            const receiptFrom = s.match(/receipt\s+(?:from|for\s+your\s+(?:recent\s+)?(?:visit|order|purchase)\s+(?:to|at|from))\s+(.+)/i);
-            if (receiptFrom) { let name = receiptFrom[1].replace(/[.!]+$/, '').trim(); if (name.length >= 2 && name.length <= 40) return name; }
+            // "purchase with <X>" / "thanks for your purchase with <X>"
+            const purchaseWith = s.match(/purchase\s+with\s+(.+)/i);
+            if (purchaseWith) { let name = purchaseWith[1].replace(/[.!]+$/, '').trim(); if (!isPhrase(name) && name.length >= 2 && name.length <= 40) return name; }
+            // "receipt for your visit/order to <X>" or "receipt from <X>"
+            const receiptFor = s.match(/receipt\s+for\s+your\s+(?:recent\s+)?(?:visit|order|purchase)\s+(?:to|at|from)\s+(.+)/i);
+            if (receiptFor) { let name = receiptFor[1].replace(/[.!]+$/, '').trim(); if (name.length >= 2 && name.length <= 40) return name; }
+            const receiptFrom = s.match(/receipt\s+from\s+(.+?)(?:\s+#|\s+\d|[.!]|$)/i);
+            if (receiptFrom) { let name = receiptFrom[1].trim(); if (name.length >= 2 && name.length <= 40) return name; }
+            // "Your <merchant> receipt"
             const yourReceipt = s.match(/your\s+(.+?)\s+receipt/i);
-            if (yourReceipt) { let name = yourReceipt[1].trim(); if (name.length >= 2 && name.length <= 40) return name; }
-            // "Transaction alert from <merchant>"
+            if (yourReceipt) { let name = yourReceipt[1].trim(); if (!isPhrase(name) && name.length >= 2 && name.length <= 40) return name; }
+            // "Transaction/payment alert from <merchant>"
             const alertFrom = s.match(/(?:transaction|payment|purchase)\s+(?:alert|notification|notice)\s+(?:from|for)\s+(.+)/i);
-            if (alertFrom) { let name = alertFrom[1].replace(/[.!]+$/, '').trim(); if (name.length >= 2 && name.length <= 40) return name; }
-            // "Your <merchant> order" / "order from <merchant>"
-            const patterns = [
-                /your\s+(.+?)\s+order/i,
-                /order\s+(?:from|confirmation\s+from)\s+(.+?)(?:\s+#|\s+\d|$)/i,
-                /(.+?)\s+(?:order|receipt|confirmation|invoice|payment|billing)\b/i,
-                /(?:receipt|order|confirmation)\s+(?:from|for)\s+(.+?)(?:\s+#|\s+\d|$)/i,
-            ];
-            for (const pat of patterns) {
-                const m = s.match(pat);
-                if (m) {
-                    let name = m[1].replace(/\.com|\.net|\.org/gi, '').trim();
-                    name = name.replace(/\s*(#|number|no\.?)\s*\d+.*/i, '').trim();
-                    // Filter out phrases that aren't merchant names
-                    if (/^(your|the|a|an|this)\s/i.test(name)) continue;
-                    if (name.length >= 2 && name.length <= 40) return name;
-                }
+            if (alertFrom) { let name = alertFrom[1].replace(/[.!]+$/, '').trim(); if (!isPhrase(name) && name.length >= 2 && name.length <= 40) return name; }
+            // "order from <X>" / "order confirmation from <X>"
+            const orderFrom = s.match(/order\s+(?:from|confirmation\s+from)\s+(.+?)(?:\s+#|\s+\d|$)/i);
+            if (orderFrom) { let name = orderFrom[1].replace(/\.com|\.net|\.org/gi, '').trim(); if (!isPhrase(name) && name.length >= 2 && name.length <= 40) return name; }
+            // "Your <X> order" — only if X is short and looks like a merchant
+            const yourOrder = s.match(/your\s+(.+?)\s+order/i);
+            if (yourOrder) { let name = yourOrder[1].replace(/\.com|\.net|\.org/gi, '').trim(); if (!isPhrase(name) && name.length >= 2 && name.length <= 30) return name; }
+            // Last resort: "<X> order/receipt/confirmation/invoice" where X is at the start
+            const leadingMerchant = s.match(/^(.+?)\s+(?:order|receipt|confirmation|invoice|payment|billing)\b/i);
+            if (leadingMerchant) {
+                let name = leadingMerchant[1].replace(/\.com|\.net|\.org/gi, '').trim();
+                name = name.replace(/\s*(#|number|no\.?)\s*\d+.*/i, '').trim();
+                if (!isPhrase(name) && name.length >= 2 && name.length <= 40) return name;
             }
             return '';
         };
@@ -6551,6 +6565,8 @@
             const merchantAccountMap = useMemo(() => buildMerchantAccountMap(displayExpensesApp), [displayExpensesApp]);
             const overdueRecurring = useMemo(() => getOverdueRecurring(displayExpensesApp), [displayExpensesApp, quarterlyLockVersion]);
             const visibleReminders = overdueRecurring.filter(r => {
+                // User-specific reminders: only show to the intended user
+                if (r.forUser && user?.name !== r.forUser) return false;
                 const dismissedAt = dismissedReminders[r.id];
                 if (!dismissedAt) return true;
                 if (r._isEOQ) return false; // EOQ review: dismiss is permanent (until next quarter)
