@@ -6259,11 +6259,14 @@
             // "purchase with <X>" / "thanks for your purchase with <X>"
             const purchaseWith = s.match(/purchase\s+with\s+(.+)/i);
             if (purchaseWith) { let name = purchaseWith[1].replace(/[.!]+$/, '').trim(); if (!isPhrase(name) && name.length >= 2 && name.length <= 40) return name; }
-            // "receipt for your visit/order to <X>" or "receipt from <X>"
+            // "receipt for your visit/order to <X>" or "receipt from <X>" or "receipt for <X>"
             const receiptFor = s.match(/receipt\s+for\s+your\s+(?:recent\s+)?(?:visit|order|purchase)\s+(?:to|at|from)\s+(.+)/i);
             if (receiptFor) { let name = receiptFor[1].replace(/[.!]+$/, '').trim(); if (name.length >= 2 && name.length <= 40) return name; }
             const receiptFrom = s.match(/receipt\s+from\s+(.+?)(?:\s+#|\s+\d|[.!]|$)/i);
             if (receiptFrom) { let name = receiptFrom[1].trim(); if (name.length >= 2 && name.length <= 40) return name; }
+            // Simple "Receipt for <merchant>" (without "your visit/order to")
+            const receiptForSimple = s.match(/receipt\s+for\s+([A-Z][A-Za-z0-9\s&'.,-]{1,40})$/i);
+            if (receiptForSimple) { let name = receiptForSimple[1].replace(/[.!]+$/, '').trim(); if (!isPhrase(name) && name.length >= 2 && name.length <= 40) return name; }
             // "Your <merchant> receipt"
             const yourReceipt = s.match(/your\s+(.+?)\s+receipt/i);
             if (yourReceipt) { let name = yourReceipt[1].trim(); if (!isPhrase(name) && name.length >= 2 && name.length <= 40) return name; }
@@ -6337,12 +6340,14 @@
                 let finalOriginalCurrency = null;
                 let finalOriginalAmount = null;
 
+                console.log('Inbox prefill debug:', { subject: item.subject, subjectMerchant, ocrMerchant: ocr?.merchant, hasOcr: !!ocr });
                 if (ocr) {
                     const ocrMerchantClean = (ocr.merchant || '').replace(/^[\s.,;:!?]+/, '').trim();
                     const ocrMerchantGood = !isGibberishMerchant(ocrMerchantClean);
                     // Prefer OCR merchant for Amazon orders (subject is just "Order Details")
                     const ocrIsAmazon = /^Amazon\s*-\s*\d{3}-\d{7}-\d{7}$/.test(ocrMerchantClean);
                     finalMerchant = ocrIsAmazon ? ocrMerchantClean : (subjectMerchant || (ocrMerchantGood ? ocrMerchantClean : ''));
+                    console.log('Inbox prefill result:', { ocrMerchantClean, ocrMerchantGood, ocrIsAmazon, finalMerchant });
                     finalAmount = ocr.amount ? String(ocr.amount) : '';
                     finalDate = ocr.date || finalDate;
                     finalCategory = ocr.category || suggestCategory(finalMerchant) || 'other';
@@ -6676,11 +6681,13 @@
                 let merchant = '', amount = '', date = item.emailDate || todayLocalStr();
                 let category = 'other', txnType = 'charge', account = '';
                 let originalCurrency = null, originalAmount = null;
+                console.log('Inbox buildPrefill debug:', { subject: item.subject, subjectMerchant, ocrMerchant: ocr?.merchant, hasOcr: !!ocr });
                 if (ocr) {
                     const ocrMerchantClean = (ocr.merchant || '').replace(/^[\s.,;:!?]+/, '').trim();
                     const ocrMerchantGood = !isGibberishMerchant(ocrMerchantClean);
                     // Prefer subject merchant; fall back to OCR only if it looks real
                     merchant = subjectMerchant || (ocrMerchantGood ? ocrMerchantClean : '');
+                    console.log('Inbox buildPrefill result:', { ocrMerchantClean, ocrMerchantGood, merchant });
                     amount = ocr.amount ? String(ocr.amount) : '';
                     date = ocr.date || date;
                     category = ocr.category || (merchant ? suggestCategory(merchant) : 'other') || 'other';
