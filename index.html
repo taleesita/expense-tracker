@@ -65,10 +65,13 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.15-may16';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.16-may22';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
+        // Apps Script web app URL for manual inbox processing trigger
+        // Deploy the script as a web app, then paste the URL here
+        const PROCESS_INBOX_URL = 'https://script.google.com/macros/s/AKfycby8wa10OkbNk3h3lNHOjypwyXAdVvn0_Lgbztt2JqqwJsMV2L5nLLC8daX8tB41V3zU/exec';
         const TEST_PARENT_FOLDER_ID = '1LJ57lHUhuLigB1NKuko39saGCRVqs8Ya';
 
         // Test mode state — persisted in localStorage
@@ -6164,10 +6167,11 @@
             );
         };
 
-        const SettingsDropdown = ({ user, onLogout, testMode, onToggleTestMode, onRefreshTestData }) => {
+        const SettingsDropdown = ({ user, onLogout, testMode, onToggleTestMode, onRefreshTestData, onProcessInbox }) => {
             const [open, setOpen] = useState(false);
             const [toggling, setToggling] = useState(false);
             const [refreshing, setRefreshing] = useState(false);
+            const [processing, setProcessing] = useState(false);
 
             return (
                 <div className="relative">
@@ -6220,6 +6224,19 @@
                                     <span>{refreshing ? 'Refreshing...' : 'Refresh Test Data'}</span>
                                 </button>
                             )}
+                            <button
+                                onClick={async () => {
+                                    setProcessing(true);
+                                    await onProcessInbox();
+                                    setProcessing(false);
+                                    setOpen(false);
+                                }}
+                                disabled={processing}
+                                className="w-full px-4 py-2.5 text-left hover:bg-gray-50 flex items-center gap-2 text-sm border-b border-gray-100"
+                            >
+                                <RefreshCwIcon size={14} className={processing ? 'animate-spin' : ''} />
+                                <span>{processing ? 'Processing emails...' : 'Process Inbox Emails'}</span>
+                            </button>
                             <button
                                 onClick={() => {
                                     onLogout();
@@ -6657,6 +6674,28 @@
                 } else {
                     alert('Failed to refresh test data');
                 }
+            };
+
+            const handleProcessInbox = async () => {
+                if (PROCESS_INBOX_URL) {
+                    try {
+                        setToast('Processing inbox emails...');
+                        const resp = await fetch(PROCESS_INBOX_URL);
+                        const result = await resp.json();
+                        if (result.status === 'ok') {
+                            setToast('Inbox processed — refreshing...');
+                        } else {
+                            setToast('Processing error: ' + (result.message || 'unknown'));
+                        }
+                    } catch (err) {
+                        setToast('Failed to trigger processing: ' + err.message);
+                    }
+                } else {
+                    setToast('Refreshing inbox...');
+                }
+                // Always refresh inbox items from the sheet
+                await fetchInbox();
+                setTimeout(() => setToast(''), 3000);
             };
 
             const handleEditExpense = (expense) => {
@@ -7259,7 +7298,7 @@
                             >
                                 <PlusCircleIcon size={18} />
                             </button>
-                            <SettingsDropdown user={user} onLogout={logout} testMode={testMode} onToggleTestMode={handleToggleTestMode} onRefreshTestData={handleRefreshTestData} />
+                            <SettingsDropdown user={user} onLogout={logout} testMode={testMode} onToggleTestMode={handleToggleTestMode} onRefreshTestData={handleRefreshTestData} onProcessInbox={handleProcessInbox} />
                         </div>
                     </div>
 
