@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.16-may22';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.17-may23';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -1457,7 +1457,33 @@
                         const dateB = b.date || b.timestamp;
                         return new Date(dateB) - new Date(dateA) || b.rowIndex - a.rowIndex;
                     });
-                    setExpenses(parsed);
+                    // On silent refresh, preserve in-memory reconciliation state from current expenses
+                    // This prevents reconciliation marks from disappearing when auto-refresh fires
+                    if (silent) {
+                        setExpenses(prev => {
+                            const prevByKey = {};
+                            const prevByRow = {};
+                            prev.forEach(e => {
+                                if (e._recKey) prevByKey[e._recKey] = e;
+                                prevByRow[e.rowIndex] = e;
+                            });
+                            return parsed.map(e => {
+                                // Match by recKey first (content-based), then by rowIndex as fallback
+                                const existing = (e._recKey && prevByKey[e._recKey]) || prevByRow[e.rowIndex];
+                                if (existing && (existing.reconcileStatus || existing.reconciledLocked)) {
+                                    return {
+                                        ...e,
+                                        reconciled: existing.reconciled,
+                                        reconcileStatus: existing.reconcileStatus,
+                                        reconciledLocked: existing.reconciledLocked,
+                                    };
+                                }
+                                return e;
+                            });
+                        });
+                    } else {
+                        setExpenses(parsed);
+                    }
                     setExpensesCache(parsed);
                     saveCachedExpenses(parsed);
                 } catch (err) {
@@ -2256,8 +2282,8 @@
                     const hasAmazonOrderPage = /order\s*details|order\s*placed|your\s*orders/i.test(text);
                     console.log('OCR merchant detection:', { merchant, isAmazon, wholefoods, hasAmazonOrderPage, hasOrderNum: !!amazonOrderMatch, textSnippet: text.substring(0, 300) });
 
-                    if (amazonOrderMatch && (isAmazon || hasAmazonOrderPage)) {
-                        // Has Amazon order number → definitely Amazon
+                    if (amazonOrderMatch && !wholefoods) {
+                        // Amazon order number format (###-#######-#######) is unique to Amazon
                         merchant = `Amazon - ${amazonOrderMatch[1]}`;
                     } else if (wholefoods) {
                         // "Whole Foods" in text and no Amazon order number → Whole Foods
@@ -2281,6 +2307,9 @@
                         new RegExp('scheduled\\s+a?\\s*\\$?\\s*' + moneyRe + '\\s*payment', 'i'),
                         new RegExp('payment\\s+of\\s+\\$?\\s*' + moneyRe, 'i'),
                         new RegExp('authorize[\\s\\S]{0,60}payment\\s+of\\s+\\$?\\s*' + moneyRe, 'i'),
+                        new RegExp('\\$\\s*' + moneyRe + '\\s+has\\s+been\\s+charged', 'i'),
+                        new RegExp('(?:total|grand)\\s+charge[:\\s]*\\$?\\s*' + moneyRe, 'i'),
+                        new RegExp('charged\\s+(?:to\\s+)?(?:your|the)\\s+.*?\\$\\s*' + moneyRe, 'i'),
                     ];
                     for (const pat of paymentPats) {
                         const m = text.match(pat);
@@ -4640,9 +4669,14 @@
             };
 
             const clearableItems = [...unlockedReconciled, ...pendingExpenses];
+            const [showClearConfirm, setShowClearConfirm] = useState(false);
             const handleClear = () => {
                 if (clearableItems.length === 0) return;
+                setShowClearConfirm(true);
+            };
+            const confirmClear = () => {
                 onClearUnlocked(clearableItems.map(e => e.rowIndex));
+                setShowClearConfirm(false);
             };
 
             if (!account) return null;
@@ -4688,13 +4722,29 @@
                                         <LockIcon size={14} /> Lock {unlockedReconciled.length}
                                     </button>
                                 )}
-                                {clearableItems.length > 0 && (
+                                {clearableItems.length > 0 && !showClearConfirm && (
                                     <button
                                         onClick={handleClear}
                                         className="flex-1 bg-red-100 text-red-700 py-2 rounded-lg font-medium hover:bg-red-200 text-sm"
                                     >
                                         Clear {clearableItems.length}
                                     </button>
+                                )}
+                                {showClearConfirm && (
+                                    <div className="flex-1 flex gap-1">
+                                        <button
+                                            onClick={confirmClear}
+                                            className="flex-1 bg-red-500 text-white py-2 rounded-lg font-medium text-sm"
+                                        >
+                                            Yes, clear {clearableItems.length}
+                                        </button>
+                                        <button
+                                            onClick={() => setShowClearConfirm(false)}
+                                            className="flex-1 bg-gray-100 text-gray-600 py-2 rounded-lg font-medium text-sm"
+                                        >
+                                            Cancel
+                                        </button>
+                                    </div>
                                 )}
                             </div>
                         )}
@@ -6265,6 +6315,9 @@
                 || /\b(processing|confirm|complet|ship|deliver|receiv|plac|prepar|cancel|refund|return|verif|updat|schedul|remind)/.test(n.toLowerCase());
 
             // ---- KNOWN SENDER PATTERNS ----
+            // Amazon: "You've been charged for [item]" or "Retrocharge" or subject with Amazon order number
+            if (/\d{3}-\d{7}-\d{7}/.test(s)) return 'Amazon';
+            if (/retrocharge|you've been charged for/i.test(s)) return 'Amazon';
             // Apple: "We're processing your order W1590669579"
             if (/W\d{8,}/i.test(s) && /order|processing/i.test(s)) return 'Apple';
             // Venmo: "You paid Junaid Chisty $300.00"
@@ -6680,7 +6733,11 @@
                 if (PROCESS_INBOX_URL) {
                     try {
                         setToast('Processing inbox emails...');
-                        const resp = await fetch(PROCESS_INBOX_URL);
+                        // Pass OAuth token for Apps Script deployed with "Anyone with Google account"
+                        const resp = await fetch(PROCESS_INBOX_URL, {
+                            headers: { 'Authorization': `Bearer ${token}` },
+                            redirect: 'follow',
+                        });
                         const result = await resp.json();
                         if (result.status === 'ok') {
                             setToast('Inbox processed — refreshing...');
@@ -6688,7 +6745,18 @@
                             setToast('Processing error: ' + (result.message || 'unknown'));
                         }
                     } catch (err) {
-                        setToast('Failed to trigger processing: ' + err.message);
+                        // If CORS fails with token, try without (for "Anyone" deployment)
+                        try {
+                            const resp2 = await fetch(PROCESS_INBOX_URL);
+                            const result2 = await resp2.json();
+                            if (result2.status === 'ok') {
+                                setToast('Inbox processed — refreshing...');
+                            } else {
+                                setToast('Processing error: ' + (result2.message || 'unknown'));
+                            }
+                        } catch (err2) {
+                            setToast('Failed to trigger processing — try redeploying Apps Script as "Anyone"');
+                        }
                     }
                 } else {
                     setToast('Refreshing inbox...');
