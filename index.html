@@ -1325,7 +1325,7 @@
                     rawDeposit: e.rawDeposit, category: e.category, categoryRaw: e.categoryRaw,
                     account: e.account, accountRaw: e.accountRaw, receipt: e.receipt,
                     fee: e.fee, txnType: e.txnType, isCredit: e.isCredit,
-                    _balanceOnly: e._balanceOnly, _recKey: e._recKey,
+                    _balanceOnly: e._balanceOnly,
                     _splitGroup: e._splitGroup, _splitIndex: e._splitIndex, _splitTotal: e._splitTotal,
                 }));
                 localStorage.setItem(EXPENSES_CACHE_KEY, JSON.stringify(slim));
@@ -1416,36 +1416,16 @@
                             _splitGroup: splitGroup,
                             _splitIndex: splitIndex,
                             _splitTotal: splitTotal,
-                            reconciled: (() => {
-                                // Key by timestamp+merchant for stable identity across row shifts
-                                const recKey = 'rec_' + btoa(unescape(encodeURIComponent((row[0] || '') + '|' + (row[3] || '')))).slice(0, 24);
-                                try {
-                                    const val = localStorage.getItem(recKey);
-                                    if (!val) return false;
-                                    const parsed = JSON.parse(val);
-                                    // Backward compat: old boolean true → 'reconciled'
-                                    if (parsed === true) return true;
-                                    if (parsed === 'reconciled') return true;
-                                    return false;
-                                } catch { return false; }
-                            })(),
+                            // Reconciliation stored in column J (row[9]): R=reconciled, P=pending, L=locked
+                            reconciled: (row[9] || '').toUpperCase() === 'R' || (row[9] || '').toUpperCase() === 'L',
                             reconcileStatus: (() => {
-                                // 'reconciled', 'pending', or '' (empty/unreconciled)
-                                const recKey = 'rec_' + btoa(unescape(encodeURIComponent((row[0] || '') + '|' + (row[3] || '')))).slice(0, 24);
-                                try {
-                                    const val = localStorage.getItem(recKey);
-                                    if (!val) return '';
-                                    const parsed = JSON.parse(val);
-                                    if (parsed === true || parsed === 'reconciled') return 'reconciled';
-                                    if (parsed === 'pending') return 'pending';
-                                    return '';
-                                } catch { return ''; }
+                                const v = (row[9] || '').toUpperCase();
+                                if (v === 'R') return 'reconciled';
+                                if (v === 'P') return 'pending';
+                                if (v === 'L') return 'reconciled'; // locked items show as reconciled
+                                return '';
                             })(),
-                            reconciledLocked: (() => {
-                                const recKey = 'rec_locked_' + btoa(unescape(encodeURIComponent((row[0] || '') + '|' + (row[3] || '')))).slice(0, 24);
-                                try { return JSON.parse(localStorage.getItem(recKey)) || false; } catch { return false; }
-                            })(),
-                            _recKey: btoa(unescape(encodeURIComponent((row[0] || '') + '|' + (row[3] || '')))).slice(0, 24),
+                            reconciledLocked: (row[9] || '').toUpperCase() === 'L',
                             notes: '',
                             person: '',
                             _balanceOnly: !hasTimestamp,  // rows without timestamp: include in balance calc but hide from UI
@@ -1457,33 +1437,7 @@
                         const dateB = b.date || b.timestamp;
                         return new Date(dateB) - new Date(dateA) || b.rowIndex - a.rowIndex;
                     });
-                    // On silent refresh, preserve in-memory reconciliation state from current expenses
-                    // This prevents reconciliation marks from disappearing when auto-refresh fires
-                    if (silent) {
-                        setExpenses(prev => {
-                            const prevByKey = {};
-                            const prevByRow = {};
-                            prev.forEach(e => {
-                                if (e._recKey) prevByKey[e._recKey] = e;
-                                prevByRow[e.rowIndex] = e;
-                            });
-                            return parsed.map(e => {
-                                // Match by recKey first (content-based), then by rowIndex as fallback
-                                const existing = (e._recKey && prevByKey[e._recKey]) || prevByRow[e.rowIndex];
-                                if (existing && (existing.reconcileStatus || existing.reconciledLocked)) {
-                                    return {
-                                        ...e,
-                                        reconciled: existing.reconciled,
-                                        reconcileStatus: existing.reconcileStatus,
-                                        reconciledLocked: existing.reconciledLocked,
-                                    };
-                                }
-                                return e;
-                            });
-                        });
-                    } else {
-                        setExpenses(parsed);
-                    }
+                    setExpenses(parsed);
                     setExpensesCache(parsed);
                     saveCachedExpenses(parsed);
                 } catch (err) {
@@ -1720,6 +1674,56 @@
                 }
             }, [token, fetchExpenses]);
 
+            // Fast single-cell write for reconciliation status (column J only)
+            const writeReconcileCell = useCallback(async (rowIndex, status) => {
+                // status: 'R', 'P', 'L', or '' (empty)
+                if (!token) return;
+                try {
+                    const resp = await fetch(
+                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!J${rowIndex}?valueInputOption=USER_ENTERED`,
+                        {
+                            method: 'PUT',
+                            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ values: [[status]] })
+                        }
+                    );
+                    if (!resp.ok) {
+                        console.error('Reconcile write failed:', resp.status);
+                        throw new Error(resp.status === 401 ? 'Google connection expired' : `Write failed (${resp.status})`);
+                    }
+                } catch (err) {
+                    console.error('Failed to write reconcile status:', err);
+                    throw err;
+                }
+            }, [token]);
+
+            // Batch write reconciliation status for multiple rows (lock/clear)
+            const batchWriteReconcile = useCallback(async (updates) => {
+                // updates: array of { rowIndex, status } — status is 'R', 'P', 'L', or ''
+                if (!token || updates.length === 0) return;
+                try {
+                    const data = updates.map(({ rowIndex, status }) => ({
+                        range: `${SHEET_TAB}!J${rowIndex}`,
+                        values: [[status]]
+                    }));
+                    const resp = await fetch(
+                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values:batchUpdate`,
+                        {
+                            method: 'POST',
+                            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ valueInputOption: 'USER_ENTERED', data })
+                        }
+                    );
+                    if (!resp.ok) {
+                        console.error('Batch reconcile write failed:', resp.status);
+                        throw new Error(resp.status === 401 ? 'Google connection expired' : `Batch write failed (${resp.status})`);
+                    }
+                } catch (err) {
+                    console.error('Failed to batch write reconcile:', err);
+                    throw err;
+                }
+            }, [token]);
+
             return {
                 expenses,
                 setExpenses,
@@ -1729,6 +1733,8 @@
                 updateExpense,
                 batchUpdateExpenses,
                 deleteExpense,
+                writeReconcileCell,
+                batchWriteReconcile,
                 apiError
             };
         };
@@ -6786,7 +6792,7 @@
         // ============ MAIN APP ============
         const App = () => {
             const { user, token, login, logout, authLoading, needsReconnect, reconnect } = useGoogleAuth();
-            const { expenses, setExpenses, loading, fetchExpenses, appendExpense, updateExpense, batchUpdateExpenses, deleteExpense, apiError } = useGoogleSheets(token);
+            const { expenses, setExpenses, loading, fetchExpenses, appendExpense, updateExpense, batchUpdateExpenses, deleteExpense, writeReconcileCell, batchWriteReconcile, apiError } = useGoogleSheets(token);
             const { push: pushUndo, undo: undoAction, canUndo } = useUndoStack();
             const { inboxItems, inboxLoading, fetchInbox, markInboxItem, ocrCacheRef } = useInbox(token);
 
@@ -7208,6 +7214,70 @@
                 }
             }, [user, token, fetchExpenses, fetchInbox]);
 
+            // One-time migration: localStorage reconciliation → column J in sheet
+            const migrationRan = React.useRef(false);
+            useEffect(() => {
+                if (!token || !expenses.length || migrationRan.current) return;
+                if (localStorage.getItem('rec_migrated_v2') === 'done') return;
+                migrationRan.current = true;
+
+                const migrateReconciliation = async () => {
+                    console.log('Starting reconciliation migration from localStorage to sheet...');
+                    const updates = [];
+                    for (const expense of expenses) {
+                        // Skip if column J already has a value (another device already migrated this row)
+                        if (expense.reconcileStatus || expense.reconciledLocked) continue;
+
+                        // Compute the old content-based key
+                        const oldKey = btoa(unescape(encodeURIComponent(
+                            (expense.timestamp || '') + '|' + (expense.merchantRaw || expense.merchant || '')
+                        ))).slice(0, 24);
+
+                        // Check localStorage for reconcile status
+                        let status = '';
+                        try {
+                            const locked = JSON.parse(localStorage.getItem('rec_locked_' + oldKey));
+                            if (locked) {
+                                status = 'L';
+                            } else {
+                                const val = localStorage.getItem('rec_' + oldKey);
+                                if (val) {
+                                    const parsed = JSON.parse(val);
+                                    if (parsed === true || parsed === 'reconciled') status = 'R';
+                                    else if (parsed === 'pending') status = 'P';
+                                }
+                            }
+                        } catch {}
+
+                        if (status) {
+                            updates.push({ rowIndex: expense.rowIndex, status });
+                        }
+                    }
+
+                    if (updates.length > 0) {
+                        console.log(`Migrating ${updates.length} reconciliation marks to sheet...`);
+                        try {
+                            await batchWriteReconcile(updates);
+                            await fetchExpenses(true);
+                            setToast(`Migrated ${updates.length} reconciliation marks to sheet`);
+                            setTimeout(() => setToast(''), 5000);
+                        } catch (err) {
+                            console.error('Migration failed:', err);
+                            setToast('Reconciliation migration failed — will retry next load');
+                            setTimeout(() => setToast(''), 5000);
+                            migrationRan.current = false;
+                            return; // Don't mark as done so it retries
+                        }
+                    } else {
+                        console.log('No localStorage reconciliation entries to migrate.');
+                    }
+                    localStorage.setItem('rec_migrated_v2', 'done');
+                };
+
+                // Delay slightly so the UI renders first
+                setTimeout(migrateReconciliation, 2000);
+            }, [token, expenses, batchWriteReconcile, fetchExpenses]);
+
             // Background OCR for inbox items — runs when inbox items are loaded
             const { scanReceipt: inboxScanReceipt } = useOCR();
             useEffect(() => {
@@ -7429,47 +7499,72 @@
             };
 
             // 3-state cycle: empty → reconciled → pending → empty
+            // 3-state cycle: empty → reconciled → pending → empty
+            // Optimistic UI update + background single-cell write to column J
             const handleReconcile = (rowIndex) => {
                 const expense = expenses.find(e => e.rowIndex === rowIndex);
-                if (expense) {
-                    pushUndo(expenses);
-                    const key = expense._recKey;
-                    const current = expense.reconcileStatus || '';
-                    let next;
-                    if (current === '') next = 'reconciled';
-                    else if (current === 'reconciled') next = 'pending';
-                    else next = ''; // pending → empty
-                    try { localStorage.setItem('rec_' + key, JSON.stringify(next || false)); } catch {}
+                if (!expense || expense.reconciledLocked) return;
+                const current = expense.reconcileStatus || '';
+                let nextStatus, nextCell;
+                if (current === '') { nextStatus = 'reconciled'; nextCell = 'R'; }
+                else if (current === 'reconciled') { nextStatus = 'pending'; nextCell = 'P'; }
+                else { nextStatus = ''; nextCell = ''; } // pending → empty
+
+                // Optimistic update — instant UI
+                setExpenses(prev => prev.map(e => e.rowIndex === rowIndex ? {
+                    ...e,
+                    reconciled: nextStatus === 'reconciled',
+                    reconcileStatus: nextStatus,
+                } : e));
+
+                // Background write to sheet (column J only — very fast)
+                writeReconcileCell(rowIndex, nextCell).catch(err => {
+                    // Revert on failure
+                    console.error('Reconcile write failed, reverting:', err);
                     setExpenses(prev => prev.map(e => e.rowIndex === rowIndex ? {
                         ...e,
-                        reconciled: next === 'reconciled',
-                        reconcileStatus: next,
+                        reconciled: current === 'reconciled',
+                        reconcileStatus: current,
                     } : e));
-                }
+                    setToast('Reconcile failed — ' + (err.message || 'try again'));
+                    setTimeout(() => setToast(''), 4000);
+                });
             };
 
-            // Lock (cement) a batch of reconciled items so they can't be cleared
+            // Lock (cement) a batch of reconciled items — writes 'L' to column J
             const handleLockItems = (rowIndexes) => {
-                pushUndo(expenses);
-                rowIndexes.forEach(ri => {
-                    const exp = expenses.find(e => e.rowIndex === ri);
-                    if (exp) try { localStorage.setItem('rec_locked_' + exp._recKey, JSON.stringify(true)); } catch {}
-                });
+                // Optimistic update
                 setExpenses(prev => prev.map(e => rowIndexes.includes(e.rowIndex) ? { ...e, reconciledLocked: true } : e));
-                setToast(`Locked ${rowIndexes.length} item${rowIndexes.length === 1 ? '' : 's'}`);
-                setTimeout(() => setToast(''), 3000);
+                setToast(`Locking ${rowIndexes.length} item${rowIndexes.length === 1 ? '' : 's'}...`);
+
+                // Background batch write
+                batchWriteReconcile(rowIndexes.map(ri => ({ rowIndex: ri, status: 'L' }))).then(() => {
+                    setToast(`Locked ${rowIndexes.length} item${rowIndexes.length === 1 ? '' : 's'}`);
+                    setTimeout(() => setToast(''), 3000);
+                }).catch(err => {
+                    // Revert on failure
+                    setExpenses(prev => prev.map(e => rowIndexes.includes(e.rowIndex) ? { ...e, reconciledLocked: false } : e));
+                    setToast('Lock failed — ' + (err.message || 'try again'));
+                    setTimeout(() => setToast(''), 4000);
+                });
             };
 
-            // Clear only unlocked reconciled/pending items
+            // Clear only unlocked reconciled/pending items — writes '' to column J
             const handleClearUnlocked = (rowIndexes) => {
-                pushUndo(expenses);
-                rowIndexes.forEach(ri => {
-                    const exp = expenses.find(e => e.rowIndex === ri);
-                    if (exp) try { localStorage.setItem('rec_' + exp._recKey, JSON.stringify(false)); } catch {}
+                // Optimistic update
+                setExpenses(prev => prev.map(e => rowIndexes.includes(e.rowIndex) ? { ...e, reconciled: false, reconcileStatus: '', reconciledLocked: false } : e));
+                setToast(`Clearing ${rowIndexes.length} reconciliation${rowIndexes.length === 1 ? '' : 's'}...`);
+
+                // Background batch write
+                batchWriteReconcile(rowIndexes.map(ri => ({ rowIndex: ri, status: '' }))).then(() => {
+                    setToast(`Cleared ${rowIndexes.length} reconciliation${rowIndexes.length === 1 ? '' : 's'}`);
+                    setTimeout(() => setToast(''), 3000);
+                }).catch(err => {
+                    // Revert on failure — refetch to get true state
+                    fetchExpenses(true);
+                    setToast('Clear failed — ' + (err.message || 'try again'));
+                    setTimeout(() => setToast(''), 4000);
                 });
-                setExpenses(prev => prev.map(e => rowIndexes.includes(e.rowIndex) ? { ...e, reconciled: false, reconcileStatus: '' } : e));
-                setToast(`Cleared ${rowIndexes.length} reconciliation${rowIndexes.length === 1 ? '' : 's'}`);
-                setTimeout(() => setToast(''), 3000);
             };
 
             const handleUndo = async () => {
