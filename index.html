@@ -610,7 +610,8 @@
                     return d > anchor.afterDate;
                 });
             }
-            return starting + expenses.reduce((sum, e) => {
+            // Exclude "missing" items from balance — they're records only
+            return starting + expenses.filter(e => e.reconcileStatus !== 'missing').reduce((sum, e) => {
                 const dep = parseFloat(e.rawDeposit) || 0;
                 const chg = parseFloat(e.rawCharge) || 0;
                 const fee = parseFloat(e.fee) || 0;
@@ -820,6 +821,13 @@
             <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
                 <circle cx="12" cy="12" r="10"></circle>
                 <polyline points="12 6 12 12 16 14"></polyline>
+            </svg>
+        );
+        const HelpCircleIcon = ({ size = 24, className = '' }) => (
+            <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+                <circle cx="12" cy="12" r="10"></circle>
+                <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+                <line x1="12" y1="17" x2="12.01" y2="17"></line>
             </svg>
         );
         const SearchIcon = ({ size = 24, className = '' }) => (
@@ -1416,12 +1424,13 @@
                             _splitGroup: splitGroup,
                             _splitIndex: splitIndex,
                             _splitTotal: splitTotal,
-                            // Reconciliation stored in column J (row[9]): R=reconciled, P=pending, L=locked
+                            // Reconciliation stored in column J (row[9]): R=reconciled, P=pending, M=missing, L=locked
                             reconciled: (row[9] || '').toUpperCase() === 'R' || (row[9] || '').toUpperCase() === 'L',
                             reconcileStatus: (() => {
                                 const v = (row[9] || '').toUpperCase();
                                 if (v === 'R') return 'reconciled';
                                 if (v === 'P') return 'pending';
+                                if (v === 'M') return 'missing';
                                 if (v === 'L') return 'reconciled'; // locked items show as reconciled
                                 return '';
                             })(),
@@ -2978,7 +2987,7 @@
                         )}
                     </div>
                     <div className="text-right flex-shrink-0">
-                        <span className={`font-semibold text-sm ${isPaymentOrTransfer ? 'text-gray-500' : isInflow ? 'text-green-600' : 'text-red-600'}`}>
+                        <span className={`font-semibold text-sm ${expense.reconcileStatus === 'missing' ? 'text-gray-300 line-through' : isPaymentOrTransfer ? 'text-gray-500' : isInflow ? 'text-green-600' : 'text-red-600'}`}>
                             {isPaymentOrTransfer ? '' : isInflow ? '+' : '-'}${fmt(expense.amount)}
                         </span>
                     </div>
@@ -2992,7 +3001,7 @@
                                 </div>
                             );
                         }
-                        // 3-state: empty → reconciled → pending → empty
+                        // 4-state: empty → reconciled → pending → missing → empty
                         const status = expense.reconcileStatus || '';
                         return (
                             <button
@@ -3003,6 +3012,8 @@
                                     <CheckCircleIcon size={18} className="text-green-600" />
                                 ) : status === 'pending' ? (
                                     <ClockIcon size={18} className="text-amber-500" />
+                                ) : status === 'missing' ? (
+                                    <HelpCircleIcon size={18} className="text-gray-400" />
                                 ) : (
                                     <CircleIcon size={18} className="text-gray-300" />
                                 )}
@@ -4710,6 +4721,8 @@
                             <CheckCircleIcon size={18} className="text-green-600" />
                         ) : status === 'pending' ? (
                             <ClockIcon size={18} className="text-amber-500" />
+                        ) : status === 'missing' ? (
+                            <HelpCircleIcon size={18} className="text-gray-400" />
                         ) : (
                             <CircleIcon size={18} className="text-gray-300" />
                         )}
@@ -4808,9 +4821,10 @@
             const unlockedReconciled = recentExpenses.filter(e => e.reconcileStatus === 'reconciled' && !e.reconciledLocked);
             const unlockedUnreconciled = recentExpenses.filter(e => !e.reconcileStatus && !e.reconciledLocked);
             const pendingExpenses = recentExpenses.filter(e => e.reconcileStatus === 'pending' && !e.reconciledLocked);
+            const missingExpenses = recentExpenses.filter(e => e.reconcileStatus === 'missing');
             const totalReconciled = lockedExpenses.length + unlockedReconciled.length;
 
-            // Balance excluding pending items — recalculate without them
+            // Balance excluding pending items — recalculate without them (missing already excluded by calcAccountBalance)
             const pendingAccountExpenses = accountExpenses.filter(e => e.reconcileStatus === 'pending');
             const hasPending = pendingAccountExpenses.length > 0;
             const nonPendingExpenses = accountExpenses.filter(e => e.reconcileStatus !== 'pending');
@@ -4826,6 +4840,7 @@
                 if (reconcileFilter === 'unreconciled' && (e.reconcileStatus || e.reconciledLocked)) return false;
                 if (reconcileFilter === 'pending' && e.reconcileStatus !== 'pending') return false;
                 if (reconcileFilter === 'reconciled' && e.reconcileStatus !== 'reconciled' && !e.reconciledLocked) return false;
+                if (reconcileFilter === 'missing' && e.reconcileStatus !== 'missing') return false;
                 if (!searchTerm) return true;
                 const q = searchTerm.toLowerCase();
                 return e.merchant.toLowerCase().includes(q) ||
@@ -4916,7 +4931,7 @@
                             />
                         </div>
                         <div className="text-sm text-gray-600 mb-1">
-                            {totalReconciled} of {recentExpenses.length} reconciled{pendingExpenses.length > 0 ? ` · ${pendingExpenses.length} pending` : ''} (2026)
+                            {totalReconciled} of {recentExpenses.length} reconciled{pendingExpenses.length > 0 ? ` · ${pendingExpenses.length} pending` : ''}{missingExpenses.length > 0 ? ` · ${missingExpenses.length} missing` : ''} (2026)
                         </div>
                         {(lockedExpenses.length > 0 || unlockedReconciled.length > 0) && (
                             <div className="text-xs text-gray-400 mb-3">
@@ -4977,7 +4992,7 @@
                     {/* Reconcile filter pills + Sort toggle + Edit mode */}
                     <div className="flex items-center justify-between">
                         <div className="flex gap-1.5 flex-wrap">
-                            {['all', 'unreconciled', 'pending', 'reconciled'].map(f => (
+                            {['all', 'unreconciled', 'pending', 'reconciled', 'missing'].map(f => (
                                 <button
                                     key={f}
                                     onClick={() => setReconcileFilter(f)}
@@ -6353,6 +6368,7 @@
                 if (reconcileFilter === 'unreconciled' && (e.reconcileStatus || e.reconciledLocked)) return false;
                 if (reconcileFilter === 'pending' && e.reconcileStatus !== 'pending') return false;
                 if (reconcileFilter === 'reconciled' && e.reconcileStatus !== 'reconciled' && !e.reconciledLocked) return false;
+                if (reconcileFilter === 'missing' && e.reconcileStatus !== 'missing') return false;
                 if (!searchTerm) return true;
                 const q = searchTerm.toLowerCase();
                 return e.merchant.toLowerCase().includes(q) ||
@@ -6418,7 +6434,7 @@
                     {/* Reconcile filter pills + Sort toggle */}
                     <div className="flex items-center justify-between px-3 py-2 bg-gray-50 border-b border-gray-200">
                         <div className="flex gap-1.5 flex-wrap">
-                            {['all', 'unreconciled', 'pending', 'reconciled'].map(f => (
+                            {['all', 'unreconciled', 'pending', 'reconciled', 'missing'].map(f => (
                                 <button
                                     key={f}
                                     onClick={() => setReconcileFilter(f)}
@@ -7525,7 +7541,8 @@
                 let nextStatus, nextCell;
                 if (current === '') { nextStatus = 'reconciled'; nextCell = 'R'; }
                 else if (current === 'reconciled') { nextStatus = 'pending'; nextCell = 'P'; }
-                else { nextStatus = ''; nextCell = ''; } // pending → empty
+                else if (current === 'pending') { nextStatus = 'missing'; nextCell = 'M'; }
+                else { nextStatus = ''; nextCell = ''; } // missing → empty
 
                 // Optimistic update — instant UI
                 setExpenses(prev => prev.map(e => e.rowIndex === rowIndex ? {
