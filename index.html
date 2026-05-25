@@ -4676,20 +4676,6 @@
                     </div>
                 )}
                 <div className={`flex items-center gap-2 py-2 border-b border-gray-100 px-3 ${hasChanges ? 'bg-indigo-50' : ''}`}>
-                    <button
-                        onClick={(e) => { e.stopPropagation(); if (!expense.reconciledLocked) onReconcile(expense.rowIndex); }}
-                        className="flex-shrink-0"
-                    >
-                        {expense.reconciledLocked ? (
-                            <CheckCircleIcon size={18} className="text-amber-600" />
-                        ) : status === 'reconciled' ? (
-                            <CheckCircleIcon size={18} className="text-green-600" />
-                        ) : status === 'pending' ? (
-                            <ClockIcon size={18} className="text-amber-500" />
-                        ) : (
-                            <CircleIcon size={18} className="text-gray-300" />
-                        )}
-                    </button>
                     <div className="text-lg flex-shrink-0">{category?.emoji || '📦'}</div>
                     <div className="flex-1 min-w-0">
                         <input
@@ -4714,6 +4700,20 @@
                             onClick={(e) => e.stopPropagation()}
                         />
                     </div>
+                    <button
+                        onClick={(e) => { e.stopPropagation(); if (!expense.reconciledLocked) onReconcile(expense.rowIndex); }}
+                        className="ml-1 flex-shrink-0"
+                    >
+                        {expense.reconciledLocked ? (
+                            <CheckCircleIcon size={18} className="text-amber-600" />
+                        ) : status === 'reconciled' ? (
+                            <CheckCircleIcon size={18} className="text-green-600" />
+                        ) : status === 'pending' ? (
+                            <ClockIcon size={18} className="text-amber-500" />
+                        ) : (
+                            <CircleIcon size={18} className="text-gray-300" />
+                        )}
+                    </button>
                 </div>
                 </>
             );
