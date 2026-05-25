@@ -4633,7 +4633,7 @@
         };
 
         // Inline-editable expense row for bulk edit mode
-        const EditableExpenseRow = ({ expense, pendingEdit, onEditField, showDateSeparator, dateSeparatorLabel, isSplitHeader }) => {
+        const EditableExpenseRow = ({ expense, pendingEdit, onEditField, onReconcile, showDateSeparator, dateSeparatorLabel, isSplitHeader }) => {
             // For split headers, render each child
             if (isSplitHeader || expense._isSplitHeader) {
                 const children = expense._children || [];
@@ -4650,6 +4650,7 @@
                             expense={child}
                             pendingEdit={pendingEdit}
                             onEditField={onEditField}
+                            onReconcile={onReconcile}
                             showDateSeparator={false}
                             dateSeparatorLabel=""
                             isSplitHeader={false}
@@ -4665,6 +4666,7 @@
             const editedMerchant = pendingEdit?.merchant !== undefined ? pendingEdit.merchant : expense.merchant;
             const editedAmount = pendingEdit?.amount !== undefined ? pendingEdit.amount : expense.amount;
             const hasChanges = pendingEdit && Object.keys(pendingEdit).length > 0;
+            const status = expense.reconcileStatus || '';
 
             return (
                 <>
@@ -4674,7 +4676,21 @@
                     </div>
                 )}
                 <div className={`flex items-center gap-2 py-2 border-b border-gray-100 px-3 ${hasChanges ? 'bg-indigo-50' : ''}`}>
-                    <div className="text-xl flex-shrink-0">{category?.emoji || '📦'}</div>
+                    <button
+                        onClick={(e) => { e.stopPropagation(); if (!expense.reconciledLocked) onReconcile(expense.rowIndex); }}
+                        className="flex-shrink-0"
+                    >
+                        {expense.reconciledLocked ? (
+                            <CheckCircleIcon size={18} className="text-amber-600" />
+                        ) : status === 'reconciled' ? (
+                            <CheckCircleIcon size={18} className="text-green-600" />
+                        ) : status === 'pending' ? (
+                            <ClockIcon size={18} className="text-amber-500" />
+                        ) : (
+                            <CircleIcon size={18} className="text-gray-300" />
+                        )}
+                    </button>
+                    <div className="text-lg flex-shrink-0">{category?.emoji || '📦'}</div>
                     <div className="flex-1 min-w-0">
                         <input
                             type="text"
@@ -5028,6 +5044,7 @@
                                         expense={item._isSplitHeader ? item : item}
                                         pendingEdit={pendingEdits[item.rowIndex] || pendingEdits[item?.rowIndex]}
                                         onEditField={handleEditField}
+                                        onReconcile={onReconcile}
                                         showDateSeparator={idx === 0 || getDateKey(item, sortMode) !== getDateKey(arr[idx - 1], sortMode)}
                                         dateSeparatorLabel={formatDateLabel(item, sortMode)}
                                         isSplitHeader={!!item._isSplitHeader}
