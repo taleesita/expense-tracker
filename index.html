@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.17-may23';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.18-may25';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -5052,36 +5052,71 @@
                             <div className="p-4 text-center text-gray-500">No expenses</div>
                         ) : (
                             <>
-                                {groupExpensesWithSplits(visibleExpenses).map((item, idx, arr) => (
-                                    editMode ? (
-                                    <EditableExpenseRow
-                                        key={item._isSplitHeader ? item._splitGroupKey : item.rowIndex}
-                                        expense={item._isSplitHeader ? item : item}
-                                        pendingEdit={pendingEdits[item.rowIndex] || pendingEdits[item?.rowIndex]}
-                                        onEditField={handleEditField}
-                                        onReconcile={onReconcile}
-                                        showDateSeparator={idx === 0 || getDateKey(item, sortMode) !== getDateKey(arr[idx - 1], sortMode)}
-                                        dateSeparatorLabel={formatDateLabel(item, sortMode)}
-                                        isSplitHeader={!!item._isSplitHeader}
-                                    />
-                                    ) : (
-                                    <ExpenseOrSplitGroup
-                                        key={item._isSplitHeader ? item._splitGroupKey : item.rowIndex}
-                                        item={item}
-                                        onDelete={onDelete}
-                                        onUpdate={(updated) => onUpdate(updated.rowIndex, updated)}
-                                        onReconcile={onReconcile}
-                                        onEdit={onEdit}
-                                        onSplit={onSplit}
-                                        showReconcile={true}
-                                        hideAccount={true}
-                                        showDateSeparator={idx === 0 || getDateKey(item, sortMode) !== getDateKey(arr[idx - 1], sortMode)}
-                                        dateSeparatorLabel={formatDateLabel(item, sortMode)}
-                                        sortMode={sortMode}
-                                        deletingRowIndex={deletingRowIndex}
-                                    />
-                                    )
-                                ))}
+                                {(() => {
+                                    const anchor = BALANCE_ANCHORS[accountId];
+                                    const anchorDate = anchor ? anchor.afterDate : null;
+                                    const anchorFormatted = anchorDate ? new Date(anchorDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: 'numeric' }) : '';
+                                    let anchorShown = !anchorDate; // skip if no anchor
+                                    const grouped = groupExpensesWithSplits(visibleExpenses);
+                                    const elements = [];
+                                    grouped.forEach((item, idx, arr) => {
+                                        // Check if anchor banner should appear before this item
+                                        if (!anchorShown && anchorDate) {
+                                            const thisDate = parseDateToISO(item.date || item.timestamp);
+                                            if (thisDate <= anchorDate) {
+                                                anchorShown = true;
+                                                elements.push(
+                                                    <div key="anchor-banner" className="bg-blue-50 border-y-2 border-blue-300 px-3 py-2.5 flex items-center justify-center gap-2">
+                                                        <span className="text-lg">⚓️</span>
+                                                        <span className="text-sm font-bold text-blue-700 tracking-wide">{anchorFormatted} BALANCE ANCHOR DATE</span>
+                                                        <span className="text-lg">⚓️</span>
+                                                    </div>
+                                                );
+                                            }
+                                        }
+                                        elements.push(
+                                            editMode ? (
+                                            <EditableExpenseRow
+                                                key={item._isSplitHeader ? item._splitGroupKey : item.rowIndex}
+                                                expense={item._isSplitHeader ? item : item}
+                                                pendingEdit={pendingEdits[item.rowIndex] || pendingEdits[item?.rowIndex]}
+                                                onEditField={handleEditField}
+                                                onReconcile={onReconcile}
+                                                showDateSeparator={idx === 0 || getDateKey(item, sortMode) !== getDateKey(arr[idx - 1], sortMode)}
+                                                dateSeparatorLabel={formatDateLabel(item, sortMode)}
+                                                isSplitHeader={!!item._isSplitHeader}
+                                            />
+                                            ) : (
+                                            <ExpenseOrSplitGroup
+                                                key={item._isSplitHeader ? item._splitGroupKey : item.rowIndex}
+                                                item={item}
+                                                onDelete={onDelete}
+                                                onUpdate={(updated) => onUpdate(updated.rowIndex, updated)}
+                                                onReconcile={onReconcile}
+                                                onEdit={onEdit}
+                                                onSplit={onSplit}
+                                                showReconcile={true}
+                                                hideAccount={true}
+                                                showDateSeparator={idx === 0 || getDateKey(item, sortMode) !== getDateKey(arr[idx - 1], sortMode)}
+                                                dateSeparatorLabel={formatDateLabel(item, sortMode)}
+                                                sortMode={sortMode}
+                                                deletingRowIndex={deletingRowIndex}
+                                            />
+                                            )
+                                        );
+                                    });
+                                    // If anchor never shown (all items are after anchor date), show at bottom
+                                    if (!anchorShown && anchorDate) {
+                                        elements.push(
+                                            <div key="anchor-banner" className="bg-blue-50 border-y-2 border-blue-300 px-3 py-2.5 flex items-center justify-center gap-2">
+                                                <span className="text-lg">⚓️</span>
+                                                <span className="text-sm font-bold text-blue-700 tracking-wide">{anchorFormatted} BALANCE ANCHOR DATE</span>
+                                                <span className="text-lg">⚓️</span>
+                                            </div>
+                                        );
+                                    }
+                                    return elements;
+                                })()}
                                 {hasMore && (
                                     <button
                                         onClick={() => setVisibleCount(c => c + PAGE_SIZE)}
