@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.18-may25';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.19-may26';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -6733,7 +6733,7 @@
                 let finalMerchant = '';
                 let finalAmount = '';
                 let finalDate = item.emailDate || todayLocalStr();
-                let finalCategory = 'other';
+                let finalCategory = '';
                 let finalTxnType = 'charge';
                 let finalAccount = '';
 
@@ -6750,7 +6750,9 @@
                     console.log('Inbox prefill result:', { ocrMerchantClean, ocrMerchantGood, ocrIsAmazon, finalMerchant });
                     finalAmount = ocr.amount ? String(ocr.amount) : '';
                     finalDate = ocr.date || finalDate;
-                    finalCategory = ocr.category || suggestCategory(finalMerchant) || 'other';
+                    const suggestedCat = finalMerchant ? suggestCategory(finalMerchant) : '';
+                    const ocrCat = ocr.category && ocr.category !== 'other' ? ocr.category : '';
+                    finalCategory = ocrCat || (suggestedCat !== 'other' ? suggestedCat : '');
                     finalTxnType = ocr.txnType || 'charge';
                     finalAccount = ocr.account || suggestAccountForMerchant(finalMerchant, merchantAccountMap) || '';
                     // Pass through foreign currency detection
@@ -6760,8 +6762,9 @@
                     }
                 } else {
                     finalMerchant = subjectMerchant || '';
-                    finalCategory = subjectMerchant ? suggestCategory(subjectMerchant) : 'other';
-                    finalAccount = subjectMerchant ? (suggestAccountForMerchant(subjectMerchant, merchantAccountMap) || '') : '';
+                    const suggestedCat2 = finalMerchant ? suggestCategory(finalMerchant) : '';
+                    finalCategory = suggestedCat2 !== 'other' ? suggestedCat2 : '';
+                    finalAccount = finalMerchant ? (suggestAccountForMerchant(finalMerchant, merchantAccountMap) || '') : '';
                 }
 
                 return { merchant: finalMerchant, amount: finalAmount, date: finalDate, category: finalCategory, txnType: finalTxnType, account: finalAccount, originalCurrency: finalOriginalCurrency, originalAmount: finalOriginalAmount };
@@ -7116,7 +7119,7 @@
                 const ocr = ocrCacheRef.current[item.fileId];
                 const subjectMerchant = merchantFromSubject(item.subject);
                 let merchant = '', amount = '', date = item.emailDate || todayLocalStr();
-                let category = 'other', txnType = 'charge', account = '';
+                let category = '', txnType = 'charge', account = '';
                 let originalCurrency = null, originalAmount = null;
                 console.log('Inbox buildPrefill debug:', { subject: item.subject, subjectMerchant, ocrMerchant: ocr?.merchant, hasOcr: !!ocr });
                 if (ocr) {
@@ -7127,7 +7130,9 @@
                     console.log('Inbox buildPrefill result:', { ocrMerchantClean, ocrMerchantGood, merchant });
                     amount = ocr.amount ? String(ocr.amount) : '';
                     date = ocr.date || date;
-                    category = ocr.category || (merchant ? suggestCategory(merchant) : 'other') || 'other';
+                    const sc = merchant ? suggestCategory(merchant) : '';
+                    const ocrCat2 = ocr.category && ocr.category !== 'other' ? ocr.category : '';
+                    category = ocrCat2 || (sc !== 'other' ? sc : '');
                     txnType = ocr.txnType || 'charge';
                     account = ocr.account || (merchant ? suggestAccountForMerchant(merchant, merchantAccountMap) : '') || '';
                     // Pass through foreign currency detection
@@ -7137,8 +7142,9 @@
                     }
                 } else {
                     merchant = subjectMerchant || '';
-                    category = subjectMerchant ? suggestCategory(subjectMerchant) : 'other';
-                    account = subjectMerchant ? (suggestAccountForMerchant(subjectMerchant, merchantAccountMap) || '') : '';
+                    const sc2 = merchant ? suggestCategory(merchant) : '';
+                    category = sc2 !== 'other' ? sc2 : '';
+                    account = merchant ? (suggestAccountForMerchant(merchant, merchantAccountMap) || '') : '';
                 }
                 return { merchant, amount, date, category, txnType, account, originalCurrency, originalAmount };
             };
