@@ -599,7 +599,8 @@
 
         // Calculate account balance from raw sheet columns
         // If an anchor exists, only count transactions after the anchor date
-        const calcAccountBalance = (accountExpenses, accountId) => {
+        // excludeMissing: if true (default), skip items with reconcileStatus === 'missing'
+        const calcAccountBalance = (accountExpenses, accountId, { excludeMissing = true } = {}) => {
             const anchor = accountId ? BALANCE_ANCHORS[accountId] : null;
             let expenses = accountExpenses;
             let starting = 0;
@@ -610,8 +611,8 @@
                     return d > anchor.afterDate;
                 });
             }
-            // Exclude "missing" items from balance — they're records only
-            return starting + expenses.filter(e => e.reconcileStatus !== 'missing').reduce((sum, e) => {
+            const filtered = excludeMissing ? expenses.filter(e => e.reconcileStatus !== 'missing') : expenses;
+            return starting + filtered.reduce((sum, e) => {
                 const dep = parseFloat(e.rawDeposit) || 0;
                 const chg = parseFloat(e.rawCharge) || 0;
                 const fee = parseFloat(e.fee) || 0;
@@ -4825,11 +4826,14 @@
             const missingExpenses = recentExpenses.filter(e => e.reconcileStatus === 'missing');
             const totalReconciled = lockedExpenses.length + unlockedReconciled.length;
 
-            // Balance excluding pending items — recalculate without them (missing already excluded by calcAccountBalance)
+            // Balance excluding pending and missing items
             const pendingAccountExpenses = accountExpenses.filter(e => e.reconcileStatus === 'pending');
+            const missingAccountExpenses = accountExpenses.filter(e => e.reconcileStatus === 'missing');
             const hasPending = pendingAccountExpenses.length > 0;
-            const nonPendingExpenses = accountExpenses.filter(e => e.reconcileStatus !== 'pending');
-            const balanceExclPending = hasPending ? calcAccountBalance(nonPendingExpenses, accountId) : total;
+            const hasMissing = missingAccountExpenses.length > 0;
+            const hasExclusions = hasPending || hasMissing;
+            const cleanExpenses = accountExpenses.filter(e => e.reconcileStatus !== 'pending' && e.reconcileStatus !== 'missing');
+            const balanceExclPending = hasExclusions ? calcAccountBalance(cleanExpenses, accountId, { excludeMissing: false }) : total;
 
             // Snapshot which rows matched the filter — only re-snapshot when filter/search/sort changes,
             // NOT when reconcile status changes (so you can tap through the 3-state cycle without the row vanishing)
@@ -4917,8 +4921,8 @@
                             <h3 className="font-bold text-lg">{account.name}</h3>
                         </div>
                         <div className={`text-2xl font-bold ${hasPending ? 'mb-1' : 'mb-3'} ${isCreditCard ? (total < 0 ? 'text-red-600' : 'text-green-600') : (total >= 0 ? 'text-green-600' : 'text-red-600')}`}>${fmt(total)}</div>
-                        {hasPending && (
-                            <div className="text-sm text-amber-600 mb-3">${fmt(balanceExclPending)} excl. {pendingAccountExpenses.length} pending</div>
+                        {hasExclusions && (
+                            <div className="text-sm text-amber-600 mb-3">${fmt(balanceExclPending)} excl. {[hasPending ? `${pendingAccountExpenses.length} pending` : '', hasMissing ? `${missingAccountExpenses.length} missing` : ''].filter(Boolean).join(' & ')}</div>
                         )}
                         <div className="w-full bg-gray-200 rounded-full h-2 mb-2">
                             <div
