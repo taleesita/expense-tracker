@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.21-jun5';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.22-jun5';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -6908,6 +6908,21 @@
             const [confirmationData, setConfirmationData] = useState(null);
             const [isSaving, setIsSaving] = useState(false);
             const bgSaveQueueRef = useRef(Promise.resolve());
+            const [bgSaveCount, setBgSaveCount] = useState(0);
+            const enqueueBgSave = (label, fn) => {
+                setBgSaveCount(c => c + 1);
+                bgSaveQueueRef.current = bgSaveQueueRef.current.then(async () => {
+                    try {
+                        await fn();
+                    } catch (err) {
+                        console.error('Background save failed:', err);
+                        setToast('Save failed for ' + label + ' — you may need to re-add it.');
+                        setTimeout(() => setToast(''), 8000);
+                    } finally {
+                        setBgSaveCount(c => c - 1);
+                    }
+                });
+            };
             const pendingSaveRef = useRef(null);
             const inboxReviewingRef = useRef(null); // tracks inbox item being reviewed via AddExpenseModal
             const [inboxModeActive, setInboxModeActive] = useState(false);
@@ -7281,15 +7296,7 @@
                 setTimeout(() => setToast(''), 5000);
                 setTimeout(() => setMtaSaving(false), 600); // re-enable button after brief delay
 
-                bgSaveQueueRef.current = bgSaveQueueRef.current.then(async () => {
-                    try {
-                        await appendExpense(mtaData);
-                    } catch (err) {
-                        console.error('MTA background save failed:', err);
-                        setToast('MTA save failed — you may need to re-add it.');
-                        setTimeout(() => setToast(''), 8000);
-                    }
-                });
+                enqueueBgSave('Metrocard', () => appendExpense(mtaData));
             };
 
             useEffect(() => {
@@ -7447,15 +7454,9 @@
                     advanceInbox();
 
                     // Queue the sheet write so saves serialize (prevents row-overwrite race)
-                    bgSaveQueueRef.current = bgSaveQueueRef.current.then(async () => {
-                        try {
-                            await appendExpense(expenseData);
-                            await markInboxItem(reviewItem.rowIndex, 'done');
-                        } catch (err) {
-                            console.error('Background save failed:', err);
-                            setToast('Save failed for ' + (expenseData.merchant || 'expense') + ' — you may need to re-add it.');
-                            setTimeout(() => setToast(''), 8000);
-                        }
+                    enqueueBgSave(expenseData.merchant || 'expense', async () => {
+                        await appendExpense(expenseData);
+                        await markInboxItem(reviewItem.rowIndex, 'done');
                     });
                     return;
                 }
@@ -7476,17 +7477,11 @@
                     });
                     setTimeout(() => setConfirmationData(null), 10000);
 
-                    bgSaveQueueRef.current = bgSaveQueueRef.current.then(async () => {
-                        try {
-                            const entries = expenseData.entries;
-                            for (let i = 0; i < entries.length; i++) {
-                                const isLast = i === entries.length - 1;
-                                await appendExpense(entries[i], { skipRefresh: !isLast });
-                            }
-                        } catch (err) {
-                            console.error('Background save failed:', err);
-                            setToast('Save failed for transfer — you may need to re-add it.');
-                            setTimeout(() => setToast(''), 8000);
+                    enqueueBgSave('transfer', async () => {
+                        const entries = expenseData.entries;
+                        for (let i = 0; i < entries.length; i++) {
+                            const isLast = i === entries.length - 1;
+                            await appendExpense(entries[i], { skipRefresh: !isLast });
                         }
                     });
                 } else {
@@ -7505,15 +7500,7 @@
                     });
                     setTimeout(() => setConfirmationData(null), 10000);
 
-                    bgSaveQueueRef.current = bgSaveQueueRef.current.then(async () => {
-                        try {
-                            await appendExpense(expenseData);
-                        } catch (err) {
-                            console.error('Background save failed:', err);
-                            setToast('Save failed for ' + (expenseData.merchant || 'expense') + ' — you may need to re-add it.');
-                            setTimeout(() => setToast(''), 8000);
-                        }
-                    });
+                    enqueueBgSave(expenseData.merchant || 'expense', () => appendExpense(expenseData));
                 }
             };
 
@@ -7547,15 +7534,7 @@
                 setTimeout(() => setConfirmationData(null), 10000);
 
                 // Write to sheet in background
-                bgSaveQueueRef.current = bgSaveQueueRef.current.then(async () => {
-                    try {
-                        await updateExpense(rowIndex, updated);
-                    } catch (err) {
-                        console.error('Background update failed:', err);
-                        setToast('Update failed for ' + (updated.merchant || 'expense') + ' — check the sheet.');
-                        setTimeout(() => setToast(''), 8000);
-                    }
-                });
+                enqueueBgSave(updated.merchant || 'expense', () => updateExpense(rowIndex, updated));
             };
 
             const [deletingRowIndex, setDeletingRowIndex] = useState(null);
@@ -8072,6 +8051,14 @@
                         </div>
                     )}
 
+                    {/* Background save indicator */}
+                    {bgSaveCount > 0 && (
+                        <div className="fixed bottom-4 right-4 z-40 bg-gray-800 text-white px-3 py-1.5 rounded-full shadow-lg flex items-center gap-2 text-xs font-medium" style={{ animation: 'fadeIn 0.2s ease' }}>
+                            <div className="w-3 h-3 border-2 border-gray-500 border-t-white rounded-full animate-spin"></div>
+                            <span>Saving {bgSaveCount}...</span>
+                        </div>
+                    )}
+
                     {/* Confirmation card after submission */}
                     {/* Simple toast notification (MTA, undo, errors, etc.) */}
                     {toast && (
@@ -8095,7 +8082,7 @@
 
                         if (d.isDual) {
                             return (
-                                <div className="fixed bottom-20 left-4 right-4 bg-white rounded-xl shadow-2xl border border-green-200 z-50 p-4 max-w-md mx-auto" style={{ animation: 'fadeIn 0.3s ease' }}>
+                                <div className="fixed top-16 left-4 right-4 bg-white rounded-xl shadow-2xl border border-green-200 z-50 p-4 max-w-md mx-auto" style={{ animation: 'fadeIn 0.3s ease' }}>
                                     <div className="flex items-center justify-between mb-3">
                                         <div className="flex items-center gap-2">
                                             <span className="text-green-500 text-lg">✓</span>
@@ -8116,7 +8103,7 @@
                         }
 
                         return (
-                            <div className="fixed bottom-20 left-4 right-4 bg-white rounded-xl shadow-2xl border border-green-200 z-50 p-4 max-w-md mx-auto" style={{ animation: 'fadeIn 0.3s ease' }}>
+                            <div className="fixed top-16 left-4 right-4 bg-white rounded-xl shadow-2xl border border-green-200 z-50 p-4 max-w-md mx-auto" style={{ animation: 'fadeIn 0.3s ease' }}>
                                 <div className="flex items-center justify-between mb-3">
                                     <div className="flex items-center gap-2">
                                         <span className="text-green-500 text-lg">✓</span>
