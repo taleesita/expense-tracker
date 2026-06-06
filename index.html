@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.19-may26';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.21-jun5';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -3383,7 +3383,7 @@
                                 setDate(ocrResult.date);
                             }
                         }
-                        if (ocrResult.category) setCategory(ocrResult.category);
+                        if (ocrResult.category && ocrResult.category !== 'other') setCategory(ocrResult.category);
                         if (ocrResult.txnType) setTxnType(ocrResult.txnType);
                         // Use OCR-suggested account if provided (e.g., ATM receipts), otherwise suggest from history
                         if (ocrResult.account) {
@@ -3490,7 +3490,7 @@
                                     }
                                     if (ocrResult.amount) setAmount(ocrResult.amount.toString());
                                     if (ocrResult.date) setDate(ocrResult.date);
-                                    if (ocrResult.category) setCategory(ocrResult.category);
+                                    if (ocrResult.category && ocrResult.category !== 'other') setCategory(ocrResult.category);
                                     if (ocrResult.txnType) setTxnType(ocrResult.txnType);
                                     // Use OCR-suggested account if provided, otherwise suggest from history
                                     if (ocrResult.account) {
@@ -6907,6 +6907,7 @@
             const [toast, setToast] = useState('');
             const [confirmationData, setConfirmationData] = useState(null);
             const [isSaving, setIsSaving] = useState(false);
+            const bgSaveQueueRef = useRef(Promise.resolve());
             const pendingSaveRef = useRef(null);
             const inboxReviewingRef = useRef(null); // tracks inbox item being reviewed via AddExpenseModal
             const [inboxModeActive, setInboxModeActive] = useState(false);
@@ -7255,35 +7256,40 @@
                 if (token) await fetchExpenses(true);
             }, [token, fetchExpenses]);
             const { containerRef: scrollContainerRef, PullIndicator } = usePullToRefresh(handlePullRefresh);
-            const handleQuickMetrocard = async () => {
+            const handleQuickMetrocard = () => {
                 if (mtaSaving) return; // prevent double-tap
                 setMtaSaving(true);
-                try {
-                    // Get current date in ET timezone
-                    const etDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
-                    pushUndo(expenses);
-                    await appendExpense({
-                        merchant: 'Metrocard',
-                        amount: 3.00,
-                        category: 'transit',
-                        account: 'reserve_chase',
-                        notes: '',
-                        receipt: '',
-                        txnType: 'charge',
-                        isCredit: false,
-                        originalCurrency: 'USD',
-                        originalAmount: 3.00,
-                        person: user?.name || 'Taly',
-                        date: etDate,
-                    });
-                    setToast('🚇 Metrocard added');
-                    setTimeout(() => setToast(''), 5000);
-                } catch (err) {
-                    setToast(err.message || 'MTA add failed');
-                    setTimeout(() => setToast(''), 5000);
-                } finally {
-                    setMtaSaving(false);
-                }
+                // Get current date in ET timezone
+                const etDate = new Date().toLocaleDateString('en-CA', { timeZone: 'America/New_York' });
+                pushUndo(expenses);
+                const mtaData = {
+                    merchant: 'Metrocard',
+                    amount: 3.00,
+                    category: 'transit',
+                    account: 'reserve_chase',
+                    notes: '',
+                    receipt: '',
+                    txnType: 'charge',
+                    isCredit: false,
+                    originalCurrency: 'USD',
+                    originalAmount: 3.00,
+                    person: user?.name || 'Taly',
+                    date: etDate,
+                };
+                // Show toast immediately, write in background
+                setToast('🚇 Metrocard added');
+                setTimeout(() => setToast(''), 5000);
+                setTimeout(() => setMtaSaving(false), 600); // re-enable button after brief delay
+
+                bgSaveQueueRef.current = bgSaveQueueRef.current.then(async () => {
+                    try {
+                        await appendExpense(mtaData);
+                    } catch (err) {
+                        console.error('MTA background save failed:', err);
+                        setToast('MTA save failed — you may need to re-add it.');
+                        setTimeout(() => setToast(''), 8000);
+                    }
+                });
             };
 
             useEffect(() => {
@@ -7420,66 +7426,94 @@
                     });
                     return;
                 }
-                setIsSaving(true);
-                const spinnerStart = Date.now();
-                try {
+
+                // INBOX MODE: optimistic background save — advance immediately, write to sheet in background
+                if (inboxReviewingRef.current && inboxModeActive && !expenseData._dual) {
+                    const reviewItem = inboxReviewingRef.current;
                     pushUndo(expenses);
-                    if (expenseData._dual) {
-                        const entries = expenseData.entries;
-                        for (let i = 0; i < entries.length; i++) {
-                            const isLast = i === entries.length - 1;
-                            await appendExpense(entries[i], { skipRefresh: !isLast });
-                        }
-                        const elapsed = Date.now() - spinnerStart;
-                        if (elapsed < 600) await new Promise(r => setTimeout(r, 600 - elapsed));
-                        setIsSaving(false);
-                        setConfirmationData({
-                            isDual: true,
-                            entries: entries,
-                            timestamp: new Date().toLocaleString(),
-                        });
-                    } else {
-                        await appendExpense(expenseData);
-                        const elapsed = Date.now() - spinnerStart;
-                        if (elapsed < 600) await new Promise(r => setTimeout(r, 600 - elapsed));
-                        setIsSaving(false);
-                        setConfirmationData({
-                            isDual: false,
-                            isNew: true,
-                            merchant: expenseData.merchant,
-                            amount: expenseData.amount,
-                            category: expenseData.category,
-                            account: expenseData.account,
-                            txnType: expenseData.txnType,
-                            date: expenseData.date,
-                            receipt: expenseData.receipt || null,
-                            person: expenseData.person,
-                            timestamp: new Date().toLocaleString(),
-                        });
-                    }
-                    setTimeout(() => setConfirmationData(null), inboxModeActive ? 4000 : 10000);
 
-                    // If saved from a reminder quick-add, dismiss that reminder immediately
-                    if (editExpense?._reminderId && onDismissReminder) {
-                        onDismissReminder(editExpense._reminderId);
-                    }
+                    // Show brief confirmation toast
+                    setConfirmationData({
+                        isDual: false, isNew: true,
+                        merchant: expenseData.merchant, amount: expenseData.amount,
+                        category: expenseData.category, account: expenseData.account,
+                        txnType: expenseData.txnType, date: expenseData.date,
+                        receipt: expenseData.receipt || null, person: expenseData.person,
+                        timestamp: new Date().toLocaleString(),
+                    });
+                    setTimeout(() => setConfirmationData(null), 4000);
 
-                    // If this save came from inbox review, mark done and advance
-                    if (inboxReviewingRef.current && inboxModeActive) {
-                        const reviewItem = inboxReviewingRef.current;
+                    // Advance to next inbox item immediately (no waiting)
+                    advanceInbox();
+
+                    // Queue the sheet write so saves serialize (prevents row-overwrite race)
+                    bgSaveQueueRef.current = bgSaveQueueRef.current.then(async () => {
                         try {
+                            await appendExpense(expenseData);
                             await markInboxItem(reviewItem.rowIndex, 'done');
-                        } catch (e) {
-                            console.error('Failed to mark inbox item done:', e);
+                        } catch (err) {
+                            console.error('Background save failed:', err);
+                            setToast('Save failed for ' + (expenseData.merchant || 'expense') + ' — you may need to re-add it.');
+                            setTimeout(() => setToast(''), 8000);
                         }
-                        advanceInbox();
-                        return; // skip normal confirmation — advanceInbox handles modal state
-                    }
-                } catch (err) {
-                    console.error('Save failed:', err);
-                    setIsSaving(false);
-                    setToast(err.message || 'Failed to save expense. Please try again.');
-                    setTimeout(() => setToast(''), 8000);
+                    });
+                    return;
+                }
+
+                // ALL SAVES: optimistic background write — modal already closed, no spinner needed
+                pushUndo(expenses);
+
+                // If saved from a reminder quick-add, dismiss that reminder immediately
+                if (editExpense?._reminderId && onDismissReminder) {
+                    onDismissReminder(editExpense._reminderId);
+                }
+
+                if (expenseData._dual) {
+                    setConfirmationData({
+                        isDual: true,
+                        entries: expenseData.entries,
+                        timestamp: new Date().toLocaleString(),
+                    });
+                    setTimeout(() => setConfirmationData(null), 10000);
+
+                    bgSaveQueueRef.current = bgSaveQueueRef.current.then(async () => {
+                        try {
+                            const entries = expenseData.entries;
+                            for (let i = 0; i < entries.length; i++) {
+                                const isLast = i === entries.length - 1;
+                                await appendExpense(entries[i], { skipRefresh: !isLast });
+                            }
+                        } catch (err) {
+                            console.error('Background save failed:', err);
+                            setToast('Save failed for transfer — you may need to re-add it.');
+                            setTimeout(() => setToast(''), 8000);
+                        }
+                    });
+                } else {
+                    setConfirmationData({
+                        isDual: false,
+                        isNew: true,
+                        merchant: expenseData.merchant,
+                        amount: expenseData.amount,
+                        category: expenseData.category,
+                        account: expenseData.account,
+                        txnType: expenseData.txnType,
+                        date: expenseData.date,
+                        receipt: expenseData.receipt || null,
+                        person: expenseData.person,
+                        timestamp: new Date().toLocaleString(),
+                    });
+                    setTimeout(() => setConfirmationData(null), 10000);
+
+                    bgSaveQueueRef.current = bgSaveQueueRef.current.then(async () => {
+                        try {
+                            await appendExpense(expenseData);
+                        } catch (err) {
+                            console.error('Background save failed:', err);
+                            setToast('Save failed for ' + (expenseData.merchant || 'expense') + ' — you may need to re-add it.');
+                            setTimeout(() => setToast(''), 8000);
+                        }
+                    });
                 }
             };
 
@@ -7493,36 +7527,35 @@
                 }
             }, [token]);
 
-            const handleUpdateExpense = async (rowIndex, updated) => {
-                setIsSaving(true);
-                const spinnerStart = Date.now();
-                try {
-                    pushUndo(expenses);
-                    await updateExpense(rowIndex, updated);
-                    // Ensure spinner shows for at least 600ms so user sees it
-                    const elapsed = Date.now() - spinnerStart;
-                    if (elapsed < 600) await new Promise(r => setTimeout(r, 600 - elapsed));
-                    setIsSaving(false);
-                    setConfirmationData({
-                        isDual: false,
-                        isNew: false,
-                        merchant: updated.merchant,
-                        amount: updated.amount,
-                        category: updated.category,
-                        account: updated.account,
-                        txnType: updated.txnType,
-                        date: updated.date,
-                        receipt: updated.receipt || null,
-                        person: updated.person,
-                        timestamp: new Date().toLocaleString(),
-                    });
-                    setTimeout(() => setConfirmationData(null), 10000);
-                } catch (err) {
-                    console.error('Update failed:', err);
-                    setIsSaving(false);
-                    setToast(err.message || 'Save failed');
-                    setTimeout(() => setToast(''), 5000);
-                }
+            const handleUpdateExpense = (rowIndex, updated) => {
+                pushUndo(expenses);
+
+                // Show confirmation immediately — modal already closed
+                setConfirmationData({
+                    isDual: false,
+                    isNew: false,
+                    merchant: updated.merchant,
+                    amount: updated.amount,
+                    category: updated.category,
+                    account: updated.account,
+                    txnType: updated.txnType,
+                    date: updated.date,
+                    receipt: updated.receipt || null,
+                    person: updated.person,
+                    timestamp: new Date().toLocaleString(),
+                });
+                setTimeout(() => setConfirmationData(null), 10000);
+
+                // Write to sheet in background
+                bgSaveQueueRef.current = bgSaveQueueRef.current.then(async () => {
+                    try {
+                        await updateExpense(rowIndex, updated);
+                    } catch (err) {
+                        console.error('Background update failed:', err);
+                        setToast('Update failed for ' + (updated.merchant || 'expense') + ' — check the sheet.');
+                        setTimeout(() => setToast(''), 8000);
+                    }
+                });
             };
 
             const [deletingRowIndex, setDeletingRowIndex] = useState(null);
