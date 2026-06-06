@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.22-jun5';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.23-jun5';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -7434,34 +7434,32 @@
                     return;
                 }
 
-                // INBOX MODE: optimistic background save — advance immediately, write to sheet in background
+                // INBOX MODE: advance immediately, write to sheet in background
                 if (inboxReviewingRef.current && inboxModeActive && !expenseData._dual) {
                     const reviewItem = inboxReviewingRef.current;
                     pushUndo(expenses);
 
-                    // Show brief confirmation toast
-                    setConfirmationData({
-                        isDual: false, isNew: true,
-                        merchant: expenseData.merchant, amount: expenseData.amount,
-                        category: expenseData.category, account: expenseData.account,
-                        txnType: expenseData.txnType, date: expenseData.date,
-                        receipt: expenseData.receipt || null, person: expenseData.person,
-                        timestamp: new Date().toLocaleString(),
-                    });
-                    setTimeout(() => setConfirmationData(null), 4000);
-
                     // Advance to next inbox item immediately (no waiting)
                     advanceInbox();
 
-                    // Queue the sheet write so saves serialize (prevents row-overwrite race)
+                    // Queue the sheet write — confirmation shows when save completes
                     enqueueBgSave(expenseData.merchant || 'expense', async () => {
                         await appendExpense(expenseData);
                         await markInboxItem(reviewItem.rowIndex, 'done');
+                        setConfirmationData({
+                            isDual: false, isNew: true,
+                            merchant: expenseData.merchant, amount: expenseData.amount,
+                            category: expenseData.category, account: expenseData.account,
+                            txnType: expenseData.txnType, date: expenseData.date,
+                            receipt: expenseData.receipt || null, person: expenseData.person,
+                            timestamp: new Date().toLocaleString(),
+                        });
+                        setTimeout(() => setConfirmationData(null), 4000);
                     });
                     return;
                 }
 
-                // ALL SAVES: optimistic background write — modal already closed, no spinner needed
+                // ALL SAVES: background write — modal already closed, confirmation on completion
                 pushUndo(expenses);
 
                 // If saved from a reminder quick-add, dismiss that reminder immediately
@@ -7470,37 +7468,37 @@
                 }
 
                 if (expenseData._dual) {
-                    setConfirmationData({
-                        isDual: true,
-                        entries: expenseData.entries,
-                        timestamp: new Date().toLocaleString(),
-                    });
-                    setTimeout(() => setConfirmationData(null), 10000);
-
                     enqueueBgSave('transfer', async () => {
                         const entries = expenseData.entries;
                         for (let i = 0; i < entries.length; i++) {
                             const isLast = i === entries.length - 1;
                             await appendExpense(entries[i], { skipRefresh: !isLast });
                         }
+                        setConfirmationData({
+                            isDual: true,
+                            entries: expenseData.entries,
+                            timestamp: new Date().toLocaleString(),
+                        });
+                        setTimeout(() => setConfirmationData(null), 10000);
                     });
                 } else {
-                    setConfirmationData({
-                        isDual: false,
-                        isNew: true,
-                        merchant: expenseData.merchant,
-                        amount: expenseData.amount,
-                        category: expenseData.category,
-                        account: expenseData.account,
-                        txnType: expenseData.txnType,
-                        date: expenseData.date,
-                        receipt: expenseData.receipt || null,
-                        person: expenseData.person,
-                        timestamp: new Date().toLocaleString(),
+                    enqueueBgSave(expenseData.merchant || 'expense', async () => {
+                        await appendExpense(expenseData);
+                        setConfirmationData({
+                            isDual: false,
+                            isNew: true,
+                            merchant: expenseData.merchant,
+                            amount: expenseData.amount,
+                            category: expenseData.category,
+                            account: expenseData.account,
+                            txnType: expenseData.txnType,
+                            date: expenseData.date,
+                            receipt: expenseData.receipt || null,
+                            person: expenseData.person,
+                            timestamp: new Date().toLocaleString(),
+                        });
+                        setTimeout(() => setConfirmationData(null), 10000);
                     });
-                    setTimeout(() => setConfirmationData(null), 10000);
-
-                    enqueueBgSave(expenseData.merchant || 'expense', () => appendExpense(expenseData));
                 }
             };
 
@@ -7517,24 +7515,24 @@
             const handleUpdateExpense = (rowIndex, updated) => {
                 pushUndo(expenses);
 
-                // Show confirmation immediately — modal already closed
-                setConfirmationData({
-                    isDual: false,
-                    isNew: false,
-                    merchant: updated.merchant,
-                    amount: updated.amount,
-                    category: updated.category,
-                    account: updated.account,
-                    txnType: updated.txnType,
-                    date: updated.date,
-                    receipt: updated.receipt || null,
-                    person: updated.person,
-                    timestamp: new Date().toLocaleString(),
+                // Write to sheet in background — confirmation shows when save completes
+                enqueueBgSave(updated.merchant || 'expense', async () => {
+                    await updateExpense(rowIndex, updated);
+                    setConfirmationData({
+                        isDual: false,
+                        isNew: false,
+                        merchant: updated.merchant,
+                        amount: updated.amount,
+                        category: updated.category,
+                        account: updated.account,
+                        txnType: updated.txnType,
+                        date: updated.date,
+                        receipt: updated.receipt || null,
+                        person: updated.person,
+                        timestamp: new Date().toLocaleString(),
+                    });
+                    setTimeout(() => setConfirmationData(null), 10000);
                 });
-                setTimeout(() => setConfirmationData(null), 10000);
-
-                // Write to sheet in background
-                enqueueBgSave(updated.merchant || 'expense', () => updateExpense(rowIndex, updated));
             };
 
             const [deletingRowIndex, setDeletingRowIndex] = useState(null);
