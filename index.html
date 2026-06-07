@@ -2280,6 +2280,17 @@
                         };
                     }
 
+                    // Strategy -1: Square receipt detection — extract merchant from known patterns
+                    const squareMatch = text.match(/Let\s+(.{2,40}?)\s+know\s+how\s+your\s+experience\s+was/i)
+                        || text.match(/Receipt\s+from\s+([A-Z][A-Za-z\s&'.-]{2,30})(?:\s|$|\n)/i);
+                    if (squareMatch) {
+                        const sqMerch = squareMatch[1].replace(/\s+logo$/i, '').trim();
+                        if (sqMerch.length >= 2 && sqMerch.length <= 40) {
+                            merchant = sqMerch;
+                            console.log('Square receipt detected, merchant:', merchant);
+                        }
+                    }
+
                     // Smart merchant name extraction
                     const cleanMerchantName = (raw) => {
                         let name = raw;
@@ -2324,6 +2335,8 @@
                             if (/^\d+[\d\s.,$%]*$/.test(cleaned)) continue;
                             if (/^(tel|phone|fax|www\.|http|order|invoice|receipt|#|date|item|qty|description)/i.test(cleaned)) continue;
                             if (/\S+@\S+\.\S+/.test(cleaned) && cleaned.split('@').length > 1) continue;
+                            // Skip survey/feedback prompts and common receipt boilerplate
+                            if (/^(tell\s+us|how\s+(did\s+we|was\s+your|were\s+we)|rate\s+(your|us|this)|leave\s+(a\s+)?review|write\s+a\s+review|share\s+your|let\s+us\s+know|we\s+appreciate|thank\s+you\s+for|thanks\s+for\s+(your|shopping|visiting|dining)|have\s+a\s+(nice|great|good)|see\s+you\s+(next|again|soon)|come\s+again|visit\s+us|follow\s+us|scan\s+(to|this)|important|please\s+(retain|keep|save)|customer\s+copy|store\s+copy|merchant\s+copy)/i.test(cleaned)) continue;
                             const candidate = cleanMerchantName(cleaned);
                             if (candidate.length >= 2 && candidate.length <= 40) {
                                 merchant = candidate;
@@ -3224,6 +3237,7 @@
             const [cropFile, setCropFile] = useState(null);   // original File for fallback
             const uploadedReceiptUrl = useRef(null); // track file uploaded this session for cancel/rename
             const modalSessionId = useRef(0); // incremented each time modal opens to ignore stale async results
+            const modalScrollRef = useRef(null); // ref to modal scroll container for scroll-to-top on inbox advance
 
             // Listen for camera captures from the header camera button
             useEffect(() => {
@@ -3295,10 +3309,13 @@
                         const knownNames = [...new Set((allExpenses || []).map(e => e.merchant).filter(Boolean))];
                         finalMerchant = fuzzyMatchMerchant(finalMerchant, knownNames);
                     }
-                    setMerchant(finalMerchant);
+                    if (!isGibberishMerchant(finalMerchant)) {
+                        setMerchant(finalMerchant);
+                    }
                     setAmount(result.amount.toString());
                     setDate(result.date);
-                    const scanCat = result.category || suggestCategory(finalMerchant);
+                    const scanMerchForCat = isGibberishMerchant(finalMerchant) ? '' : finalMerchant;
+                    const scanCat = result.category || suggestCategory(scanMerchForCat);
                     setCategory(scanCat === 'other' ? '' : scanCat);
                     if (result.txnType) setTxnType(result.txnType);
                     // Pre-fill foreign currency if detected
@@ -3307,8 +3324,10 @@
                         setOriginalAmount(result.originalAmount.toString());
                     }
                     // Suggest account from history
-                    const acctSugg = suggestAccountForMerchant(finalMerchant, merchantAccountMap);
-                    if (acctSugg) setAccount(acctSugg);
+                    if (!isGibberishMerchant(finalMerchant)) {
+                        const acctSugg = suggestAccountForMerchant(finalMerchant, merchantAccountMap);
+                        if (acctSugg) setAccount(acctSugg);
+                    }
                 }
                 // Set receipt link from Drive upload
                 if (url) {
@@ -3716,6 +3735,7 @@
                 )}
                 <div className="fixed inset-0 bg-black bg-opacity-50 z-40 flex items-end" onClick={handleBackdropClick}>
                     <div
+                        ref={modalScrollRef}
                         className="bg-white w-full rounded-t-2xl p-6 max-h-[90vh] overflow-y-auto relative"
                         onDragEnter={handleDragEnter}
                         onDragLeave={handleDragLeave}
@@ -7205,6 +7225,10 @@
                     // Open next item but keep index at currentIdx (array will shift down
                     // after markInboxItem's async setState lands)
                     openInboxItem(inboxItems[nextIdx], inboxIndexRef.current);
+                    // Scroll modal to top so user clearly sees the new entry
+                    setTimeout(() => {
+                        if (modalScrollRef.current) modalScrollRef.current.scrollTop = 0;
+                    }, 50);
                 } else {
                     // All done
                     setShowAddModal(false);
@@ -8098,12 +8122,13 @@
                         const fmtAmt = (v) => parseFloat(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
                         if (d.isDual) {
+                            const dualLabel = d.entries?.[0]?.category === 'card_payment' ? 'Card Payment Added' : 'Transfer Added';
                             return (
                                 <div className="fixed top-16 left-4 right-4 bg-white rounded-xl shadow-2xl border border-green-200 z-50 p-4 max-w-md mx-auto" style={{ animation: 'fadeIn 0.3s ease' }}>
                                     <div className="flex items-center justify-between mb-3">
                                         <div className="flex items-center gap-2">
                                             <span className="text-green-500 text-lg">✓</span>
-                                            <span className="font-bold text-sm text-gray-800">Dual Entry Added</span>
+                                            <span className="font-bold text-sm text-gray-800">{dualLabel}</span>
                                         </div>
                                         <button onClick={() => setConfirmationData(null)} className="text-gray-400 hover:text-gray-600 text-xs">✕</button>
                                     </div>
@@ -8119,57 +8144,29 @@
                             );
                         }
 
+                        const typeLabel = d.txnType === 'charge' ? 'Charge' : d.txnType === 'deposit' ? 'Deposit' : d.txnType === 'credit_refund' ? 'Refund' : d.txnType === 'card_payment' ? 'Card Payment' : d.txnType === 'transfer' ? 'Transfer' : 'Entry';
+                        const titleText = d.isNew ? `${typeLabel} Added` : `${typeLabel} Updated`;
                         return (
-                            <div className="fixed top-16 left-4 right-4 bg-white rounded-xl shadow-2xl border border-green-200 z-50 p-4 max-w-md mx-auto" style={{ animation: 'fadeIn 0.3s ease' }}>
-                                <div className="flex items-center justify-between mb-3">
-                                    <div className="flex items-center gap-2">
-                                        <span className="text-green-500 text-lg">✓</span>
-                                        <span className="font-bold text-sm text-gray-800">{d.isNew ? 'Expense Added' : 'Expense Updated'}</span>
+                            <div className="fixed top-16 left-4 right-4 bg-white rounded-xl shadow-2xl border border-green-200 z-50 px-4 py-3 max-w-md mx-auto" style={{ animation: 'fadeIn 0.3s ease' }}>
+                                <div className="flex items-center justify-between mb-2">
+                                    <div className="flex items-center gap-1.5">
+                                        <span className="text-green-500">✓</span>
+                                        <span className="font-bold text-sm text-gray-800">{titleText}</span>
                                     </div>
-                                    <button onClick={() => setConfirmationData(null)} className="text-gray-400 hover:text-gray-600 text-xs">✕</button>
+                                    <div className="flex items-center gap-2">
+                                        {d.receipt && (
+                                            <a href={d.receipt} target="_blank" rel="noopener" className="text-blue-600 text-[11px] font-medium">📎 Receipt</a>
+                                        )}
+                                        <button onClick={() => setConfirmationData(null)} className="text-gray-400 hover:text-gray-600 text-xs">✕</button>
+                                    </div>
                                 </div>
-                                <div className="space-y-1.5 text-xs">
-                                    <div className="flex justify-between"><span className="text-gray-400">Merchant</span><span className="font-semibold text-gray-800">{d.merchant}</span></div>
-                                    <div className="flex justify-between"><span className="text-gray-400">Amount</span><span className={`font-semibold ${d.txnType === 'charge' ? 'text-red-600' : 'text-green-600'}`}>${fmtAmt(d.amount)}</span></div>
-                                    <div className="flex justify-between"><span className="text-gray-400">Category</span><span className="text-gray-700">{getCatDisplay(d.category)}</span></div>
-                                    <div className="flex justify-between"><span className="text-gray-400">Account</span><span className="text-gray-700">{getAcctDisplay(d.account)}</span></div>
-                                    <div className="flex justify-between"><span className="text-gray-400">Date</span><span className="text-gray-700">{d.date}</span></div>
-                                    <div className="flex justify-between"><span className="text-gray-400">Type</span><span className="text-gray-700">{d.txnType === 'charge' ? 'Debit' : d.txnType === 'deposit' ? 'Deposit' : d.txnType === 'credit_refund' ? 'Credit/Refund' : d.txnType}</span></div>
-                                    <div className="flex justify-between"><span className="text-gray-400">Sheet Col C</span><span className="text-gray-700 text-[11px]">{SHEET_CARD_NAMES[d.account] || d.account}</span></div>
-                                    {d.receipt && (() => {
-                                        const driveMatch = d.receipt.match(/(?:id=|\/d\/)([a-zA-Z0-9_-]+)/);
-                                        const driveFileId = driveMatch ? driveMatch[1] : null;
-                                        return (
-                                            <div className="pt-2 border-t border-gray-100">
-                                                <div className="flex justify-between items-center mb-1.5">
-                                                    <span className="text-gray-400">Receipt</span>
-                                                    <a href={d.receipt} target="_blank" rel="noopener" className="text-blue-600 font-medium flex items-center gap-1 text-[11px]">
-                                                        📎 Open in Drive
-                                                    </a>
-                                                </div>
-                                                {driveFileId && (
-                                                    <a href={d.receipt} target="_blank" rel="noopener" className="block rounded-lg overflow-hidden border border-gray-100 bg-gray-50">
-                                                        <img
-                                                            src={`https://drive.google.com/thumbnail?id=${driveFileId}&sz=w400`}
-                                                            alt="Receipt"
-                                                            className="w-full max-h-32 object-contain"
-                                                            style={{ minHeight: 60 }}
-                                                            onError={(e) => { e.target.style.display = 'none'; }}
-                                                        />
-                                                    </a>
-                                                )}
-                                            </div>
-                                        );
-                                    })()}
-                                    {!d.receipt && (
-                                        <div className="flex justify-between items-center pt-1 border-t border-gray-100">
-                                            <span className="text-gray-400">Receipt</span>
-                                            <span className="text-orange-500 text-[11px]">⚠ No file attached</span>
-                                        </div>
-                                    )}
+                                <div className="text-xs space-y-1">
+                                    <div className="flex justify-between"><span className="text-gray-400">{d.date}</span><span className="font-semibold text-gray-800 truncate ml-2">{d.merchant}</span></div>
+                                    <div className="flex justify-between"><span className="text-gray-500">{getAcctDisplay(d.account)}</span><span className={`font-semibold ${d.txnType === 'charge' ? 'text-red-600' : 'text-green-600'}`}>${fmtAmt(d.amount)}</span></div>
+                                    <div><span className="text-gray-500">{getCatDisplay(d.category)}</span></div>
                                 </div>
-                                {canUndo && <button onClick={() => { handleUndo(); setConfirmationData(null); }} className="mt-3 w-full text-center text-xs font-bold text-blue-600 py-1.5 bg-blue-50 rounded-lg">Undo</button>}
-                                <div className="mt-2 w-full bg-gray-100 rounded-full h-1 overflow-hidden"><div className="bg-green-400 h-full" style={{ animation: 'shrink 10s linear forwards' }}></div></div>
+                                {canUndo && <button onClick={() => { handleUndo(); setConfirmationData(null); }} className="mt-2 w-full text-center text-xs font-bold text-blue-600 py-1 bg-blue-50 rounded-lg">Undo</button>}
+                                <div className="mt-1.5 w-full bg-gray-100 rounded-full h-1 overflow-hidden"><div className="bg-green-400 h-full" style={{ animation: 'shrink 10s linear forwards' }}></div></div>
                             </div>
                         );
                     })()}
