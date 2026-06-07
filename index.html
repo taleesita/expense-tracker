@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.24-jun5';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.25-jun6';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -7441,6 +7441,11 @@
                     const reviewItem = inboxReviewingRef.current;
                     pushUndo(expenses);
 
+                    // Immediate feedback
+                    const inboxLabel = `Saving ${expenseData.merchant || 'expense'}...`;
+                    setToast(inboxLabel);
+                    setTimeout(() => setToast(prev => prev === inboxLabel ? '' : prev), 3000);
+
                     // Advance to next inbox item immediately (no waiting)
                     advanceInbox();
 
@@ -7463,6 +7468,11 @@
 
                 // ALL SAVES: background write — modal already closed, confirmation on completion
                 pushUndo(expenses);
+
+                // Immediate feedback so user knows save is in progress
+                const savingLabel = expenseData._dual ? 'Saving transfer...' : `Saving ${expenseData.merchant || 'expense'}...`;
+                setToast(savingLabel);
+                setTimeout(() => setToast(prev => prev === savingLabel ? '' : prev), 3000);
 
                 // If saved from a reminder quick-add, dismiss that reminder immediately
                 if (editExpense?._reminderId && onDismissReminder) {
@@ -7516,6 +7526,11 @@
 
             const handleUpdateExpense = (rowIndex, updated) => {
                 pushUndo(expenses);
+
+                // Immediate feedback
+                const updateLabel = `Saving ${updated.merchant || 'changes'}...`;
+                setToast(updateLabel);
+                setTimeout(() => setToast(prev => prev === updateLabel ? '' : prev), 3000);
 
                 // Write to sheet in background — confirmation shows when save completes
                 enqueueBgSave(updated.merchant || 'expense', async () => {
@@ -8051,11 +8066,13 @@
                         </div>
                     )}
 
-                    {/* Background save indicator */}
+                    {/* Background save indicator — centered bottom, prominent on mobile */}
                     {bgSaveCount > 0 && (
-                        <div className="fixed bottom-4 right-4 z-40 bg-gray-800 text-white px-3 py-1.5 rounded-full shadow-lg flex items-center gap-2 text-xs font-medium" style={{ animation: 'fadeIn 0.2s ease' }}>
-                            <div className="w-3 h-3 border-2 border-gray-500 border-t-white rounded-full animate-spin"></div>
-                            <span>Saving {bgSaveCount}...</span>
+                        <div className="fixed bottom-6 left-0 right-0 z-40 flex justify-center pointer-events-none" style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
+                            <div className="bg-gray-800 text-white px-4 py-2 rounded-full shadow-lg flex items-center gap-2 text-sm font-medium pointer-events-auto" style={{ animation: 'fadeIn 0.2s ease' }}>
+                                <div className="w-4 h-4 border-2 border-gray-500 border-t-white rounded-full animate-spin"></div>
+                                <span>Saving{bgSaveCount > 1 ? ` ${bgSaveCount}` : ''}...</span>
+                            </div>
                         </div>
                     )}
 
