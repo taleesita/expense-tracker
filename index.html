@@ -8160,10 +8160,10 @@
                                         <button onClick={() => setConfirmationData(null)} className="text-gray-400 hover:text-gray-600 text-xs">✕</button>
                                     </div>
                                 </div>
-                                <div className="text-xs space-y-1">
-                                    <div className="flex justify-between"><span className="text-gray-400">{d.date}</span><span className="font-semibold text-gray-800 truncate ml-2">{d.merchant}</span></div>
-                                    <div className="flex justify-between"><span className="text-gray-500">{getAcctDisplay(d.account)}</span><span className={`font-semibold ${d.txnType === 'charge' ? 'text-red-600' : 'text-green-600'}`}>${fmtAmt(d.amount)}</span></div>
-                                    <div><span className="text-gray-500">{getCatDisplay(d.category)}</span></div>
+                                <div className="text-xs text-gray-600 space-y-1">
+                                    <div className="flex justify-between"><span>{d.date}</span><span className="font-medium truncate ml-2">{d.merchant}</span></div>
+                                    <div className="flex justify-between"><span>{getAcctDisplay(d.account)}</span><span className={`font-medium ${d.txnType === 'charge' ? 'text-red-600' : 'text-green-600'}`}>${fmtAmt(d.amount)}</span></div>
+                                    <div>{getCatDisplay(d.category)}</div>
                                 </div>
                                 {canUndo && <button onClick={() => { handleUndo(); setConfirmationData(null); }} className="mt-2 w-full text-center text-xs font-bold text-blue-600 py-1 bg-blue-50 rounded-lg">Undo</button>}
                                 <div className="mt-1.5 w-full bg-gray-100 rounded-full h-1 overflow-hidden"><div className="bg-green-400 h-full" style={{ animation: 'shrink 10s linear forwards' }}></div></div>
