@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.23-jun5';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.24-jun5';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -3343,6 +3343,7 @@
                         tasks.push(Promise.resolve(null));
                     }
                     const [ocrResult, url] = await Promise.all(tasks);
+                    console.log('handleReceiptUpload result:', { ocrResult, url, currentMerchant: merchant, currentAmount: amount, sessionMatch: modalSessionId.current === sessionAtStart });
                     // Ignore results if modal session changed (user closed/reopened for different expense)
                     if (modalSessionId.current !== sessionAtStart) {
                         console.log('Ignoring stale upload result from previous modal session');
@@ -3352,6 +3353,7 @@
 
                     // Autofill empty fields from OCR, with fuzzy merchant matching
                     if (ocrResult) {
+                        console.log('Applying OCR results:', { ocrMerchant: ocrResult.merchant, ocrAmount: ocrResult.amount, willSetMerchant: !merchant && !!ocrResult.merchant, willSetAmount: !amount && !!ocrResult.amount });
                         if (!merchant && ocrResult.merchant) {
                             const isAmazonOrder = /^Amazon - \d{3}-\d{7}-\d{7}$/.test(ocrResult.merchant);
                             let corrected = (ocrResult.merchant || '').trim();
