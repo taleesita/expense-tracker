@@ -6672,9 +6672,12 @@
                 || /\b(processing|confirm|complet|ship|deliver|receiv|plac|prepar|cancel|refund|return|verif|updat|schedul|remind)/.test(n.toLowerCase());
 
             // ---- KNOWN SENDER PATTERNS ----
-            // Amazon: "You've been charged for [item]" or "Retrocharge" or subject with Amazon order number
+            // Amazon: order number, "Ordered:", shipment, retrocharge
             if (/\d{3}-\d{7}-\d{7}/.test(s)) return 'Amazon';
             if (/retrocharge|you've been charged for/i.test(s)) return 'Amazon';
+            if (/^ordered:\s/i.test(s)) return 'Amazon';
+            if (/your\s+amazon\.?\s*(com)?\s+order/i.test(s)) return 'Amazon';
+            if (/amazon\.?\s*(com)?\s+.*\b(ship|deliver|arriv)/i.test(s)) return 'Amazon';
             // Apple: "We're processing your order W1590669579"
             if (/W\d{8,}/i.test(s) && /order|processing/i.test(s)) return 'Apple';
             // Venmo: "You paid Junaid Chisty $300.00"
@@ -7168,8 +7171,9 @@
                 if (ocr) {
                     const ocrMerchantClean = (ocr.merchant || '').replace(/^[\s.,;:!?]+/, '').trim();
                     const ocrMerchantGood = !isGibberishMerchant(ocrMerchantClean);
-                    // Prefer subject merchant; fall back to OCR only if it looks real
-                    merchant = subjectMerchant || (ocrMerchantGood ? ocrMerchantClean : '');
+                    // Prefer OCR merchant when it's more specific (e.g., "Amazon - 111-..." over "Amazon")
+                    const ocrMoreSpecific = ocrMerchantGood && ocrMerchantClean.length > subjectMerchant.length && ocrMerchantClean.toLowerCase().startsWith(subjectMerchant.toLowerCase());
+                    merchant = ocrMoreSpecific ? ocrMerchantClean : (subjectMerchant || (ocrMerchantGood ? ocrMerchantClean : ''));
                     console.log('Inbox buildPrefill result:', { ocrMerchantClean, ocrMerchantGood, merchant });
                     amount = ocr.amount ? String(ocr.amount) : '';
                     date = ocr.date || date;
