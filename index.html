@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.25-jun6';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.27-jun15';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -1458,6 +1458,15 @@
                 }
             }, [token]);
 
+            // Fetch with timeout — prevents hanging requests on mobile
+            const fetchWithTimeout = async (url, options = {}, timeoutMs = 30000) => {
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), timeoutMs);
+                try {
+                    return await fetch(url, { ...options, signal: controller.signal });
+                } finally { clearTimeout(timer); }
+            };
+
             const appendExpense = useCallback(async (expense, { skipRefresh = false } = {}) => {
                 if (!token) { throw new Error('Google connection expired — tap Reconnect at the top of the screen, then try saving again.'); }
                 try {
@@ -1477,46 +1486,94 @@
                         getSheetCategoryName(expense.category),            // H: Category
                         expense.receipt || '',                             // I: Receipt
                     ];
-                    console.log('Writing row to sheet:', { merchant: expense.merchant, account: expense.account, txnType: expense.txnType, charge: chargeAmt, deposit: depositAmt, receipt: expense.receipt || '(none)' });
+                    console.log('[appendExpense] START — Writing row:', { merchant: expense.merchant, account: expense.account, txnType: expense.txnType, charge: chargeAmt, deposit: depositAmt, receipt: expense.receipt || '(none)' });
 
-                    // Step 1: Find next empty row using spreadsheet metadata (gridProperties.rowCount)
-                    // IMPORTANT: We must NOT use column A alone — rows without timestamps
-                    // (balance-only historical entries) exist after the last timestamped row,
-                    // and writing to "colA.length + 1" would OVERWRITE them.
-                    const metaRespForRow = await fetch(
+                    // Step 1: Get grid size from metadata (lightweight call)
+                    console.log('[appendExpense] Step 1: fetching sheet metadata...');
+                    const metaRespForRow = await fetchWithTimeout(
                         `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}?fields=sheets(properties)`,
                         { headers: { 'Authorization': `Bearer ${token}` } }
                     );
                     if (!metaRespForRow.ok) {
-                        throw new Error(metaRespForRow.status === 401 ? 'Google connection expired — tap Reconnect, then try again.' : `Save failed (${metaRespForRow.status}). Please try again.`);
+                        const errText = await metaRespForRow.text().catch(() => '');
+                        console.error('[appendExpense] Metadata fetch failed:', metaRespForRow.status, errText);
+                        throw new Error(metaRespForRow.status === 401 ? 'Google connection expired — tap Reconnect, then try again.' : `Save failed (metadata ${metaRespForRow.status}). Please try again.`);
                     }
                     const metaForRow = await metaRespForRow.json();
                     const targetTab = (metaForRow.sheets || []).find(s => s.properties?.title === SHEET_TAB);
                     const gridRowCount = targetTab?.properties?.gridProperties?.rowCount || 0;
-                    // gridProperties.rowCount is the total grid size — find actual last row with data
-                    // by reading a few columns near the end to find the true data boundary
+                    console.log('[appendExpense] Grid row count:', gridRowCount);
+
+                    // Step 1b: Find the actual last data row.
+                    // OPTIMIZATION: Instead of reading ALL rows (slow on mobile with 9500+ rows),
+                    // read only the last ~200 rows to find the true data boundary.
                     let newRowNum;
                     try {
-                        // Read columns A-D to find the last row with any data
-                        const scanResp = await fetch(
-                            `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A:D?majorDimension=ROWS`,
+                        const scanStart = Math.max(1, gridRowCount - 200);
+                        const scanRange = `${SHEET_TAB}!A${scanStart}:D${gridRowCount}`;
+                        console.log('[appendExpense] Step 1b: scanning range', scanRange);
+                        const scanResp = await fetchWithTimeout(
+                            `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(scanRange)}?majorDimension=ROWS`,
                             { headers: { 'Authorization': `Bearer ${token}` } }
                         );
                         if (scanResp.ok) {
                             const scanData = await scanResp.json();
                             const scanRows = scanData.values || [];
-                            newRowNum = scanRows.length + 1;
+                            // scanRows[0] is row scanStart, so last data row = scanStart + scanRows.length - 1
+                            // Next empty row = scanStart + scanRows.length
+                            newRowNum = scanStart + scanRows.length;
+                            // But if the scan window is full (all 200 rows have data),
+                            // the actual last row with data might extend beyond gridRowCount.
+                            // In that case, just use gridRowCount + 1 (safe — grid auto-extends on write)
+                            if (scanRows.length >= (gridRowCount - scanStart + 1)) {
+                                // All rows in scan range have data — safe to append at end
+                                newRowNum = gridRowCount + 1;
+                            }
                         } else {
-                            // Fallback: use grid row count (may have trailing blank rows but won't overwrite data)
+                            console.warn('[appendExpense] Scan failed:', scanResp.status, '— falling back to gridRowCount+1');
                             newRowNum = gridRowCount + 1;
                         }
-                    } catch {
+                    } catch (scanErr) {
+                        console.warn('[appendExpense] Scan error:', scanErr.message, '— falling back to gridRowCount+1');
                         newRowNum = gridRowCount + 1;
                     }
-                    console.log('Next empty row:', newRowNum, '(grid has', gridRowCount, 'rows)');
+                    console.log('[appendExpense] Next empty row:', newRowNum, '(grid has', gridRowCount, 'rows)');
+
+                    // Step 1c: Safety check — verify target row is actually empty before writing
+                    try {
+                        const verifyResp = await fetchWithTimeout(
+                            `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A${newRowNum}:D${newRowNum}`,
+                            { headers: { 'Authorization': `Bearer ${token}` } }
+                        );
+                        if (verifyResp.ok) {
+                            const verifyData = await verifyResp.json();
+                            const existing = (verifyData.values || [])[0] || [];
+                            if (existing.some(v => v && v.toString().trim())) {
+                                console.warn('[appendExpense] Row', newRowNum, 'NOT empty! Content:', existing, '— shifting to gridRowCount+1');
+                                newRowNum = gridRowCount + 1;
+                                // Double-check the fallback too
+                                const verify2 = await fetchWithTimeout(
+                                    `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A${newRowNum}:D${newRowNum}`,
+                                    { headers: { 'Authorization': `Bearer ${token}` } }
+                                );
+                                if (verify2.ok) {
+                                    const v2Data = await verify2.json();
+                                    const existing2 = (v2Data.values || [])[0] || [];
+                                    if (existing2.some(v => v && v.toString().trim())) {
+                                        newRowNum = gridRowCount + 2; // absolute safety
+                                        console.warn('[appendExpense] Fallback row also occupied, using gridRowCount+2:', newRowNum);
+                                    }
+                                }
+                            }
+                        }
+                    } catch (verifyErr) {
+                        console.warn('[appendExpense] Could not verify row emptiness:', verifyErr.message);
+                        // Proceed anyway — write is still safe at gridRowCount boundary
+                    }
 
                     // Step 2: Write directly to that specific row (A{n}:I{n}) — avoids table auto-detection
-                    const resp = await fetch(
+                    console.log('[appendExpense] Step 2: writing to row', newRowNum, '...');
+                    const resp = await fetchWithTimeout(
                         `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A${newRowNum}:I${newRowNum}?valueInputOption=USER_ENTERED`,
                         {
                             method: 'PUT',
@@ -1526,22 +1583,17 @@
                     );
                     if (!resp.ok) {
                         const errBody = await resp.text();
-                        console.error('Sheet write failed:', resp.status, errBody);
-                        throw new Error(resp.status === 401 ? 'Google connection expired — tap Reconnect, then try again.' : `Save failed (${resp.status}). Please try again.`);
+                        console.error('[appendExpense] Sheet write FAILED:', resp.status, errBody);
+                        throw new Error(resp.status === 401 ? 'Google connection expired — tap Reconnect, then try again.' : `Save failed (write ${resp.status}). Please try again.`);
                     }
-                    console.log('Sheet write result: row', newRowNum);
+                    console.log('[appendExpense] Sheet write SUCCESS: row', newRowNum);
 
                     // Step 3: Copy data validation (dropdowns) and formatting from row 2
                     try {
-                        const metaResp = await fetch(
-                            `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}?fields=sheets(properties)`,
-                            { headers: { 'Authorization': `Bearer ${token}` } }
-                        );
-                        const metaData = await metaResp.json();
-                        const tabSheet = (metaData.sheets || []).find(s => s.properties?.title === SHEET_TAB);
+                        const tabSheet = targetTab; // reuse metadata from step 1
                         const sheetId = tabSheet?.properties?.sheetId ?? 0;
 
-                        await fetch(
+                        await fetchWithTimeout(
                             `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}:batchUpdate`,
                             {
                                 method: 'POST',
@@ -1564,14 +1616,15 @@
                                 ]})
                             }
                         );
-                        console.log('Applied data validation & alignment to row', newRowNum);
+                        console.log('[appendExpense] Applied data validation & alignment to row', newRowNum);
                     } catch (fmtErr) {
-                        console.warn('Could not apply formatting to new row:', fmtErr);
+                        console.warn('[appendExpense] Could not apply formatting to new row:', fmtErr);
                     }
 
+                    console.log('[appendExpense] DONE — refreshing list...');
                     if (!skipRefresh) await fetchExpenses(true);
                 } catch (err) {
-                    console.error('Failed to append expense:', err);
+                    console.error('[appendExpense] FAILED:', err.message || err);
                     throw err;
                 }
             }, [token, fetchExpenses]);
@@ -1836,6 +1889,7 @@
             const [inboxItems, setInboxItems] = useState([]);
             const [inboxLoading, setInboxLoading] = useState(false);
             const ocrCacheRef = useRef({}); // fileId → { merchant, amount, date, category, txnType }
+            const inFlightRowsRef = useRef(new Set()); // rowIndexes being saved in background — exclude from re-fetch
 
             const fetchInbox = useCallback(async () => {
                 if (!token) return;
@@ -1858,8 +1912,11 @@
                         const row = rows[i];
                         if (!row || row.length < 7) continue;
                         if ((row[6] || '').toLowerCase() !== 'pending') continue; // only show pending
+                        const rowIndex = i + 1;
+                        // Skip items that are currently being saved in the background
+                        if (inFlightRowsRef.current.has(rowIndex)) continue;
                         items.push({
-                            rowIndex: i + 1,
+                            rowIndex,
                             processedAt: row[0] || '',
                             emailDate: row[1] || '',
                             subject: row[2] || '',
@@ -1897,7 +1954,7 @@
                 }
             }, [token]);
 
-            return { inboxItems, inboxLoading, fetchInbox, markInboxItem, ocrCacheRef };
+            return { inboxItems, inboxLoading, fetchInbox, markInboxItem, ocrCacheRef, inFlightRowsRef };
         };
 
         // Crop receipt from background (keeps color, for Drive upload / display)
@@ -6893,9 +6950,12 @@
         // ============ MAIN APP ============
         const App = () => {
             const { user, token, login, logout, authLoading, needsReconnect, reconnect } = useGoogleAuth();
+            // Keep a ref to the latest token so async callbacks always use the freshest value
+            const tokenRef = useRef(token);
+            useEffect(() => { tokenRef.current = token; }, [token]);
             const { expenses, setExpenses, loading, fetchExpenses, appendExpense, updateExpense, batchUpdateExpenses, deleteExpense, writeReconcileCell, batchWriteReconcile, apiError } = useGoogleSheets(token);
             const { push: pushUndo, undo: undoAction, canUndo } = useUndoStack();
-            const { inboxItems, inboxLoading, fetchInbox, markInboxItem, ocrCacheRef } = useInbox(token);
+            const { inboxItems, inboxLoading, fetchInbox, markInboxItem, ocrCacheRef, inFlightRowsRef } = useInbox(token);
 
             // Hash-based routing: #home, #all, #cards/amazon_chase, #banks/cap1_jcheck, #review
             const parseHash = () => {
@@ -6930,10 +6990,12 @@
                 window.location.hash = sub ? `${tab}/${sub}` : tab;
             }, [selectedCard, selectedBank]);
             const [toast, setToast] = useState('');
+            const [toastIsError, setToastIsError] = useState(false);
             const [confirmationData, setConfirmationData] = useState(null);
             const [isSaving, setIsSaving] = useState(false);
             const bgSaveQueueRef = useRef(Promise.resolve());
             const [bgSaveCount, setBgSaveCount] = useState(0);
+            const [saveFailure, setSaveFailure] = useState(null); // persistent failure banner
             const enqueueBgSave = (label, fn) => {
                 setBgSaveCount(c => c + 1);
                 bgSaveQueueRef.current = bgSaveQueueRef.current.then(async () => {
@@ -6941,8 +7003,11 @@
                         await fn();
                     } catch (err) {
                         console.error('Background save failed:', err);
-                        setToast('Save failed for ' + label + ' — you may need to re-add it.');
-                        setTimeout(() => setToast(''), 8000);
+                        // Show prominent error toast AND persistent failure banner
+                        setToastIsError(true);
+                        setToast('Save failed: ' + label);
+                        setSaveFailure({ label, error: err.message || 'Unknown error', time: Date.now() });
+                        setTimeout(() => { setToast(''); setToastIsError(false); }, 15000);
                     } finally {
                         setBgSaveCount(c => c - 1);
                     }
@@ -7469,6 +7534,9 @@
                     const reviewItem = inboxReviewingRef.current;
                     pushUndo(expenses);
 
+                    // Mark this row as in-flight so re-fetches don't show it again
+                    inFlightRowsRef.current.add(reviewItem.rowIndex);
+
                     // Immediate feedback
                     const inboxLabel = `Saving ${expenseData.merchant || 'expense'}...`;
                     setToast(inboxLabel);
@@ -7481,6 +7549,7 @@
                     enqueueBgSave(expenseData.merchant || 'expense', async () => {
                         await appendExpense(expenseData);
                         await markInboxItem(reviewItem.rowIndex, 'done');
+                        inFlightRowsRef.current.delete(reviewItem.rowIndex);
                         setConfirmationData({
                             isDual: false, isNew: true,
                             merchant: expenseData.merchant, amount: expenseData.amount,
@@ -8104,11 +8173,25 @@
                         </div>
                     )}
 
+                    {/* Persistent save failure banner — stays until dismissed */}
+                    {saveFailure && (
+                        <div className="fixed top-16 left-4 right-4 z-50 flex justify-center" style={{ animation: 'fadeIn 0.2s ease' }}>
+                            <div className="bg-red-600 text-white px-4 py-3 rounded-xl shadow-lg text-sm font-medium max-w-sm w-full">
+                                <div className="flex items-center justify-between">
+                                    <div>
+                                        <div className="font-bold">Save Failed</div>
+                                        <div className="text-red-100 text-xs mt-0.5">{saveFailure.label}: {saveFailure.error}</div>
+                                    </div>
+                                    <button onClick={() => setSaveFailure(null)} className="ml-3 text-red-200 hover:text-white text-lg font-bold">&times;</button>
+                                </div>
+                            </div>
+                        </div>
+                    )}
                     {/* Confirmation card after submission */}
                     {/* Simple toast notification (MTA, undo, errors, etc.) */}
-                    {toast && (
+                    {toast && !saveFailure && (
                         <div className="fixed top-16 left-4 right-4 z-50 flex justify-center pointer-events-none" style={{ animation: 'fadeIn 0.2s ease' }}>
-                            <div className="bg-gray-900 text-white px-4 py-2.5 rounded-xl shadow-lg text-sm font-medium pointer-events-auto max-w-sm text-center">
+                            <div className={`${toastIsError ? 'bg-red-600' : 'bg-gray-900'} text-white px-4 py-2.5 rounded-xl shadow-lg text-sm font-medium pointer-events-auto max-w-sm text-center`}>
                                 {toast}
                             </div>
                         </div>
