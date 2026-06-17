@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.27-jun15';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.28-jun16';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -484,11 +484,29 @@
             const overdue = [];
             for (const rec of RECURRING_TRANSACTIONS) {
                 // Find the most recent matching transaction
+                // Normalize matchMerchant: collapse whitespace/dashes for more robust matching
+                const normalizeMerchant = (s) => s.toLowerCase().replace(/[\s–—\-]+/g, ' ').trim();
+                const normalizedMatch = normalizeMerchant(rec.matchMerchant);
                 const matches = expenses.filter(e => {
-                    const merchantMatch = e.merchant && e.merchant.toLowerCase().includes(rec.matchMerchant);
+                    if (!e.merchant) return false;
+                    const normalizedMerchant = normalizeMerchant(e.merchant);
+                    const merchantMatch = normalizedMerchant.includes(normalizedMatch);
                     const accountMatch = !rec.matchAccount || e.account === rec.matchAccount;
                     return merchantMatch && accountMatch;
                 });
+
+                // Debug logging for paycheck entries
+                if (rec.id.includes('paycheck') || rec.id.includes('paystub')) {
+                    // Find entries that partially match by merchant but may fail on account
+                    const merchantOnly = expenses.filter(e => e.merchant && normalizeMerchant(e.merchant).includes(normalizedMatch));
+                    if (merchantOnly.length !== matches.length) {
+                        console.log(`[Reminder Debug] ${rec.id}: ${merchantOnly.length} merchant matches but only ${matches.length} full matches. Account mismatches:`,
+                            merchantOnly.filter(e => e.account !== rec.matchAccount).map(e => ({ merchant: e.merchant, account: e.account, date: e.date, expected: rec.matchAccount }))
+                        );
+                    }
+                    console.log(`[Reminder Debug] ${rec.id}: ${matches.length} matches found. Last 3:`, matches.slice(0, 3).map(e => ({ merchant: e.merchant, account: e.account, date: e.date })));
+                }
+
                 // Sort by date descending
                 const sorted = matches.sort((a, b) => {
                     const da = new Date(a.date || a.timestamp);
@@ -5274,6 +5292,7 @@
         const QuarterlyReview = ({ token, expenses }) => {
             const [loading, setLoading] = useState(false);
             const [qrData, setQrData] = useState(null);
+            const [qrError, setQrError] = useState(null);
             const [currentValues, setCurrentValues] = useState({});
             const [showPct, setShowPct] = useState(false);
             const [lockedQuarters, setLockedQuarters] = useState(() => {
@@ -5287,14 +5306,26 @@
             const fetchQRData = useCallback(async () => {
                 if (!token) return;
                 setLoading(true);
+                setQrError(null);
                 try {
-                    const resp = await fetch(
+                    const resp = await fetchWithTimeout(
                         `https://sheets.googleapis.com/v4/spreadsheets/${QR_SHEET_ID}/values/${encodeURIComponent(QR_SHEET_TAB)}?valueRenderOption=FORMATTED_VALUE`,
                         { headers: { 'Authorization': `Bearer ${token}` } }
                     );
+                    if (!resp.ok) {
+                        const errText = await resp.text().catch(() => '');
+                        console.error('[fetchQRData] API error:', resp.status, errText);
+                        if (resp.status === 401 || resp.status === 403) {
+                            setQrError('Google connection expired — tap Reconnect at the top of the screen, then come back to Review.');
+                        } else {
+                            setQrError(`Failed to load quarterly data (HTTP ${resp.status}). Try refreshing.`);
+                        }
+                        setLoading(false);
+                        return;
+                    }
                     const data = await resp.json();
                     const rows = data.values || [];
-                    if (rows.length < 3) { setLoading(false); return; }
+                    if (rows.length < 3) { setQrError('Quarterly sheet appears empty (fewer than 3 rows). Check that the sheet "' + QR_SHEET_TAB + '" exists and has data.'); setLoading(false); return; }
 
                     // Row 1 (index 0) is empty; row 2 (index 1) has headers
                     const header = rows[1] || [];
@@ -5409,6 +5440,11 @@
                     setCurrentValues(prefill);
                 } catch (err) {
                     console.error('Failed to fetch quarterly data:', err);
+                    if (err.name === 'AbortError') {
+                        setQrError('Request timed out loading quarterly data. Check your connection and try again.');
+                    } else {
+                        setQrError('Failed to load quarterly data: ' + (err.message || 'Unknown error'));
+                    }
                 } finally {
                     setLoading(false);
                 }
@@ -5422,7 +5458,19 @@
                 </div>
             );
             if (!qrData) return (
-                <div className="p-4 text-center text-gray-500">No quarterly data found</div>
+                <div className="p-4 text-center">
+                    {qrError ? (
+                        <div className="bg-red-50 border border-red-200 rounded-xl p-4 max-w-sm mx-auto">
+                            <p className="text-red-700 text-sm font-medium mb-2">Could not load quarterly data</p>
+                            <p className="text-red-500 text-xs">{qrError}</p>
+                            <button onClick={fetchQRData} className="mt-3 px-4 py-1.5 bg-red-100 text-red-700 rounded-lg text-xs font-bold hover:bg-red-200">
+                                Retry
+                            </button>
+                        </div>
+                    ) : (
+                        <p className="text-gray-500">No quarterly data found</p>
+                    )}
+                </div>
             );
 
             const { accounts, quarters, summaries } = qrData;
