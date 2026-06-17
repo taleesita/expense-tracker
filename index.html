@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.28.1-jun16';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.28.2-jun16';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -5315,8 +5315,27 @@
                     if (!resp.ok) {
                         const errText = await resp.text().catch(() => '');
                         console.error('[fetchQRData] API error:', resp.status, errText);
+                        console.error('[fetchQRData] Sheet ID:', QR_SHEET_ID, 'Tab:', QR_SHEET_TAB);
                         if (resp.status === 401 || resp.status === 403) {
                             setQrError('Google connection expired — tap Reconnect at the top of the screen, then come back to Review.');
+                        } else if (resp.status === 404) {
+                            // 404 = spreadsheet or tab not found — try fetching sheet metadata to check
+                            let tabHint = '';
+                            try {
+                                const metaResp = await fetchWithTimeout(
+                                    `https://sheets.googleapis.com/v4/spreadsheets/${QR_SHEET_ID}?fields=sheets.properties.title`,
+                                    { headers: { 'Authorization': `Bearer ${token}` } }
+                                );
+                                if (metaResp.ok) {
+                                    const metaData = await metaResp.json();
+                                    const tabNames = (metaData.sheets || []).map(s => s.properties?.title).filter(Boolean);
+                                    console.log('[fetchQRData] Available tabs in QR sheet:', tabNames);
+                                    tabHint = ' Available tabs: ' + tabNames.join(', ');
+                                } else {
+                                    tabHint = ' (Could not read sheet metadata either — spreadsheet may be deleted or unshared)';
+                                }
+                            } catch {}
+                            setQrError(`Tab "${QR_SHEET_TAB}" not found in quarterly sheet.${tabHint}`);
                         } else {
                             setQrError(`Failed to load quarterly data (HTTP ${resp.status}). Try refreshing.`);
                         }
