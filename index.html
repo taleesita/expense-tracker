@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.28.2-jun16';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.28.3-jun17';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -735,7 +735,7 @@
         fetchLiveRates();
 
         // ============ QUARTERLY REVIEW CONSTANTS ============
-        const QR_SHEET_ID = '17auoyzXlLJDtT7-P7JSdJG6-ozv5-jxKFG55cx7xxP0';
+        const QR_SHEET_ID = REAL_SHEET_ID; // QBreakdown tab now lives in the main spreadsheet (old standalone sheet 17auoyz… was deleted)
         const QR_SHEET_TAB = '📝QBreakdown';
         const HOME_VALUE = 1180000; // Current home value for equity calculation
         // Mapping: quarterly sheet account name → expense tracker account ID
