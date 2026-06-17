@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.29.1-jun17';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.30.0-jun17';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -744,8 +744,8 @@
             'Capital One - HY Savings (Savings)': 'cap1_joint_hy',
             'Capital One - Joint Checking': 'cap1_jcheck',
             'Capital One - Taly Savings': 'cap1_tsaving',
+            'Capital One - Noa HYSavings': 'cap1_noa_hy',
             'Cap1 Noa HY Savings': 'cap1_noa_hy',
-            'Capital One - Noa Savings': 'cap1_noa_hy',
             'Mercury - Matiteyahu LLC': 'mercury_matiteyahu',
             'Mercury - TreatTeek': 'mercury_treatteek',
         };
@@ -5292,10 +5292,15 @@
         };
 
         const QuarterlyReview = ({ token, expenses }) => {
+            // Storage key for in-progress (unlocked) entries, scoped to the current calendar-quarter month.
+            const QR_DRAFT_KEY = 'qr_draft_' + new Date().getFullYear() + '.' + String(new Date().getMonth() + 1).padStart(2, '0');
             const [loading, setLoading] = useState(false);
             const [qrData, setQrData] = useState(null);
             const [qrError, setQrError] = useState(null);
-            const [currentValues, setCurrentValues] = useState({});
+            // Load any in-progress entries so a tab switch / reload / re-render never loses them.
+            const [currentValues, setCurrentValues] = useState(() => {
+                try { return JSON.parse(localStorage.getItem(QR_DRAFT_KEY) || '{}'); } catch { return {}; }
+            });
             const [showPct, setShowPct] = useState(false);
             const [lockedQuarters, setLockedQuarters] = useState(() => {
                 try { return JSON.parse(localStorage.getItem('qr_locked') || '[]'); } catch { return []; }
@@ -5303,6 +5308,8 @@
             const [expandedDormant, setExpandedDormant] = useState({}); // per-category: { liquid: true }
             const [selectedQ, setSelectedQ] = useState(null); // clicked quarter label from chart
             const [showHistoryDormant, setShowHistoryDormant] = useState(false); // show inactive in history table
+            const [showExport, setShowExport] = useState(false); // "Export for sheet" column generator
+            const [copiedExport, setCopiedExport] = useState(false);
             // Per-row reconcile checkoffs (validated amounts), saved locally per quarter: { '2026.06': { 'TD Bank': true } }
             const [reconciledRows, setReconciledRows] = useState(() => {
                 try { return JSON.parse(localStorage.getItem('qr_reconciled') || '{}'); } catch { return {}; }
@@ -5316,6 +5323,10 @@
                     return next;
                 });
             };
+            // Persist in-progress entries on every change so they survive tab switches, reloads, and refetches.
+            useEffect(() => {
+                try { localStorage.setItem(QR_DRAFT_KEY, JSON.stringify(currentValues)); } catch {}
+            }, [currentValues, QR_DRAFT_KEY]);
 
             // Fetch quarterly data from sheet
             const fetchQRData = useCallback(async () => {
@@ -5748,6 +5759,12 @@
                                 <div className={`absolute top-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${showPct ? 'translate-x-4' : 'translate-x-0.5'}`} />
                             </div>
                         </label>
+                        <button
+                            onClick={() => setShowExport(s => !s)}
+                            className="px-3 py-1.5 rounded-lg text-xs font-medium bg-indigo-100 text-indigo-700"
+                        >
+                            📋 Export for sheet
+                        </button>
                         {!isLocked && (
                             <button
                                 onClick={handleLockQuarter}
@@ -5758,6 +5775,62 @@
                             </button>
                         )}
                     </div>
+
+                    {/* Export-for-sheet column generator */}
+                    {showExport && (() => {
+                        const real = accounts
+                            .filter(a => a.sheetRow && getCurrentVal(a) !== null)
+                            .sort((a, b) => a.sheetRow - b.sheetRow);
+                        if (!real.length) return (
+                            <div className="bg-white rounded-lg border border-indigo-200 p-3 text-xs text-gray-500">
+                                Enter some values first, then come back to export.
+                            </div>
+                        );
+                        const minRow = Math.min(...real.map(a => a.sheetRow));
+                        const maxRow = Math.max(...real.map(a => a.sheetRow));
+                        const col = new Array(maxRow - minRow + 1).fill('');
+                        real.forEach(a => {
+                            const v = getCurrentVal(a);
+                            col[a.sheetRow - minRow] = (a.category === 'debt' ? Math.abs(v) : v).toFixed(2);
+                        });
+                        const colText = col.join('\n');
+                        const firstName = real[0].name;
+                        const doCopy = () => {
+                            const ta = document.createElement('textarea');
+                            ta.value = colText;
+                            ta.style.position = 'fixed';
+                            ta.style.opacity = '0';
+                            document.body.appendChild(ta);
+                            ta.focus();
+                            ta.select();
+                            try { document.execCommand('copy'); } catch (e) {}
+                            try { if (navigator.clipboard) navigator.clipboard.writeText(colText); } catch (e) {}
+                            document.body.removeChild(ta);
+                            setCopiedExport(true);
+                            setTimeout(() => setCopiedExport(false), 3000);
+                        };
+                        return (
+                            <div className="bg-white rounded-lg border border-indigo-200 p-3">
+                                <p className="text-xs text-gray-600 mb-2 leading-relaxed">
+                                    In the QBreakdown tab, click the <b>Variable</b> cell on the <b>{firstName}</b> row, then paste — these drop straight down into the matching rows. Dormant/gap rows stay blank; the summary rows below are untouched. Validate the list first:
+                                </p>
+                                <div className="max-h-56 overflow-y-auto border border-gray-100 rounded mb-2">
+                                    {real.map(a => {
+                                        const v = a.category === 'debt' ? Math.abs(getCurrentVal(a)) : getCurrentVal(a);
+                                        return (
+                                            <div key={a.name} className="flex justify-between gap-2 px-2 py-1 border-b border-gray-50 text-[11px]">
+                                                <span className="text-gray-500 truncate">{a.name}</span>
+                                                <span className="font-medium" style={{ fontVariantNumeric: 'tabular-nums' }}>{v.toFixed(2)}</span>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                                <button onClick={doCopy} className="w-full py-2 bg-indigo-600 text-white rounded-lg text-sm font-bold">
+                                    {copiedExport ? `✓ Copied — paste at the ${firstName} row` : `Copy column (${real.length} values)`}
+                                </button>
+                            </div>
+                        );
+                    })()}
 
                     {/* Account Groups */}
                     {QR_CATEGORIES.map(cat => {
