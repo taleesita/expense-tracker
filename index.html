@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.29.0-jun17';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.29.1-jun17';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -5602,7 +5602,12 @@
                 const prevVal = acct.values[prevLabel] || 0;
                 const curVal = getCurrentVal(acct);
                 const displayVal = curVal !== null ? curVal : '';
-                const delta = curVal !== null ? curVal - prevVal : null;
+                // Debt current values are stored negative while sheet balances are positive,
+                // so compare magnitudes (amount owed) to get the real change. e.g. 6,213.04 owed
+                // vs 10,965.57 owed = -4,752.53, not -17,178.61.
+                const delta = curVal !== null
+                    ? (acct.category === 'debt' ? Math.abs(curVal) - Math.abs(prevVal) : curVal - prevVal)
+                    : null;
                 const isAutoFilled = acct.trackerAcctId && curVal !== null && !currentValues.hasOwnProperty(acct.name + '_manual');
                 const isHomeEquity = acct.name === 'Home Equity';
                 const isMortgage = acct.name.toLowerCase().includes('mortgage');
