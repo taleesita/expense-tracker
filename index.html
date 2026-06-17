@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.28-jun16';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.28.1-jun16';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -1360,6 +1360,15 @@
             } catch {}
         };
 
+        // Fetch with timeout — prevents hanging requests on mobile
+        const fetchWithTimeout = async (url, options = {}, timeoutMs = 30000) => {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), timeoutMs);
+            try {
+                return await fetch(url, { ...options, signal: controller.signal });
+            } finally { clearTimeout(timer); }
+        };
+
         const useGoogleSheets = (token) => {
             const [expenses, setExpenses] = useState(() => loadCachedExpenses());
             const [loading, setLoading] = useState(false);
@@ -1475,15 +1484,6 @@
                     if (!silent) setLoading(false);
                 }
             }, [token]);
-
-            // Fetch with timeout — prevents hanging requests on mobile
-            const fetchWithTimeout = async (url, options = {}, timeoutMs = 30000) => {
-                const controller = new AbortController();
-                const timer = setTimeout(() => controller.abort(), timeoutMs);
-                try {
-                    return await fetch(url, { ...options, signal: controller.signal });
-                } finally { clearTimeout(timer); }
-            };
 
             const appendExpense = useCallback(async (expense, { skipRefresh = false } = {}) => {
                 if (!token) { throw new Error('Google connection expired — tap Reconnect at the top of the screen, then try saving again.'); }
