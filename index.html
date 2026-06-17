@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.28.3-jun17';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.29.0-jun17';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -744,6 +744,8 @@
             'Capital One - HY Savings (Savings)': 'cap1_joint_hy',
             'Capital One - Joint Checking': 'cap1_jcheck',
             'Capital One - Taly Savings': 'cap1_tsaving',
+            'Cap1 Noa HY Savings': 'cap1_noa_hy',
+            'Capital One - Noa Savings': 'cap1_noa_hy',
             'Mercury - Matiteyahu LLC': 'mercury_matiteyahu',
             'Mercury - TreatTeek': 'mercury_treatteek',
         };
@@ -5301,6 +5303,19 @@
             const [expandedDormant, setExpandedDormant] = useState({}); // per-category: { liquid: true }
             const [selectedQ, setSelectedQ] = useState(null); // clicked quarter label from chart
             const [showHistoryDormant, setShowHistoryDormant] = useState(false); // show inactive in history table
+            // Per-row reconcile checkoffs (validated amounts), saved locally per quarter: { '2026.06': { 'TD Bank': true } }
+            const [reconciledRows, setReconciledRows] = useState(() => {
+                try { return JSON.parse(localStorage.getItem('qr_reconciled') || '{}'); } catch { return {}; }
+            });
+            const toggleReconciled = (qLabel, name) => {
+                setReconciledRows(prev => {
+                    const q = { ...(prev[qLabel] || {}) };
+                    if (q[name]) delete q[name]; else q[name] = true;
+                    const next = { ...prev, [qLabel]: q };
+                    try { localStorage.setItem('qr_reconciled', JSON.stringify(next)); } catch {}
+                    return next;
+                });
+            };
 
             // Fetch quarterly data from sheet
             const fetchQRData = useCallback(async () => {
@@ -5441,6 +5456,20 @@
                         });
                     }
 
+                    // Ensure Noa HY Savings always shows as a Liquid bank account (auto-filled from
+                    // the tracker), even if the QBreakdown sheet doesn't have a row for it yet.
+                    if (!accounts.some(a => a.trackerAcctId === 'cap1_noa_hy')) {
+                        accounts.push({
+                            name: 'Cap1 Noa HY Savings',
+                            liquidity: 'Liquid',
+                            category: 'liquid',
+                            values: {},
+                            trackerAcctId: 'cap1_noa_hy',
+                            sheetRow: null,
+                            _injected: true,
+                        });
+                    }
+
                     setQrData({ accounts, quarters, summaries });
 
                     // Pre-fill current values: auto-fill from tracker where possible
@@ -5456,7 +5485,10 @@
                             prefill['Home Equity'] = HOME_VALUE - Math.abs(prefill['Mortgage'] || 0);
                         }
                     });
-                    setCurrentValues(prefill);
+                    // Merge so a background refresh (e.g. expenses reloading) never wipes values
+                    // the user has typed. prefill only covers tracker-mapped accounts; manual
+                    // entries like Datadog / 401k are preserved because prev wins on conflicts.
+                    setCurrentValues(prev => ({ ...prefill, ...prev }));
                 } catch (err) {
                     console.error('Failed to fetch quarterly data:', err);
                     if (err.name === 'AbortError') {
@@ -5506,6 +5538,7 @@
 
             // Determine dormant accounts (last 2 quarters = $0 or missing)
             const isDormant = (acct) => {
+                if (acct._injected) return false; // injected rows (e.g. Noa HY) are always active
                 const recent = quarters.filter(q => q.isLabeled).slice(0, 2);
                 return recent.every(q => !acct.values[q.label] || acct.values[q.label] === 0);
             };
@@ -5573,6 +5606,19 @@
                 const isAutoFilled = acct.trackerAcctId && curVal !== null && !currentValues.hasOwnProperty(acct.name + '_manual');
                 const isHomeEquity = acct.name === 'Home Equity';
                 const isMortgage = acct.name.toLowerCase().includes('mortgage');
+                const isReconciled = !!(reconciledRows[currentQLabel] && reconciledRows[currentQLabel][acct.name]);
+                const reconcileBtn = (
+                    <button
+                        type="button"
+                        onClick={() => toggleReconciled(currentQLabel, acct.name)}
+                        className="flex-shrink-0 w-6 text-center"
+                        title={isReconciled ? 'Validated — tap to clear' : 'Mark as validated'}
+                    >
+                        {isReconciled
+                            ? <span className="text-green-500 text-base leading-none">✓</span>
+                            : <span className="text-gray-300 text-base leading-none">○</span>}
+                    </button>
+                );
 
                 // Home Equity: input is remaining mortgage, formula computes equity
                 if (isHomeEquity) {
@@ -5583,7 +5629,7 @@
                     const eqDelta = equity - prevEquity;
 
                     return (
-                        <div key={acct.name} className={`flex items-center gap-2 py-2.5 px-3 border-b border-gray-50 ${isDormantRow ? 'opacity-50' : ''}`}>
+                        <div key={acct.name} className={`flex items-center gap-2 py-2.5 px-3 border-b border-gray-50 ${isDormantRow ? 'opacity-50' : ''} ${isReconciled ? 'bg-green-50' : ''}`}>
                             <div className="flex-1 min-w-0">
                                 <div className="text-sm font-medium">{acct.name}</div>
                                 <div className="text-[11px] text-gray-400 flex items-center gap-1 mt-0.5">
@@ -5612,6 +5658,7 @@
                             <span className={`text-xs font-semibold w-20 text-right flex-shrink-0 ${eqDelta > 0 ? 'text-green-600' : eqDelta < 0 ? 'text-red-600' : 'text-gray-400'}`}>
                                 {eqDelta > 0 ? '+' : eqDelta < 0 ? '-' : ''}{eqDelta !== 0 ? `$${fmt(Math.abs(eqDelta))}` : '—'}
                             </span>
+                            {reconcileBtn}
                         </div>
                     );
                 }
@@ -5620,7 +5667,7 @@
                 const prevPct = prevTotalAbs > 0 ? (Math.abs(prevVal) / prevTotalAbs * 100) : 0;
 
                 return (
-                    <div key={acct.name} className={`flex items-center gap-2 py-2.5 px-3 border-b border-gray-50 ${isDormantRow ? 'opacity-50' : ''}`}>
+                    <div key={acct.name} className={`flex items-center gap-2 py-2.5 px-3 border-b border-gray-50 ${isDormantRow ? 'opacity-50' : ''} ${isReconciled ? 'bg-green-50' : ''}`}>
                         {/* Account name - fills remaining space */}
                         <div className="flex-1 min-w-0">
                             <div className="text-sm font-medium truncate">{acct.name}</div>
@@ -5656,6 +5703,7 @@
                         ) : (
                             <span className="text-xs text-gray-300 w-20 text-right flex-shrink-0">—</span>
                         )}
+                        {reconcileBtn}
                     </div>
                 );
             };
@@ -5728,6 +5776,7 @@
                                         <span className="text-[10px] text-gray-400 uppercase tracking-wide w-20 text-right flex-shrink-0">{prevLabel || 'Last Q'}</span>
                                         {showPct && <span className="text-[10px] text-gray-400 uppercase tracking-wide w-12 text-right flex-shrink-0">%</span>}
                                         <span className="text-[10px] text-gray-400 uppercase tracking-wide w-20 text-right flex-shrink-0">Change</span>
+                                        <span className="w-6 flex-shrink-0" />
                                     </div>
                                     <div className="text-right">
                                         <span className={`text-sm font-semibold ${cat.id === 'debt' ? 'text-red-600' : 'text-gray-700'}`}>
