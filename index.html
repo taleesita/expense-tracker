@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.9-jun17';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v5.0-jun17';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -1588,7 +1588,7 @@
             const ocrCacheRef = useRef({}); // fileId → { merchant, amount, date, category, txnType }
 
             const fetchInbox = useCallback(async () => {
-                if (!token) return;
+                if (!token) return [];
                 setInboxLoading(true);
                 try {
                     const resp = await fetch(
@@ -1599,7 +1599,7 @@
                         const errText = await resp.text().catch(() => '');
                         console.error('Inbox tab fetch failed:', resp.status, errText);
                         setInboxItems([]);
-                        return;
+                        return [];
                     }
                     const data = await resp.json();
                     const rows = data.values || [];
@@ -1621,9 +1621,11 @@
                         });
                     }
                     setInboxItems(items);
+                    return items;
                 } catch (err) {
                     console.error('Failed to fetch inbox:', err);
                     setInboxItems([]);
+                    return [];
                 } finally {
                     setInboxLoading(false);
                 }
@@ -5336,10 +5338,11 @@
             );
         };
 
-        const SettingsDropdown = ({ user, onLogout, testMode, onToggleTestMode, onRefreshTestData }) => {
+        const SettingsDropdown = ({ user, onLogout, testMode, onToggleTestMode, onRefreshTestData, onCheckInbox }) => {
             const [open, setOpen] = useState(false);
             const [toggling, setToggling] = useState(false);
             const [refreshing, setRefreshing] = useState(false);
+            const [checking, setChecking] = useState(false);
 
             return (
                 <div className="relative">
@@ -5360,6 +5363,21 @@
                                     </div>
                                 </div>
                             </div>
+                            {onCheckInbox && (
+                                <button
+                                    onClick={async () => {
+                                        setChecking(true);
+                                        await onCheckInbox();
+                                        setChecking(false);
+                                        setOpen(false);
+                                    }}
+                                    disabled={checking}
+                                    className="w-full px-4 py-2.5 text-left hover:bg-gray-50 flex items-center gap-2 text-sm border-b border-gray-100"
+                                >
+                                    <span>📥</span>
+                                    <span>{checking ? 'Checking…' : 'Check Email Inbox'}</span>
+                                </button>
+                            )}
                             <button
                                 onClick={async () => {
                                     setToggling(true);
@@ -5819,6 +5837,18 @@
                 });
                 setShowAddModal(true);
                 setInboxModeActive(true);
+            };
+
+            // Manual "check email inbox" trigger (Settings dropdown) — re-fetches the
+            // inbox tab on demand and jumps into review if anything new is pending.
+            const handleCheckInbox = async () => {
+                const items = await fetchInbox();
+                if (items && items.length > 0) {
+                    openInboxItem(items[0], 0);
+                } else {
+                    setToast('No new receipts to review');
+                    setTimeout(() => setToast(''), 2500);
+                }
             };
 
             // Advance to next inbox item or finish
@@ -6299,7 +6329,7 @@
                             >
                                 <PlusCircleIcon size={18} />
                             </button>
-                            <SettingsDropdown user={user} onLogout={logout} testMode={testMode} onToggleTestMode={handleToggleTestMode} onRefreshTestData={handleRefreshTestData} />
+                            <SettingsDropdown user={user} onLogout={logout} testMode={testMode} onToggleTestMode={handleToggleTestMode} onRefreshTestData={handleRefreshTestData} onCheckInbox={handleCheckInbox} />
                         </div>
                     </div>
 
