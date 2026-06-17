@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.30.0-jun17';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.30.1-jun17';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -5324,8 +5324,25 @@
                 });
             };
             // Persist in-progress entries on every change so they survive tab switches, reloads, and refetches.
+            // We write, then read back to confirm — if the browser is blocking storage (private mode, etc.),
+            // we flip to an error state and warn the user, since that's the one thing that can still lose entries.
+            const [saveState, setSaveState] = useState('idle'); // 'idle' | 'saved' | 'error'
             useEffect(() => {
-                try { localStorage.setItem(QR_DRAFT_KEY, JSON.stringify(currentValues)); } catch {}
+                if (!Object.keys(currentValues).length) return;
+                try {
+                    localStorage.setItem(QR_DRAFT_KEY, JSON.stringify(currentValues));
+                    const back = localStorage.getItem(QR_DRAFT_KEY);
+                    setSaveState(back && JSON.parse(back) ? 'saved' : 'error');
+                } catch (e) {
+                    setSaveState('error');
+                }
+            }, [currentValues, QR_DRAFT_KEY]);
+            // Belt-and-suspenders: force a final save if the page is being hidden/closed mid-entry.
+            useEffect(() => {
+                const flush = () => { try { localStorage.setItem(QR_DRAFT_KEY, JSON.stringify(currentValues)); } catch (e) {} };
+                window.addEventListener('pagehide', flush);
+                window.addEventListener('visibilitychange', flush);
+                return () => { window.removeEventListener('pagehide', flush); window.removeEventListener('visibilitychange', flush); };
             }, [currentValues, QR_DRAFT_KEY]);
 
             // Fetch quarterly data from sheet
@@ -5774,6 +5791,15 @@
                                 Lock {currentQLabel}
                             </button>
                         )}
+                    </div>
+
+                    {/* Save status — confirms entries are actually persisting on this device */}
+                    <div className="text-right text-[11px] -mt-1">
+                        {saveState === 'error' ? (
+                            <span className="text-red-600 font-medium">⚠️ Not saving on this device — your entries may not survive a reload. (Private/incognito mode blocks storage.)</span>
+                        ) : saveState === 'saved' ? (
+                            <span className="text-green-600">✓ Entries auto-saved on this device</span>
+                        ) : null}
                     </div>
 
                     {/* Export-for-sheet column generator */}
