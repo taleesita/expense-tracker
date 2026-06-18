@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.30.2-jun17';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.31.0-jun17';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -5632,6 +5632,31 @@
                 try { localStorage.setItem('qr_locked', JSON.stringify(updated)); } catch {}
             };
 
+            // Start a fresh quarter on demand: blank the manual entries (banks re-autofill from the
+            // tracker), reset this quarter's reconcile checks, and unlock. Sheet snapshots are untouched.
+            const handleStartNewQuarter = () => {
+                if (!confirm('Start a new quarter? This blanks the Current entries so you can enter fresh numbers. Your saved sheet snapshots are not affected.')) return;
+                const fresh = {};
+                accounts.forEach(acct => {
+                    if (acct.trackerAcctId && expenses.length > 0) {
+                        const acctExpenses = expenses.filter(e => e.account === acct.trackerAcctId);
+                        fresh[acct.name] = calcAccountBalance(acctExpenses, acct.trackerAcctId);
+                    }
+                });
+                setCurrentValues(fresh);
+                setReconciledRows(prev => {
+                    const n = { ...prev };
+                    delete n[currentQLabel];
+                    try { localStorage.setItem('qr_reconciled', JSON.stringify(n)); } catch {}
+                    return n;
+                });
+                if (lockedQuarters.includes(currentQLabel)) {
+                    const upd = lockedQuarters.filter(q => q !== currentQLabel);
+                    setLockedQuarters(upd);
+                    try { localStorage.setItem('qr_locked', JSON.stringify(upd)); } catch {}
+                }
+            };
+
             const renderAccountRow = (acct, isDormantRow) => {
                 const prevVal = acct.values[prevLabel] || 0;
                 const curVal = getCurrentVal(acct);
@@ -5788,6 +5813,12 @@
                         >
                             📋 Export for sheet
                         </button>
+                        <button
+                            onClick={handleStartNewQuarter}
+                            className="px-3 py-1.5 rounded-lg text-xs font-medium bg-teal-100 text-teal-700"
+                        >
+                            ✨ Start new quarter
+                        </button>
                         {!isLocked ? (
                             <button
                                 onClick={handleLockQuarter}
@@ -5827,11 +5858,20 @@
                         );
                         const minRow = Math.min(...real.map(a => a.sheetRow));
                         const maxRow = Math.max(...real.map(a => a.sheetRow));
-                        const col = new Array(maxRow - minRow + 1).fill('');
-                        real.forEach(a => {
+                        // Home Equity exports as a live formula =1180000-<balance> (pastes as a real
+                        // formula in Sheets since it starts with "="); every other row is a plain number.
+                        const cellFor = (a) => {
+                            if (a.name === 'Home Equity') {
+                                const bal = currentValues['_mortgage_remaining'];
+                                if (bal !== undefined && bal !== '' && !isNaN(parseFloat(bal))) {
+                                    return '=' + HOME_VALUE + '-' + parseFloat(bal);
+                                }
+                            }
                             const v = getCurrentVal(a);
-                            col[a.sheetRow - minRow] = (a.category === 'debt' ? Math.abs(v) : v).toFixed(2);
-                        });
+                            return (a.category === 'debt' ? Math.abs(v) : v).toFixed(2);
+                        };
+                        const col = new Array(maxRow - minRow + 1).fill('');
+                        real.forEach(a => { col[a.sheetRow - minRow] = cellFor(a); });
                         const colText = col.join('\n');
                         const firstName = real[0].name;
                         const doCopy = () => {
@@ -5851,18 +5891,15 @@
                         return (
                             <div className="bg-white rounded-lg border border-indigo-200 p-3">
                                 <p className="text-xs text-gray-600 mb-2 leading-relaxed">
-                                    In the QBreakdown tab, click the <b>Variable</b> cell on the <b>{firstName}</b> row, then paste — these drop straight down into the matching rows. Dormant/gap rows stay blank; the summary rows below are untouched. Validate the list first:
+                                    In the QBreakdown tab, click the <b>Variable</b> cell on the <b>{firstName}</b> row, then paste — these drop straight down into the matching rows. Dormant/gap rows stay blank; the summary rows below are untouched. Home Equity pastes as a live <b>=1180000−balance</b> formula. Validate the list first:
                                 </p>
                                 <div className="max-h-56 overflow-y-auto border border-gray-100 rounded mb-2">
-                                    {real.map(a => {
-                                        const v = a.category === 'debt' ? Math.abs(getCurrentVal(a)) : getCurrentVal(a);
-                                        return (
-                                            <div key={a.name} className="flex justify-between gap-2 px-2 py-1 border-b border-gray-50 text-[11px]">
-                                                <span className="text-gray-500 truncate">{a.name}</span>
-                                                <span className="font-medium" style={{ fontVariantNumeric: 'tabular-nums' }}>{v.toFixed(2)}</span>
-                                            </div>
-                                        );
-                                    })}
+                                    {real.map(a => (
+                                        <div key={a.name} className="flex justify-between gap-2 px-2 py-1 border-b border-gray-50 text-[11px]">
+                                            <span className="text-gray-500 truncate">{a.name}</span>
+                                            <span className="font-medium" style={{ fontVariantNumeric: 'tabular-nums' }}>{cellFor(a)}</span>
+                                        </div>
+                                    ))}
                                 </div>
                                 <button onClick={doCopy} className="w-full py-2 bg-indigo-600 text-white rounded-lg text-sm font-bold">
                                     {copiedExport ? `✓ Copied — paste at the ${firstName} row` : `Copy column (${real.length} values)`}
