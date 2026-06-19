@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.31.4-jun19';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.31.5-jun19';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -330,6 +330,9 @@
         const isGibberishMerchant = (name) => {
             if (!name || name.length < 2) return true;
             const trimmed = name.trim();
+            // Structured merchant IDs (e.g. "Amazon - 111-1818910-0765026") are legit even though
+            // they're mostly digits — don't let the digit-ratio check below reject them.
+            if (/^amazon\s*-\s*\d{3}-\d{7}-\d{7}/i.test(trimmed)) return false;
             const clean = trimmed.replace(/[^a-zA-Z]/g, '').toLowerCase();
             if (clean.length < 2) return true;
             // Mostly digits — register/terminal info, not a merchant
