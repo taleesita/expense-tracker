@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.31.5-jun19';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.31.6-jun19';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -7469,30 +7469,16 @@
                 if (PROCESS_INBOX_URL) {
                     try {
                         setToast('Processing inbox emails...');
-                        // Pass OAuth token for Apps Script deployed with "Anyone with Google account"
-                        const resp = await fetch(PROCESS_INBOX_URL, {
-                            headers: { 'Authorization': `Bearer ${token}` },
-                            redirect: 'follow',
-                        });
-                        const result = await resp.json();
-                        if (result.status === 'ok') {
-                            setToast('Inbox processed — refreshing...');
-                        } else {
-                            setToast('Processing error: ' + (result.message || 'unknown'));
-                        }
+                        // Apps Script web apps don't return CORS headers, so the browser can't read the
+                        // response (and an Authorization header forces a preflight it can't answer).
+                        // The web app runs as the deployer (you), so just fire a no-cors GET to trigger
+                        // processInbox server-side, wait a moment, then re-read the inbox from the sheet.
+                        await fetch(PROCESS_INBOX_URL, { method: 'GET', mode: 'no-cors' });
+                        await new Promise(r => setTimeout(r, 3500));
+                        setToast('Inbox processed — refreshing...');
                     } catch (err) {
-                        // If CORS fails with token, try without (for "Anyone" deployment)
-                        try {
-                            const resp2 = await fetch(PROCESS_INBOX_URL);
-                            const result2 = await resp2.json();
-                            if (result2.status === 'ok') {
-                                setToast('Inbox processed — refreshing...');
-                            } else {
-                                setToast('Processing error: ' + (result2.message || 'unknown'));
-                            }
-                        } catch (err2) {
-                            setToast('Failed to trigger processing — try redeploying Apps Script as "Anyone"');
-                        }
+                        console.error('processInbox trigger failed:', err);
+                        setToast('Pulling latest from sheet…');
                     }
                 } else {
                     setToast('Refreshing inbox...');
