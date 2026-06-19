@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.31.0-jun17';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.31.1-jun19';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -3315,6 +3315,10 @@
             const uploadedReceiptUrl = useRef(null); // track file uploaded this session for cancel/rename
             const modalSessionId = useRef(0); // incremented each time modal opens to ignore stale async results
             const modalScrollRef = useRef(null); // ref to modal scroll container for scroll-to-top on inbox advance
+            // Scroll back to top whenever the inbox advances to a new item (inboxProgress changes).
+            useEffect(() => {
+                if (inboxMode && modalScrollRef.current) modalScrollRef.current.scrollTop = 0;
+            }, [inboxProgress, inboxMode]);
 
             // Listen for camera captures from the header camera button
             useEffect(() => {
@@ -7564,10 +7568,9 @@
                     // Open next item but keep index at currentIdx (array will shift down
                     // after markInboxItem's async setState lands)
                     openInboxItem(inboxItems[nextIdx], inboxIndexRef.current);
-                    // Scroll modal to top so user clearly sees the new entry
-                    setTimeout(() => {
-                        if (modalScrollRef.current) modalScrollRef.current.scrollTop = 0;
-                    }, 50);
+                    // (Scroll-to-top on advance is handled inside AddExpenseModal, which owns the
+                    // scroll container ref — referencing it here threw "modalScrollRef is not defined"
+                    // and broke the save→mark-reviewed→advance flow, leaving items stuck in the inbox.)
                 } else {
                     // All done
                     setShowAddModal(false);
@@ -8373,7 +8376,7 @@
                         reconnect={reconnect}
                         inboxMode={inboxModeActive}
                         onDismissReminder={dismissReminder}
-                        inboxProgress={inboxModeActive ? `${inboxReviewedRef.current + 1} of ${inboxTotalRef.current}` : ''}
+                        inboxProgress={inboxModeActive ? `${Math.min(inboxReviewedRef.current + 1, inboxTotalRef.current)} of ${inboxTotalRef.current}` : ''}
                         inboxIsLast={inboxModeActive && inboxReviewedRef.current + 1 >= inboxTotalRef.current}
                         onInboxClose={() => {
                             setShowAddModal(false);
