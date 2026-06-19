@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.31.1-jun19';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.31.3-jun19';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -2282,15 +2282,22 @@
                     // ---- AMAZON ORDER PAGE DETECTION (early exit) ----
                     // Amazon "Order Details" pages have very consistent structure.
                     // Detect early and parse directly to avoid issues with multi-column PDF text.
-                    const isAmazonOrderPage = /amazon\.com/i.test(text) && /order\s*(#|placed|summary)/i.test(text);
-                    const amazonOrderNum = text.match(/(\d{3}-\d{7}-\d{7})/);
+                    // Order number can be split by pdf.js layout (e.g. "111- 1818910- 0765026"),
+                    // so match digit groups tolerant of spaces/dashes and reassemble canonically.
+                    const amazonOrderM = text.match(/(\d{3})[-\s]+(\d{7})[-\s]+(\d{7})/);
+                    const amazonOrderNum = amazonOrderM ? `${amazonOrderM[1]}-${amazonOrderM[2]}-${amazonOrderM[3]}` : null;
+                    const isAmazonOrderPage = /amazon/i.test(text) && (!!amazonOrderNum || /order\s*(#|placed|summary|confirmation)/i.test(text) || /thanks\s+for\s+your\s+order/i.test(text));
                     if (isAmazonOrderPage && amazonOrderNum) {
-                        merchant = `Amazon - ${amazonOrderNum[1]}`;
-                        // Extract Grand Total (or just Total) amount
-                        const grandTotalMatch = text.match(/grand\s*total[:\s]*\$?\s*([\d,]+\.\d{2})/i)
+                        merchant = `Amazon - ${amazonOrderNum}`;
+                        // Extract Grand Total / Order Total (also handle split decimals like "$ 18 .59")
+                        let grandTotalMatch = text.match(/grand\s*total[:\s]*\$?\s*([\d,]+\.\d{2})/i)
+                            || text.match(/order\s*total[:\s]*\$?\s*([\d,]+\.\d{2})/i)
                             || text.match(/\btotal[:\s]*\$\s*([\d,]+\.\d{2})/i);
                         if (grandTotalMatch) {
                             amount = parseFloat(grandTotalMatch[1].replace(/,/g, ''));
+                        } else {
+                            const gtSplit = text.match(/(?:grand|order)\s*total[:\s]*\$?\s*(\d[\d,]*)\s*\.\s*(\d{2})/i);
+                            if (gtSplit) amount = parseFloat(gtSplit[1].replace(/,/g, '') + '.' + gtSplit[2]);
                         }
                         // Extract order date: "Order placed April 25, 2026" or "Order placed 4/25/26"
                         const orderDateMatch = text.match(/order\s+placed\s+((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*[\s.,]+\d{1,2}[\s.,]+\d{2,4})/i)
@@ -2303,7 +2310,7 @@
                                 }
                             } catch {}
                         }
-                        console.log('Amazon order page detected:', { merchant, amount, date, orderNum: amazonOrderNum[1] });
+                        console.log('Amazon order page detected:', { merchant, amount, date, orderNum: amazonOrderNum });
                         const cat = suggestCategory('Amazon');
                         return {
                             merchant, amount, date,
@@ -2430,8 +2437,8 @@
                     // Merchant detection: Whole Foods vs Amazon
                     // Whole Foods receipts often contain "Amazon" (Prime branding),
                     // so we use the Amazon ORDER NUMBER as the definitive Amazon signal.
-                    const amazonOrderRe = /(\d{3}-\d{7}-\d{7})/;
-                    const amazonOrderMatch = text.match(amazonOrderRe);
+                    const amazonOrderReM = text.match(/(\d{3})[-\s]+(\d{7})[-\s]+(\d{7})/);
+                    const amazonOrderMatch = amazonOrderReM ? `${amazonOrderReM[1]}-${amazonOrderReM[2]}-${amazonOrderReM[3]}` : null;
                     const isAmazon = /amazon/i.test(text);
                     // Broad Whole Foods matching — OCR can garble characters
                     const wholefoods = /whole\s*foods/i.test(text) || /wh[o0]le\s*f[o0]{2}ds/i.test(text) || /WFM/i.test(text) || /whole\s*f[o0]+ds?\s*m/i.test(text);
@@ -2440,7 +2447,7 @@
 
                     if (amazonOrderMatch && !wholefoods) {
                         // Amazon order number format (###-#######-#######) is unique to Amazon
-                        merchant = `Amazon - ${amazonOrderMatch[1]}`;
+                        merchant = `Amazon - ${amazonOrderMatch}`;
                     } else if (wholefoods) {
                         // "Whole Foods" in text and no Amazon order number → Whole Foods
                         // (even if "Amazon" appears due to Prime branding on receipt)
@@ -7000,6 +7007,8 @@
             // Helper: reject captures that are clearly phrases, not merchant names
             const isPhrase = (n) => /^(your|the|a|an|this|we|you|i|my|our|here|it)\b/i.test(n)
                 || /^(we're|we've|you've|you're|i'm|here's|it's|thank|thanks|dear|hi|hello)\b/i.test(n)
+                // Generic document/transaction words are never merchant names (e.g. "Receipt for", "Order")
+                || /^(receipts?|orders?|invoices?|payments?|confirmations?|transactions?|purchases?|statements?)\b/i.test(n)
                 || /\b(processing|confirm|complet|ship|deliver|receiv|plac|prepar|cancel|refund|return|verif|updat|schedul|remind)/.test(n.toLowerCase());
 
             // ---- KNOWN SENDER PATTERNS ----
