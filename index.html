@@ -14,7 +14,6 @@
     <meta name="apple-mobile-web-app-title" content="Expenses">
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
-    <script src="https://accounts.google.com/gsi/client" async defer></script>
     <!-- gapi loaded dynamically when Drive picker is needed -->
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -66,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.32.0-jun27';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.32.1-jun28';  // visible in UI so we can confirm which code is live (silent-refresh disabled; manual reconnect restored)
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -1275,10 +1274,8 @@
                         const savedTkn = localStorage.getItem('expense_token');
                         const savedExp = parseInt(localStorage.getItem('expense_token_expiry') || '0');
                         if (!savedTkn || Date.now() >= savedExp - 60000) {
-                            // Token expired — try a silent background refresh first (no popup);
-                            // only if that fails does the Reconnect button appear.
                             setToken(null);
-                            silentRefresh();
+                            setNeedsReconnect(true);
                         }
                     } else if (fbUser) {
                         // Not in allowed list
@@ -1325,8 +1322,9 @@
                 if (!user || !token) return;
                 const checkExpiry = () => {
                     if (tokenExpiryRef.current && Date.now() > tokenExpiryRef.current - 3 * 60 * 1000) {
-                        console.log('Token expiring soon — refreshing silently');
-                        silentRefresh();
+                        console.log('Token expiring soon, showing reconnect banner');
+                        setToken(null);
+                        setNeedsReconnect(true);
                     }
                 };
                 // Check every minute
@@ -1341,8 +1339,9 @@
                     if (document.visibilityState !== 'visible') return;
                     const exp = tokenExpiryRef.current;
                     if (exp && Date.now() > exp - 3 * 60 * 1000) {
-                        console.log('App visible + token expiring — refreshing silently');
-                        silentRefresh();
+                        console.log('App visible + token expired, showing reconnect banner');
+                        setToken(null);
+                        setNeedsReconnect(true);
                     }
                 };
                 document.addEventListener('visibilitychange', handleVisibility);
