@@ -14,6 +14,7 @@
     <meta name="apple-mobile-web-app-title" content="Expenses">
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
     <!-- gapi loaded dynamically when Drive picker is needed -->
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -65,10 +66,12 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.31.7-jun27';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.32.0-jun27';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
+        // Google OAuth Web client ID — for silent background token refresh via Google Identity Services.
+        const GOOGLE_OAUTH_CLIENT_ID = '452837598284-56sf24n460804qbj2rb1k2ob8ssukgag.apps.googleusercontent.com';
         // Apps Script web app URL for manual inbox processing trigger
         // Deploy the script as a web app, then paste the URL here
         const PROCESS_INBOX_URL = 'https://script.google.com/macros/s/AKfycby8wa10OkbNk3h3lNHOjypwyXAdVvn0_Lgbztt2JqqwJsMV2L5nLLC8daX8tB41V3zU/exec';
@@ -1149,6 +1152,7 @@
             });
             const [authLoading, setAuthLoading] = useState(true);
             const [needsReconnect, setNeedsReconnect] = useState(false);
+            const [reconnecting, setReconnecting] = useState(false);
             const tokenExpiryRef = useRef(parseInt(localStorage.getItem('expense_token_expiry') || '0'));
 
             const saveToken = useCallback((tkn, expiry) => {
@@ -1207,6 +1211,50 @@
                 return null;
             }, [saveToken]);
 
+            // ---- Silent background token refresh via Google Identity Services ----
+            const gisTokenClientRef = useRef(null);
+            const getGisClient = useCallback(() => {
+                if (gisTokenClientRef.current) return gisTokenClientRef.current;
+                if (!(window.google && window.google.accounts && window.google.accounts.oauth2)) return null;
+                gisTokenClientRef.current = window.google.accounts.oauth2.initTokenClient({
+                    client_id: GOOGLE_OAUTH_CLIENT_ID,
+                    scope: 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive',
+                    callback: (resp) => {
+                        if (resp && resp.access_token) {
+                            const expiry = Date.now() + ((resp.expires_in ? resp.expires_in : 3300) * 1000);
+                            setToken(resp.access_token);
+                            tokenExpiryRef.current = expiry;
+                            saveToken(resp.access_token, expiry);
+                            setNeedsReconnect(false);
+                            setReconnecting(false);
+                            console.log('Silent token refresh OK');
+                        }
+                    },
+                    error_callback: (err) => {
+                        console.warn('Silent token refresh failed:', err && err.type);
+                        setReconnecting(false);
+                        setNeedsReconnect(true);
+                    },
+                });
+                return gisTokenClientRef.current;
+            }, [saveToken]);
+
+            // Refresh the Google API token silently (no popup). Waits briefly for the GIS library to
+            // load; if silent auth isn't possible, falls back to showing the Reconnect button.
+            const silentRefresh = useCallback(function tryRefresh(attempt) {
+                attempt = attempt || 0;
+                if (attempt === 0) setReconnecting(true);
+                const client = getGisClient();
+                if (!client) {
+                    if (attempt < 20) { setTimeout(() => tryRefresh(attempt + 1), 300); return; }
+                    setReconnecting(false);
+                    setNeedsReconnect(true);
+                    return;
+                }
+                try { client.requestAccessToken({ prompt: 'none' }); }
+                catch (e) { console.warn('silentRefresh threw', e); setReconnecting(false); setNeedsReconnect(true); }
+            }, [getGisClient]);
+
             // Firebase auth state listener — persistent session
             useEffect(() => {
                 // Safety timeout: if auth state never resolves, stop loading after 5s
@@ -1227,9 +1275,10 @@
                         const savedTkn = localStorage.getItem('expense_token');
                         const savedExp = parseInt(localStorage.getItem('expense_token_expiry') || '0');
                         if (!savedTkn || Date.now() >= savedExp - 60000) {
-                            // Token expired — user stays logged in but needs to reconnect for API access
+                            // Token expired — try a silent background refresh first (no popup);
+                            // only if that fails does the Reconnect button appear.
                             setToken(null);
-                            setNeedsReconnect(true);
+                            silentRefresh();
                         }
                     } else if (fbUser) {
                         // Not in allowed list
@@ -1276,9 +1325,8 @@
                 if (!user || !token) return;
                 const checkExpiry = () => {
                     if (tokenExpiryRef.current && Date.now() > tokenExpiryRef.current - 3 * 60 * 1000) {
-                        console.log('Token expiring soon, showing reconnect banner');
-                        setToken(null);
-                        setNeedsReconnect(true);
+                        console.log('Token expiring soon — refreshing silently');
+                        silentRefresh();
                     }
                 };
                 // Check every minute
@@ -1293,9 +1341,8 @@
                     if (document.visibilityState !== 'visible') return;
                     const exp = tokenExpiryRef.current;
                     if (exp && Date.now() > exp - 3 * 60 * 1000) {
-                        console.log('App visible + token expired, showing reconnect banner');
-                        setToken(null);
-                        setNeedsReconnect(true);
+                        console.log('App visible + token expiring — refreshing silently');
+                        silentRefresh();
                     }
                 };
                 document.addEventListener('visibilitychange', handleVisibility);
@@ -1340,7 +1387,7 @@
                 return resp;
             }, [token, buildProvider, handleAuthResult]);
 
-            return { user, token, login, logout, authLoading, needsReconnect, reconnect, authenticatedFetch };
+            return { user, token, login, logout, authLoading, needsReconnect, reconnecting, reconnect, authenticatedFetch };
         };
 
         // ============ GOOGLE SHEETS API ============
@@ -7244,7 +7291,7 @@
 
         // ============ MAIN APP ============
         const App = () => {
-            const { user, token, login, logout, authLoading, needsReconnect, reconnect } = useGoogleAuth();
+            const { user, token, login, logout, authLoading, needsReconnect, reconnecting, reconnect } = useGoogleAuth();
             // Keep a ref to the latest token so async callbacks always use the freshest value
             const tokenRef = useRef(token);
             useEffect(() => { tokenRef.current = token; }, [token]);
@@ -8209,7 +8256,14 @@
                     <div className="flex-1 overflow-y-auto" ref={scrollContainerRef}>
                         <PullIndicator />
                         {/* Disconnected overlay — shown when token expired AND we have no data (or stale data) */}
-                        {user && (!token || needsReconnect) && !loading ? (
+                        {user && reconnecting && (!token || needsReconnect) ? (
+                            <div className="flex items-center justify-center h-full">
+                                <div className="text-center">
+                                    <div className="inline-block animate-spin mb-4"><RefreshCwIcon size={32} className="text-blue-600" /></div>
+                                    <p className="text-gray-600">Reconnecting to Google…</p>
+                                </div>
+                            </div>
+                        ) : user && (!token || needsReconnect) && !loading ? (
                             <div className="flex items-center justify-center h-full">
                                 <div className="text-center px-8 py-12">
                                     <div className="text-5xl mb-4">🔌</div>
