@@ -14,6 +14,7 @@
     <meta name="apple-mobile-web-app-title" content="Expenses">
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
     <!-- gapi loaded dynamically when Drive picker is needed -->
     <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -65,7 +66,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.32.1-jun28';  // visible in UI so we can confirm which code is live (silent-refresh disabled; manual reconnect restored)
+        const APP_VERSION = 'v4.33.0-jun28';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -1153,6 +1154,7 @@
             const [needsReconnect, setNeedsReconnect] = useState(false);
             const [reconnecting, setReconnecting] = useState(false);
             const tokenExpiryRef = useRef(parseInt(localStorage.getItem('expense_token_expiry') || '0'));
+            const silentAttemptedRef = useRef(false); // ensures the silent refresh is tried at most once per load
 
             const saveToken = useCallback((tkn, expiry) => {
                 try {
@@ -1275,7 +1277,15 @@
                         const savedExp = parseInt(localStorage.getItem('expense_token_expiry') || '0');
                         if (!savedTkn || Date.now() >= savedExp - 60000) {
                             setToken(null);
-                            setNeedsReconnect(true);
+                            // On first load, try ONE silent background refresh (hidden iframe, no popup).
+                            // If it can't, fall back to the manual Reconnect button. We do this ONCE and
+                            // never on tab-focus or timers, so it can't collide with the sign-in popup.
+                            if (!silentAttemptedRef.current) {
+                                silentAttemptedRef.current = true;
+                                silentRefresh();
+                            } else {
+                                setNeedsReconnect(true);
+                            }
                         }
                     } else if (fbUser) {
                         // Not in allowed list
