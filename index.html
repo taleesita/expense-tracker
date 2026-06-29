@@ -66,7 +66,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.33.0-jun28';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.34.1-jun28';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -1155,6 +1155,8 @@
             const [reconnecting, setReconnecting] = useState(false);
             const tokenExpiryRef = useRef(parseInt(localStorage.getItem('expense_token_expiry') || '0'));
             const silentAttemptedRef = useRef(false); // ensures the silent refresh is tried at most once per load
+            const gisModeRef = useRef('load');        // 'load' | 'interactive' | 'background' — controls GIS error handling
+            const proactiveDoneRef = useRef(false);   // ensures one background pre-expiry refresh per expiry window
 
             const saveToken = useCallback((tkn, expiry) => {
                 try {
@@ -1204,6 +1206,7 @@
                     tokenExpiryRef.current = expiry;
                     saveToken(accessToken, expiry);
                     setNeedsReconnect(false);
+                    proactiveDoneRef.current = false; // new token → allow background refresh next expiry window
                     console.log('Google access token obtained, length:', accessToken.length);
                     return accessToken;
                 }
@@ -1211,6 +1214,12 @@
                 setNeedsReconnect(true);
                 return null;
             }, [saveToken]);
+
+            // Firebase popup reconnect (reliable fallback). signInWithPopup signs in AND returns the token.
+            const firebaseReconnect = useCallback(async () => {
+                try { const result = await expenseAuth.signInWithPopup(buildProvider()); handleAuthResult(result); }
+                catch (err) { console.error('Firebase reconnect failed:', err.code, err.message); }
+            }, [buildProvider, handleAuthResult]);
 
             // ---- Silent background token refresh via Google Identity Services ----
             const gisTokenClientRef = useRef(null);
@@ -1228,23 +1237,35 @@
                             saveToken(resp.access_token, expiry);
                             setNeedsReconnect(false);
                             setReconnecting(false);
-                            console.log('Silent token refresh OK');
+                            proactiveDoneRef.current = false; // allow a fresh background refresh next window
+                            gisModeRef.current = 'load';
+                            console.log('GIS token obtained');
                         }
                     },
                     error_callback: (err) => {
-                        console.warn('Silent token refresh failed:', err && err.type);
+                        console.warn('GIS token request failed:', err && err.type);
                         setReconnecting(false);
-                        setNeedsReconnect(true);
+                        const mode = gisModeRef.current;
+                        gisModeRef.current = 'load';
+                        if (mode === 'interactive') {
+                            // User tapped Reconnect but GIS couldn't finish — use the reliable Firebase popup.
+                            firebaseReconnect();
+                        } else if (mode === 'background') {
+                            // Proactive pre-expiry refresh failed — token is still valid; do nothing (no UI).
+                        } else {
+                            // Silent-on-load failed — show the manual Reconnect button.
+                            setNeedsReconnect(true);
+                        }
                     },
                 });
                 return gisTokenClientRef.current;
-            }, [saveToken]);
+            }, [saveToken, firebaseReconnect]);
 
             // Refresh the Google API token silently (no popup). Waits briefly for the GIS library to
             // load; if silent auth isn't possible, falls back to showing the Reconnect button.
             const silentRefresh = useCallback(function tryRefresh(attempt) {
                 attempt = attempt || 0;
-                if (attempt === 0) setReconnecting(true);
+                if (attempt === 0) { gisModeRef.current = 'load'; setReconnecting(true); }
                 const client = getGisClient();
                 if (!client) {
                     if (attempt < 20) { setTimeout(() => tryRefresh(attempt + 1), 300); return; }
@@ -1254,6 +1275,14 @@
                 }
                 try { client.requestAccessToken({ prompt: 'none' }); }
                 catch (e) { console.warn('silentRefresh threw', e); setReconnecting(false); setNeedsReconnect(true); }
+            }, [getGisClient]);
+
+            // Invisible pre-expiry / on-return refresh — no spinner, no error UI (token is still valid).
+            const backgroundRefresh = useCallback(() => {
+                const client = getGisClient();
+                if (!client) return;
+                gisModeRef.current = 'background';
+                try { client.requestAccessToken({ prompt: 'none' }); } catch (e) {}
             }, [getGisClient]);
 
             // Firebase auth state listener — persistent session
@@ -1314,16 +1343,22 @@
             // Reconnect — get a fresh Google API token (user is already signed in via Firebase)
             // Uses popup (same pattern as kitchen app — works in standalone PWA mode)
             const reconnect = useCallback(async () => {
-                if (!expenseAuth.currentUser) { login(); return; }
-                try {
-                    const result = await expenseAuth.signInWithPopup(buildProvider());
-                    handleAuthResult(result);
-                } catch (err) {
-                    console.error('Reconnect failed:', err.code, err.message);
-                    // Don't use alert() — it's blocked in PWA standalone mode. Let caller handle via catch.
-                    throw err;
+                if (!expenseAuth.currentUser) { await firebaseReconnect(); return; }
+                // Prefer GIS (user-gesture popup): gets a token AND establishes the grant so future opens
+                // can refresh silently. Falls back to the Firebase popup if GIS can't run.
+                const client = getGisClient();
+                if (client) {
+                    gisModeRef.current = 'interactive';
+                    setReconnecting(true);
+                    try { client.requestAccessToken({ prompt: '' }); return; }
+                    catch (e) {
+                        console.warn('GIS interactive threw, falling back to Firebase:', e);
+                        gisModeRef.current = 'load';
+                        setReconnecting(false);
+                    }
                 }
-            }, [buildProvider, handleAuthResult, login]);
+                await firebaseReconnect();
+            }, [getGisClient, firebaseReconnect]);
 
             // Token expiry check — show reconnect banner when token is expired/expiring
             // NOTE: We do NOT auto-open popups here because browsers block popups from timers.
@@ -1331,10 +1366,13 @@
             useEffect(() => {
                 if (!user || !token) return;
                 const checkExpiry = () => {
+                    if (gisModeRef.current === 'interactive') return;
                     if (tokenExpiryRef.current && Date.now() > tokenExpiryRef.current - 3 * 60 * 1000) {
-                        console.log('Token expiring soon, showing reconnect banner');
-                        setToken(null);
-                        setNeedsReconnect(true);
+                        if (!proactiveDoneRef.current) {
+                            proactiveDoneRef.current = true;
+                            console.log('Token expiring soon — refreshing in background');
+                            backgroundRefresh();
+                        }
                     }
                 };
                 // Check every minute
@@ -1348,10 +1386,9 @@
                 const handleVisibility = () => {
                     if (document.visibilityState !== 'visible') return;
                     const exp = tokenExpiryRef.current;
-                    if (exp && Date.now() > exp - 3 * 60 * 1000) {
-                        console.log('App visible + token expired, showing reconnect banner');
-                        setToken(null);
-                        setNeedsReconnect(true);
+                    if (exp && Date.now() > exp - 3 * 60 * 1000 && gisModeRef.current !== 'interactive') {
+                        console.log('App visible + token expiring — refreshing in background');
+                        backgroundRefresh();
                     }
                 };
                 document.addEventListener('visibilitychange', handleVisibility);
