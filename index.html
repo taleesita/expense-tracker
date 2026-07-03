@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.35.0-jun28';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.36.0-jul02';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -7306,7 +7306,7 @@
                     }
                 });
             };
-            const pendingSaveRef = useRef(null);
+            const pendingSaveRef = useRef([]); // queue of saves waiting for a fresh token
             const inboxReviewingRef = useRef(null); // tracks inbox item being reviewed via AddExpenseModal
             const [inboxModeActive, setInboxModeActive] = useState(false);
             const inboxIndexRef = useRef(0);
@@ -7795,9 +7795,10 @@
             const handleAddExpense = async (expenseData) => {
                 // If token expired, auto-trigger reconnect and queue the save for retry
                 if (!token || needsReconnect) {
-                    pendingSaveRef.current = expenseData;
+                    pendingSaveRef.current.push(expenseData);
                     setIsSaving(true);
-                    setToast('Reconnecting to Google...');
+                    const qN = pendingSaveRef.current.length;
+                    setToast(qN > 1 ? `Reconnecting — ${qN} saves queued...` : 'Reconnecting to Google...');
                     reconnect().catch(err => {
                         console.error('Reconnect failed during save:', err);
                         setToast('Reconnect failed — tap Reconnect and try again.');
@@ -7850,8 +7851,8 @@
                 setTimeout(() => setToast(prev => prev === savingLabel ? '' : prev), 3000);
 
                 // If saved from a reminder quick-add, dismiss that reminder immediately
-                if (editExpense?._reminderId && onDismissReminder) {
-                    onDismissReminder(editExpense._reminderId);
+                if (editExpense?._reminderId) {
+                    dismissReminder(editExpense._reminderId);
                 }
 
                 if (expenseData._dual) {
@@ -7891,11 +7892,11 @@
 
             // Auto-retry pending save after reconnect provides a fresh token
             useEffect(() => {
-                if (token && pendingSaveRef.current) {
-                    const data = pendingSaveRef.current;
-                    pendingSaveRef.current = null;
-                    setToast('Reconnected! Saving...');
-                    handleAddExpense(data);
+                if (token && pendingSaveRef.current.length) {
+                    const queued = pendingSaveRef.current;
+                    pendingSaveRef.current = [];
+                    setToast(queued.length > 1 ? `Reconnected! Saving ${queued.length} queued...` : 'Reconnected! Saving...');
+                    queued.forEach(data => handleAddExpense(data));
                 }
             }, [token]);
 
