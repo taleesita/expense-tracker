@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.36.0-jul02';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.37.0-jul08';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -7109,7 +7109,7 @@
             // Build prefill data for an item using OCR + subject hints
             const getPrefill = (item) => {
                 const ocr = ocrResults[item.fileId] || ocrCacheRef.current[item.fileId];
-                const subjectMerchant = merchantFromSubject(item.subject);
+                const subjectMerchant = (m => isGibberishMerchant(m) ? '' : m)(merchantFromSubject(item.subject));
                 let finalMerchant = '';
                 let finalAmount = '';
                 let finalDate = item.emailDate || todayLocalStr();
@@ -7507,7 +7507,7 @@
             // Build prefill for an inbox item from OCR cache + subject merchant
             const buildInboxPrefill = (item) => {
                 const ocr = ocrCacheRef.current[item.fileId];
-                const subjectMerchant = merchantFromSubject(item.subject);
+                const subjectMerchant = (m => isGibberishMerchant(m) ? '' : m)(merchantFromSubject(item.subject));
                 let merchant = '', amount = '', date = item.emailDate || todayLocalStr();
                 let category = '', txnType = 'charge', account = '';
                 let originalCurrency = null, originalAmount = null;
