@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.37.0-jul08';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.38.0-jul12';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -2433,6 +2433,11 @@
                             // Skip survey/feedback prompts and common receipt boilerplate
                             if (/^(tell\s+us|how\s+(did\s+we|was\s+your|were\s+we)|rate\s+(your|us|this)|leave\s+(a\s+)?review|write\s+a\s+review|share\s+your|let\s+us\s+know|we\s+appreciate|thank\s+you\s+for|thanks\s+for\s+(your|shopping|visiting|dining)|have\s+a\s+(nice|great|good)|see\s+you\s+(next|again|soon)|come\s+again|visit\s+us|follow\s+us|scan\s+(to|this)|important|trouble\s+viewing|below\s+is\s+a\s+receipt|please\s+(retain|keep|save)|customer\s+copy|store\s+copy|merchant\s+copy)/i.test(cleaned)) continue;
                             const candidate = cleanMerchantName(cleaned);
+                            // Skip OCR noise/boilerplate and KEEP SCANNING. Previously the first line
+                            // passing the weak checks was taken and the loop broke — so a garbled top
+                            // edge (e.g. "aA Ne") won, then got rejected downstream, blanking the
+                            // merchant even though a good name sat one line below.
+                            if (isGibberishMerchant(candidate)) continue;
                             if (candidate.length >= 2 && candidate.length <= 40) {
                                 merchant = candidate;
                                 break;
