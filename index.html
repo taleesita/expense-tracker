@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.38.0-jul12';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.39.0-jul16';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -1595,6 +1595,33 @@
                         // Proceed anyway — write is still safe at gridRowCount boundary
                     }
 
+                    // Step 1d: If the target row is beyond the sheet's current grid, GROW the grid first.
+                    // values.update (PUT) does NOT auto-extend rows (unlike typing in the UI) — writing past
+                    // gridRowCount returns HTTP 400 "exceeds grid limits". This bites once the sheet fills up.
+                    if (gridRowCount && newRowNum > gridRowCount) {
+                        const rowsToAdd = (newRowNum - gridRowCount) + 200; // buffer so we don't extend every save
+                        const extendSheetId = targetTab?.properties?.sheetId ?? 0;
+                        console.log('[appendExpense] Step 1d: target row', newRowNum, '> grid', gridRowCount, '— adding', rowsToAdd, 'rows');
+                        try {
+                            const extResp = await fetchWithTimeout(
+                                `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}:batchUpdate`,
+                                {
+                                    method: 'POST',
+                                    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ requests: [{ appendDimension: { sheetId: extendSheetId, dimension: 'ROWS', length: rowsToAdd } }] })
+                                }
+                            );
+                            if (!extResp.ok) {
+                                const extErr = await extResp.text().catch(() => '');
+                                console.error('[appendExpense] Grid extend failed:', extResp.status, extErr);
+                            } else {
+                                console.log('[appendExpense] Grid extended OK');
+                            }
+                        } catch (extE) {
+                            console.warn('[appendExpense] Grid extend error:', extE.message);
+                        }
+                    }
+
                     // Step 2: Write directly to that specific row (A{n}:I{n}) — avoids table auto-detection
                     console.log('[appendExpense] Step 2: writing to row', newRowNum, '...');
                     const resp = await fetchWithTimeout(
@@ -1608,7 +1635,9 @@
                     if (!resp.ok) {
                         const errBody = await resp.text();
                         console.error('[appendExpense] Sheet write FAILED:', resp.status, errBody);
-                        throw new Error(resp.status === 401 ? 'Google connection expired — tap Reconnect, then try again.' : `Save failed (write ${resp.status}). Please try again.`);
+                        let detail = '';
+                        try { detail = JSON.parse(errBody)?.error?.message || ''; } catch {}
+                        throw new Error(resp.status === 401 ? 'Google connection expired — tap Reconnect, then try again.' : `Save failed (write ${resp.status}${detail ? ': ' + detail.slice(0, 140) : ''}). Please try again.`);
                     }
                     console.log('[appendExpense] Sheet write SUCCESS: row', newRowNum);
 
