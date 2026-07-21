@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.39.0-jul16';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.40.0-jul18';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -1945,7 +1945,7 @@
             const inFlightRowsRef = useRef(new Set()); // rowIndexes being saved in background — exclude from re-fetch
 
             const fetchInbox = useCallback(async () => {
-                if (!token) return;
+                if (!token) return [];
                 setInboxLoading(true);
                 try {
                     const resp = await fetch(
@@ -1956,7 +1956,7 @@
                         const errText = await resp.text().catch(() => '');
                         console.error('Inbox tab fetch failed:', resp.status, errText);
                         setInboxItems([]);
-                        return;
+                        return [];
                     }
                     const data = await resp.json();
                     const rows = data.values || [];
@@ -1981,9 +1981,11 @@
                         });
                     }
                     setInboxItems(items);
+                    return items;
                 } catch (err) {
                     console.error('Failed to fetch inbox:', err);
                     setInboxItems([]);
+                    return [];
                 } finally {
                     setInboxLoading(false);
                 }
@@ -7501,26 +7503,31 @@
             };
 
             const handleProcessInbox = async () => {
+                const before = inboxItems.length;
                 if (PROCESS_INBOX_URL) {
                     try {
                         setToast('Processing inbox emails...');
                         // Apps Script web apps don't return CORS headers, so the browser can't read the
-                        // response (and an Authorization header forces a preflight it can't answer).
-                        // The web app runs as the deployer (you), so just fire a no-cors GET to trigger
-                        // processInbox server-side, wait a moment, then re-read the inbox from the sheet.
+                        // response — we can only fire a no-cors GET to trigger processInbox server-side.
                         await fetch(PROCESS_INBOX_URL, { method: 'GET', mode: 'no-cors' });
-                        await new Promise(r => setTimeout(r, 3500));
-                        setToast('Inbox processed — refreshing...');
                     } catch (err) {
                         console.error('processInbox trigger failed:', err);
-                        setToast('Pulling latest from sheet…');
                     }
-                } else {
-                    setToast('Refreshing inbox...');
                 }
-                // Always refresh inbox items from the sheet
-                await fetchInbox();
-                setTimeout(() => setToast(''), 3000);
+                // Email -> PDF -> Drive -> Sheet takes 5-15s for several emails, and the no-cors response
+                // is opaque, so a single quick refresh runs too early and looks like nothing happened.
+                // Poll the sheet for up to ~30s and stop as soon as new receipts show up.
+                setToast('Checking for new receipts…');
+                let latest = before;
+                for (let i = 0; i < 10; i++) {
+                    await new Promise(r => setTimeout(r, 3000));
+                    const items = await fetchInbox();
+                    latest = Array.isArray(items) ? items.length : latest;
+                    if (latest > before) break;
+                }
+                const added = latest - before;
+                setToast(added > 0 ? `${added} new receipt${added === 1 ? '' : 's'} added` : 'No new receipts found');
+                setTimeout(() => setToast(''), 3500);
             };
 
             const handleEditExpense = (expense) => {
