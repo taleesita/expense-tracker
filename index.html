@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.40.0-jul18';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.42.0-jul22';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -2312,7 +2312,9 @@
                     const lines = text.split('\n').filter(l => l.trim());
                     let merchant = '';
                     let amount = 0;
-                    let date = todayLocalStr();
+                    // Default to null (not today) so callers can tell "no date found". Inbox review then
+                    // falls back to the forwarded-email date; manual scan/upload falls back to today.
+                    let date = null;
 
                     // ---- AMAZON ORDER PAGE DETECTION (early exit) ----
                     // Amazon "Order Details" pages have very consistent structure.
@@ -3447,7 +3449,7 @@
                         setMerchant(finalMerchant);
                     }
                     setAmount(result.amount.toString());
-                    setDate(result.date);
+                    setDate(result.date || todayLocalStr());
                     const scanMerchForCat = isGibberishMerchant(finalMerchant) ? '' : finalMerchant;
                     const scanCat = result.category || suggestCategory(scanMerchForCat);
                     setCategory(scanCat === 'other' ? '' : scanCat);
@@ -7505,14 +7507,16 @@
             const handleProcessInbox = async () => {
                 const before = inboxItems.length;
                 if (PROCESS_INBOX_URL) {
-                    try {
-                        setToast('Processing inbox emails...');
-                        // Apps Script web apps don't return CORS headers, so the browser can't read the
-                        // response — we can only fire a no-cors GET to trigger processInbox server-side.
-                        await fetch(PROCESS_INBOX_URL, { method: 'GET', mode: 'no-cors' });
-                    } catch (err) {
-                        console.error('processInbox trigger failed:', err);
-                    }
+                    setToast('Processing inbox emails...');
+                    // Fire the trigger but NEVER block on it. The web app runs processInbox synchronously
+                    // and can take minutes — or hang on image-heavy emails — and no-cors means we can't read
+                    // the response anyway. Abort after 8s so the button can't get stuck "Processing" forever;
+                    // results are detected by polling the sheet below.
+                    const _ctrl = new AbortController();
+                    const _to = setTimeout(() => _ctrl.abort(), 8000);
+                    fetch(PROCESS_INBOX_URL, { method: 'GET', mode: 'no-cors', signal: _ctrl.signal })
+                        .catch(err => console.warn('processInbox trigger (non-blocking):', err && err.message))
+                        .finally(() => clearTimeout(_to));
                 }
                 // Email -> PDF -> Drive -> Sheet takes 5-15s for several emails, and the no-cors response
                 // is opaque, so a single quick refresh runs too early and looks like nothing happened.
