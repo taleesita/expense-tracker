@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.42.0-jul22';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.43.0-jul24';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -1387,7 +1387,7 @@
                 if (!silent) setLoading(true);
                 try {
                     const resp = await fetch(
-                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A:J`,
+                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A:K`,
                         { headers: { 'Authorization': `Bearer ${token}` } }
                     );
                     if (!resp.ok) {
@@ -1470,6 +1470,7 @@
                                 return '';
                             })(),
                             reconciledLocked: (row[9] || '').toUpperCase() === 'L',
+                            reconciledAt: row[10] || '',                // K: Reconciliation Status - Time
                             notes: '',
                             person: '',
                             _balanceOnly: !hasTimestamp,  // rows without timestamp: include in balance calc but hide from UI
@@ -1791,17 +1792,17 @@
                 }
             }, [token, fetchExpenses]);
 
-            // Fast single-cell write for reconciliation status (column J only)
+            // Fast write for reconciliation status (col J) + timestamp (col K) in one call
             const writeReconcileCell = useCallback(async (rowIndex, status) => {
-                // status: 'R', 'P', 'L', or '' (empty)
+                // status: 'R', 'P', 'M', 'L', or '' (empty). K records WHEN the status was last changed.
                 if (!token) return;
                 try {
                     const resp = await fetch(
-                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!J${rowIndex}?valueInputOption=USER_ENTERED`,
+                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!J${rowIndex}:K${rowIndex}?valueInputOption=USER_ENTERED`,
                         {
                             method: 'PUT',
                             headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ values: [[status]] })
+                            body: JSON.stringify({ values: [[status, getCurrentTimestamp()]] })
                         }
                     );
                     if (!resp.ok) {
@@ -1819,9 +1820,10 @@
                 // updates: array of { rowIndex, status } — status is 'R', 'P', 'L', or ''
                 if (!token || updates.length === 0) return;
                 try {
+                    const _ts = getCurrentTimestamp();
                     const data = updates.map(({ rowIndex, status }) => ({
-                        range: `${SHEET_TAB}!J${rowIndex}`,
-                        values: [[status]]
+                        range: `${SHEET_TAB}!J${rowIndex}:K${rowIndex}`,
+                        values: [[status, _ts]]
                     }));
                     const resp = await fetch(
                         `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values:batchUpdate`,
@@ -3132,6 +3134,17 @@
                                 })()}</span>
                             </div>
                         )}
+                        {sortMode === 'reconciled' && (
+                            <div className="text-[10px] text-gray-400 mt-0.5 flex gap-3">
+                                <span>Reconciled: {expense.reconciledAt ? (() => {
+                                    try {
+                                        const d = new Date(expense.reconciledAt);
+                                        return d.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' }) + ' ' +
+                                               d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+                                    } catch { return expense.reconciledAt; }
+                                })() : '—'}</span>
+                            </div>
+                        )}
                     </div>
                     <div className="text-right flex-shrink-0">
                         <span className={`font-semibold text-sm ${expense.reconcileStatus === 'missing' ? 'text-gray-300 line-through' : isPaymentOrTransfer ? 'text-gray-500' : isInflow ? 'text-green-600' : 'text-red-600'}`}>
@@ -3209,6 +3222,13 @@
                     return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
                 } catch { /* fallthrough */ }
             }
+            if (sortMode === 'reconciled') {
+                if (!expense.reconciledAt) return 'not-reconciled';
+                try {
+                    const d = new Date(expense.reconciledAt);
+                    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+                } catch { return 'not-reconciled'; }
+            }
             return parseDateToISO(expense.date || expense.timestamp);
         };
         // Format a date key into a human-readable label for date separators
@@ -3218,6 +3238,13 @@
                     const d = new Date(expense.timestamp);
                     return 'Added ' + d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
                 } catch { /* fallthrough */ }
+            }
+            if (sortMode === 'reconciled') {
+                if (!expense.reconciledAt) return 'Not yet reconciled';
+                try {
+                    const d = new Date(expense.reconciledAt);
+                    return 'Reconciled ' + d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+                } catch { return 'Reconciled'; }
             }
             return expense.date || expense.timestamp;
         };
@@ -5019,6 +5046,12 @@
                 }
                 return matchesFilter(e);
             }).sort((a, b) => {
+                if (sortMode === 'reconciled') {
+                    const ra = a.reconciledAt ? new Date(a.reconciledAt).getTime() : 0;
+                    const rb = b.reconciledAt ? new Date(b.reconciledAt).getTime() : 0;
+                    if (rb !== ra) return rb - ra; // most recently reconciled first; unreconciled sink to bottom
+                    return (b.timestamp || '').localeCompare(a.timestamp || '');
+                }
                 if (sortMode === 'added') {
                     const ta = new Date(a.timestamp || 0).getTime();
                     const tb = new Date(b.timestamp || 0).getTime();
@@ -5185,7 +5218,7 @@
                                 onClick={() => setShowSortPopover(!showSortPopover)}
                                 className="px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-600 border border-gray-200 hover:bg-gray-200 transition-colors whitespace-nowrap"
                             >
-                                Sort: {sortMode === 'purchase' ? 'Purchase date' : 'Date added'}
+                                Sort: {sortMode === 'purchase' ? 'Purchase date' : sortMode === 'added' ? 'Date added' : 'Reconciled time'}
                             </button>
                             {showSortPopover && (
                                 <>
@@ -5202,6 +5235,12 @@
                                             className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-50 ${sortMode === 'added' ? 'text-blue-600 font-medium' : 'text-gray-700'}`}
                                         >
                                             Date added
+                                        </button>
+                                        <button
+                                            onClick={() => { setSortMode('reconciled'); setShowSortPopover(false); }}
+                                            className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-50 ${sortMode === 'reconciled' ? 'text-blue-600 font-medium' : 'text-gray-700'}`}
+                                        >
+                                            Reconciled time
                                         </button>
                                     </div>
                                 </>
@@ -6832,6 +6871,12 @@
                 }
                 return matchesFilter(e);
             }).sort((a, b) => {
+                if (sortMode === 'reconciled') {
+                    const ra = a.reconciledAt ? new Date(a.reconciledAt).getTime() : 0;
+                    const rb = b.reconciledAt ? new Date(b.reconciledAt).getTime() : 0;
+                    if (rb !== ra) return rb - ra; // most recently reconciled first; unreconciled sink to bottom
+                    return (b.timestamp || '').localeCompare(a.timestamp || '');
+                }
                 if (sortMode === 'added') {
                     const ta = new Date(a.timestamp || 0).getTime();
                     const tb = new Date(b.timestamp || 0).getTime();
@@ -6901,7 +6946,7 @@
                                 onClick={() => setShowSortPopover(!showSortPopover)}
                                 className="px-2.5 py-1 rounded-full text-xs font-medium bg-gray-100 text-gray-600 border border-gray-200 hover:bg-gray-200 transition-colors whitespace-nowrap"
                             >
-                                Sort: {sortMode === 'purchase' ? 'Purchase date' : 'Date added'}
+                                Sort: {sortMode === 'purchase' ? 'Purchase date' : sortMode === 'added' ? 'Date added' : 'Reconciled time'}
                             </button>
                             {showSortPopover && (
                                 <>
@@ -6918,6 +6963,12 @@
                                             className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-50 ${sortMode === 'added' ? 'text-blue-600 font-medium' : 'text-gray-700'}`}
                                         >
                                             Date added
+                                        </button>
+                                        <button
+                                            onClick={() => { setSortMode('reconciled'); setShowSortPopover(false); }}
+                                            className={`w-full text-left px-3 py-2 text-sm hover:bg-gray-50 ${sortMode === 'reconciled' ? 'text-blue-600 font-medium' : 'text-gray-700'}`}
+                                        >
+                                            Reconciled time
                                         </button>
                                     </div>
                                 </>
@@ -8038,14 +8089,16 @@
                 else if (current === 'pending') { nextStatus = 'missing'; nextCell = 'M'; }
                 else { nextStatus = ''; nextCell = ''; } // missing → empty
 
-                // Optimistic update — instant UI
+                const prevReconciledAt = expense.reconciledAt || '';
+                // Optimistic update — instant UI (also stamp the time so "sort by reconciled time" is live)
                 setExpenses(prev => prev.map(e => e.rowIndex === rowIndex ? {
                     ...e,
                     reconciled: nextStatus === 'reconciled',
                     reconcileStatus: nextStatus,
+                    reconciledAt: getCurrentTimestamp(),
                 } : e));
 
-                // Background write to sheet (column J only — very fast)
+                // Background write to sheet (columns J + K — very fast)
                 writeReconcileCell(rowIndex, nextCell).catch(err => {
                     // Revert on failure
                     console.error('Reconcile write failed, reverting:', err);
@@ -8053,6 +8106,7 @@
                         ...e,
                         reconciled: current === 'reconciled',
                         reconcileStatus: current,
+                        reconciledAt: prevReconciledAt,
                     } : e));
                     setToast('Reconcile failed — ' + (err.message || 'try again'));
                     setTimeout(() => setToast(''), 4000);
