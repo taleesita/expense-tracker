@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.43.0-jul24';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.45.0-sep22';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -2444,9 +2444,23 @@
                     };
 
                     // Try multiple strategies to find merchant name
+                    // Strategy 0a (high priority): the emailed-receipt phrasing "receipt for your recent
+                    // visit to <Name>" / "your visit to <Name>" / "receipt for|from <Name>". These emails
+                    // (Toast, Square, etc.) put the restaurant name here plainly, while the POS/app branding
+                    // ("Download the Toast...") otherwise gets mistaken for the merchant.
+                    if (!merchant || merchant.length < 2) {
+                        const visitMatch = text.match(/(?:receipt\s+for\s+your\s+(?:recent\s+)?visit\s+to|your\s+(?:recent\s+)?visit\s+to|receipt\s+(?:for|from))\s+([A-Z][A-Za-z0-9\s&'.\-]{1,38}?)(?=\s+(?:is|was|has|have|will|for|on|at|and|receipt|order|today)\b|\s*[.,!\n]|$)/i);
+                        if (visitMatch) {
+                            const vm = cleanMerchantName(visitMatch[1]);
+                            if (vm.length >= 2 && !isGibberishMerchant(vm)) {
+                                merchant = vm;
+                                console.log('Merchant from receipt phrasing ("visit to / receipt from"):', merchant);
+                            }
+                        }
+                    }
                     // Strategy 0: Labeled merchant fields (e.g., "Restaurant: Kyuramen", "Store: Target")
                     const labeledMatch = text.match(/(?:restaurant|store|merchant|vendor|shop|establishment|location|business)\s*:\s*([A-Za-z][A-Za-z0-9\s&'.,-]{1,40})(?:\s*[\(\n#]|$)/i);
-                    if (labeledMatch) {
+                    if ((!merchant || merchant.length < 2) && labeledMatch) {
                         merchant = cleanMerchantName(labeledMatch[1]);
                     }
                     // Strategy 1: Look for "from <name>" pattern anywhere in text
@@ -2624,7 +2638,30 @@
                             return { mo: String(months[m[1].toLowerCase().slice(0,3)]), d: m[2], y: m[3] };
                         }},
                     ];
-                    for (const { re, parse } of datePatterns) {
+                    // Scheduled card-payment confirmations (Chase, etc.): use the explicit "Payment date"
+                    // rather than the first date in the body — which is usually "Your last payment was $X on
+                    // <old date>". Scheduled payments are legitimately FUTURE-dated, so accept a future date here.
+                    if (!date) {
+                        const _monRe = '(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\\w*[\\s.,]+\\d{1,2}[\\s.,]+\\d{2,4}';
+                        const _numRe = '\\d{1,2}[\\/\\-]\\d{1,2}[\\/\\-]\\d{2,4}';
+                        const payDateMatch = text.match(new RegExp('Payment\\s+date\\b[^A-Za-z0-9]*(?:\\(?Due date:[^)\\n]*\\)?[^A-Za-z0-9]*)?(' + _monRe + '|' + _numRe + ')', 'i'));
+                        if (payDateMatch) {
+                            for (const { re, parse } of datePatterns) {
+                                const dm = payDateMatch[1].match(re);
+                                if (dm) {
+                                    const { mo, d, y } = parse(dm);
+                                    const fy = y.length <= 2 ? parseInt('20' + y) : parseInt(y);
+                                    const pm = parseInt(mo), pd = parseInt(d);
+                                    if (fy >= 2020 && fy <= 2035 && pm >= 1 && pm <= 12 && pd >= 1 && pd <= 31) {
+                                        date = `${fy}-${String(pm).padStart(2, '0')}-${String(pd).padStart(2, '0')}`;
+                                        console.log('OCR date from "Payment date" label (scheduled payment, future allowed):', date);
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if (!date) for (const { re, parse } of datePatterns) {
                         const dm = text.match(re);
                         if (dm) {
                             let { mo, d, y } = parse(dm);
