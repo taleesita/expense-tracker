@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.48.0-sep22';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.49.0-sep23';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -1459,18 +1459,20 @@
                             _splitGroup: splitGroup,
                             _splitIndex: splitIndex,
                             _splitTotal: splitTotal,
-                            // Reconciliation stored in column J (row[9]): R=reconciled, P=pending, M=missing, L=locked
-                            reconciled: (row[9] || '').toUpperCase() === 'R' || (row[9] || '').toUpperCase() === 'L',
+                            // Reconciliation stored in column J (row[9]): R=reconciled, P=pending, M=missing, L=locked.
+                            // TRIM — legacy/manual cells can carry surrounding spaces (" R "), which without a
+                            // trim read as blank, so the sheet showed reconciled but the app showed unreconciled.
+                            reconciled: (row[9] || '').trim().toUpperCase() === 'R' || (row[9] || '').trim().toUpperCase() === 'L',
                             reconcileStatus: (() => {
-                                const v = (row[9] || '').toUpperCase();
+                                const v = (row[9] || '').trim().toUpperCase();
                                 if (v === 'R') return 'reconciled';
                                 if (v === 'P') return 'pending';
                                 if (v === 'M') return 'missing';
                                 if (v === 'L') return 'reconciled'; // locked items show as reconciled
                                 return '';
                             })(),
-                            reconciledLocked: (row[9] || '').toUpperCase() === 'L',
-                            reconciledAt: row[10] || '',                // K: Reconciliation Status - Time
+                            reconciledLocked: (row[9] || '').trim().toUpperCase() === 'L',
+                            reconciledAt: (row[10] || '').trim(),       // K: Reconciliation Status - Time
                             notes: '',
                             person: '',
                             _balanceOnly: !hasTimestamp,  // rows without timestamp: include in balance calc but hide from UI
