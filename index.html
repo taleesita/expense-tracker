@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.46.0-sep22';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.47.0-sep22';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -5269,25 +5269,22 @@
 
                     <div className="bg-white p-4 rounded-lg border border-gray-200">
                         <div className="text-sm font-semibold text-gray-700 mb-2">Reconcile vs. {isCreditCard ? 'card' : 'bank'}</div>
-                        <div className="flex items-center gap-2 mb-1">
-                            <span className="text-gray-400 text-sm">Amount the {isCreditCard ? 'card' : 'bank'} shows</span>
-                            <div className="flex items-center gap-1 ml-auto">
-                                <span className="text-gray-500">$</span>
-                                <input
-                                    type="number" inputMode="decimal" step="0.01" placeholder="0.00"
-                                    value={cardShownAmt}
-                                    onChange={(e) => setCardShown(e.target.value)}
-                                    className="w-28 text-right border border-gray-200 rounded px-2 py-1 outline-none"
-                                />
-                                {cardShownAmt !== '' && (
-                                    <button onClick={() => setCardShown('')} className="text-gray-300 hover:text-gray-500 ml-1 text-lg leading-none">×</button>
-                                )}
-                            </div>
+                        <label className="block text-gray-400 text-sm mb-1">Amount the {isCreditCard ? 'card' : 'bank'} shows</label>
+                        <div className="flex items-center gap-1 border border-gray-200 rounded px-3 py-2 focus-within:border-blue-400">
+                            <span className="text-gray-500">$</span>
+                            <input
+                                type="number" inputMode="decimal" step="0.01" placeholder="0.00"
+                                value={cardShownAmt}
+                                onChange={(e) => setCardShown(e.target.value)}
+                                className="flex-1 outline-none text-base bg-transparent"
+                            />
+                            {cardShownAmt !== '' && (
+                                <button onClick={() => setCardShown('')} className="text-gray-300 hover:text-gray-500 text-lg leading-none px-1">×</button>
+                            )}
                         </div>
                         {hasCardNum && (
                             <div className="space-y-1.5 text-sm mt-3">
                                 <div className="flex justify-between"><span className="text-gray-500">App (excl. pending &amp; missing)</span><span className="font-medium">${fmt(appComparable)}</span></div>
-                                <div className="flex justify-between"><span className="text-gray-500">{isCreditCard ? 'Card' : 'Bank'} shows</span><span className="font-medium">${fmt(cardNum)}</span></div>
                                 <div className={`flex justify-between font-semibold ${reconMatches ? 'text-green-600' : 'text-red-600'}`}>
                                     <span>{reconMatches ? '✓ Matches' : 'Difference'}</span>
                                     <span>{reconMatches ? '$0.00' : (reconDiff > 0 ? '+' : '−') + '$' + fmt(reconDiff)}</span>
