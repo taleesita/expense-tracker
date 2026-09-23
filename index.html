@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.45.0-sep22';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.46.0-sep22';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -4964,6 +4964,26 @@
             const [reconcileFilter, setReconcileFilter] = useState('all'); // all, unreconciled, pending, reconciled
             const [sortMode, setSortMode] = useState('purchase'); // purchase, added
             const [showSortPopover, setShowSortPopover] = useState(false);
+            // Reconcile-vs-source: amount the card/bank site shows. Remembered per account, expires after 72h
+            // (so a stale value from last month's reconciliation doesn't linger).
+            const RECON_TTL_MS = 72 * 60 * 60 * 1000;
+            const reconKey = 'recon_card_amt_' + accountId;
+            const loadReconAmt = () => {
+                try {
+                    const raw = localStorage.getItem('recon_card_amt_' + accountId);
+                    if (raw) { const o = JSON.parse(raw); if (o && o.ts && (Date.now() - o.ts) < RECON_TTL_MS) return o.amount || ''; }
+                } catch {}
+                return '';
+            };
+            const [cardShownAmt, setCardShownAmt] = useState(loadReconAmt);
+            React.useEffect(() => { setCardShownAmt(loadReconAmt()); }, [accountId]);
+            const setCardShown = (v) => {
+                setCardShownAmt(v);
+                try {
+                    if (v === '' || v == null) localStorage.removeItem(reconKey);
+                    else localStorage.setItem(reconKey, JSON.stringify({ amount: v, ts: Date.now() }));
+                } catch {}
+            };
 
             // Bulk edit mode
             const [editMode, setEditMode] = useState(false);
@@ -5124,6 +5144,42 @@
             const total = calcAccountBalance(accountExpenses, accountId);
             const progress = recentExpenses.length > 0 ? (totalReconciled / recentExpenses.length) * 100 : 0;
 
+            // ── Reconcile vs. source (card/bank site) ──
+            // appComparable = a positive figure to compare against the site: amount owed (credit card) or
+            // balance (bank), excluding pending & missing (same basis the card site uses).
+            const appComparable = isCreditCard ? -balanceExclPending : balanceExclPending;
+            const cardNum = parseFloat(cardShownAmt);
+            const hasCardNum = cardShownAmt !== '' && !isNaN(cardNum);
+            const reconDiff = hasCardNum ? Math.round((cardNum - appComparable) * 100) / 100 : null;
+            const reconMatches = hasCardNum && Math.abs(reconDiff) < 0.005;
+            const unreconItems = unlockedUnreconciled.filter(e => Math.abs(e.amount) > 0);
+            const unreconTotal = unreconItems.reduce((s, e) => s + Math.abs(e.amount), 0);
+            // Gap finder: combinations (up to 4) of unreconciled charges that sum to |difference|
+            const gapCombos = (() => {
+                if (!hasCardNum || reconMatches) return [];
+                const target = Math.round(Math.abs(reconDiff) * 100);
+                if (target <= 0) return [];
+                const items = unreconItems
+                    .map(e => ({ cents: Math.round(Math.abs(e.amount) * 100), e }))
+                    .filter(x => x.cents > 0 && x.cents <= target)
+                    .sort((a, b) => a.cents - b.cents)
+                    .slice(0, 50);
+                const results = [];
+                const combo = [];
+                const rec = (start, remaining, size) => {
+                    if (results.length >= 3) return;
+                    if (remaining === 0 && size > 0) { results.push(combo.map(i => items[i].e)); return; }
+                    if (size >= 4) return;
+                    for (let i = start; i < items.length; i++) {
+                        if (items[i].cents > remaining) break; // sorted asc — the rest are only bigger
+                        combo.push(i); rec(i + 1, remaining - items[i].cents, size + 1); combo.pop();
+                        if (results.length >= 3) return;
+                    }
+                };
+                rec(0, target, 0);
+                return results;
+            })();
+
             const handleLock = () => {
                 if (unlockedReconciled.length === 0) return;
                 onLockItems(unlockedReconciled.map(e => e.rowIndex));
@@ -5206,6 +5262,50 @@
                                             Cancel
                                         </button>
                                     </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="bg-white p-4 rounded-lg border border-gray-200">
+                        <div className="text-sm font-semibold text-gray-700 mb-2">Reconcile vs. {isCreditCard ? 'card' : 'bank'}</div>
+                        <div className="flex items-center gap-2 mb-1">
+                            <span className="text-gray-400 text-sm">Amount the {isCreditCard ? 'card' : 'bank'} shows</span>
+                            <div className="flex items-center gap-1 ml-auto">
+                                <span className="text-gray-500">$</span>
+                                <input
+                                    type="number" inputMode="decimal" step="0.01" placeholder="0.00"
+                                    value={cardShownAmt}
+                                    onChange={(e) => setCardShown(e.target.value)}
+                                    className="w-28 text-right border border-gray-200 rounded px-2 py-1 outline-none"
+                                />
+                                {cardShownAmt !== '' && (
+                                    <button onClick={() => setCardShown('')} className="text-gray-300 hover:text-gray-500 ml-1 text-lg leading-none">×</button>
+                                )}
+                            </div>
+                        </div>
+                        {hasCardNum && (
+                            <div className="space-y-1.5 text-sm mt-3">
+                                <div className="flex justify-between"><span className="text-gray-500">App (excl. pending &amp; missing)</span><span className="font-medium">${fmt(appComparable)}</span></div>
+                                <div className="flex justify-between"><span className="text-gray-500">{isCreditCard ? 'Card' : 'Bank'} shows</span><span className="font-medium">${fmt(cardNum)}</span></div>
+                                <div className={`flex justify-between font-semibold ${reconMatches ? 'text-green-600' : 'text-red-600'}`}>
+                                    <span>{reconMatches ? '✓ Matches' : 'Difference'}</span>
+                                    <span>{reconMatches ? '$0.00' : (reconDiff > 0 ? '+' : '−') + '$' + fmt(reconDiff)}</span>
+                                </div>
+                                <div className="flex justify-between text-gray-500 pt-1.5 border-t border-gray-100">
+                                    <span>Unreconciled charges ({unreconItems.length})</span><span className="font-medium">${fmt(unreconTotal)}</span>
+                                </div>
+                                {!reconMatches && gapCombos.length > 0 && (
+                                    <div className="mt-2 bg-amber-50 border border-amber-200 rounded p-2 text-xs">
+                                        <div className="font-medium text-amber-800 mb-1">Unreconciled charges that add up to your ${fmt(reconDiff)} gap:</div>
+                                        {gapCombos.map((combo, ci) => (
+                                            <div key={ci} className="text-amber-700 mb-0.5">{combo.map(e => `${e.merchant} $${fmt(e.amount)}`).join('  +  ')}</div>
+                                        ))}
+                                        {gapCombos.length > 1 && <div className="text-amber-500 mt-1">More than one combination fits — pick the one that matches what happened.</div>}
+                                    </div>
+                                )}
+                                {!reconMatches && gapCombos.length === 0 && (
+                                    <div className="mt-1 text-xs text-gray-400">No combination of unreconciled charges adds up to the gap — it may involve a pending/missing item, a mis-logged amount, or a charge on another card.</div>
                                 )}
                             </div>
                         )}
