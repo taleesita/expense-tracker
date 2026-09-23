@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.47.0-sep22';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.48.0-sep22';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -5200,6 +5200,7 @@
 
             return (
                 <div className="space-y-4">
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-start">
                     <div className="bg-white p-4 rounded-lg border border-gray-200">
                         <div className="flex justify-between items-center mb-2">
                             <h3 className="font-bold text-lg">{account.name}</h3>
@@ -5306,6 +5307,7 @@
                                 )}
                             </div>
                         )}
+                    </div>
                     </div>
 
                     <div className="flex gap-2 bg-white p-3 rounded-lg">
