@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.50.0-sep23';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.51.0-sep23';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -5077,7 +5077,9 @@
             const hasMissing = missingAccountExpenses.length > 0;
             const hasExclusions = hasPending || hasMissing;
             const cleanExpenses = accountExpenses.filter(e => e.reconcileStatus !== 'pending' && e.reconcileStatus !== 'missing');
-            const balanceExclPending = hasExclusions ? calcAccountBalance(cleanExpenses, accountId, { excludeMissing: false }) : total;
+            // NOTE: compute the no-exclusions balance directly (NOT the `total` const — it's declared later,
+            // so referencing it here yields undefined → NaN, which surfaced as $0.00 in the reconcile panel).
+            const balanceExclPending = hasExclusions ? calcAccountBalance(cleanExpenses, accountId, { excludeMissing: false }) : calcAccountBalance(accountExpenses, accountId);
 
             // Snapshot which rows matched the filter — only re-snapshot when filter/search/sort changes,
             // NOT when reconcile status changes (so you can tap through the 3-state cycle without the row vanishing)
