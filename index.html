@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.51.0-sep23';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.53.0-sep23';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -3658,11 +3658,19 @@
                     if (window.google?.picker) { resolve(); return; }
                     gapi.load('picker', resolve);
                 });
+                // Match the Google Forms "Insert file" picker: an Upload tab (drag/drop + Browse) plus a
+                // My Drive browse tab. Upload goes to the user's Drive, then our callback re-files it into
+                // the receipts folder just like Scan/Upload.
+                const uploadView = new google.picker.DocsUploadView();
+                const driveView = new google.picker.DocsView()
+                    .setParent('root')          // open at My Drive root (top-level folders), like the Forms picker
+                    .setIncludeFolders(true)
+                    .setMimeTypes('image/jpeg,image/png,image/webp,image/heic,application/pdf');
                 const picker = new google.picker.PickerBuilder()
                     .setOAuthToken(token)
-                    .addView(new google.picker.DocsView()
-                        .setIncludeFolders(true)
-                        .setMimeTypes('image/jpeg,image/png,image/webp,image/heic,application/pdf'))
+                    .setAppId('452837598284') // GCP project number (bo-s-financial-tracker) — needed for the Upload view
+                    .addView(driveView)         // land on My Drive by default
+                    .addView(uploadView)
                     .setCallback(async (data) => {
                         if (data.action === google.picker.Action.PICKED) {
                             const doc = data.docs[0];
