@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.49.0-sep23';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.50.0-sep23';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -6977,7 +6977,7 @@
 
         const PAGE_SIZE = 50;
 
-        const AllTab = ({ expenses, onDelete, onUpdate, onEdit, onSplit, deletingRowIndex }) => {
+        const AllTab = ({ expenses, onDelete, onUpdate, onEdit, onSplit, onReconcile, deletingRowIndex }) => {
             const [searchTerm, setSearchTerm] = useState('');
             const [reconcileFilter, setReconcileFilter] = useState('all');
             const [sortMode, setSortMode] = useState('purchase');
@@ -7127,7 +7127,8 @@
                                         onUpdate={(updated) => onUpdate(updated.rowIndex, updated)}
                                         onEdit={onEdit}
                                         onSplit={onSplit}
-                                        showReconcile={false}
+                                        onReconcile={onReconcile}
+                                        showReconcile={true}
                                         showDateSeparator={idx === 0 || getDateKey(item, sortMode) !== getDateKey(arr[idx - 1], sortMode)}
                                         dateSeparatorLabel={formatDateLabel(item, sortMode)}
                                         sortMode={sortMode}
@@ -8532,6 +8533,7 @@
                                         onUpdate={handleUpdateExpense}
                                         onEdit={handleEditExpense}
                                         onSplit={(e) => setSplitExpense(e)}
+                                        onReconcile={handleReconcile}
                                         deletingRowIndex={deletingRowIndex}
                                     />
                                 )}
