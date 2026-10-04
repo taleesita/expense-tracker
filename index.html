@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.53.0-sep23';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.54.0-oct04';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -3357,6 +3357,63 @@
             );
         };
 
+        // ===== Receipt merge helpers (one PDF file per transaction) =====
+        let _pdfLibPromise = null;
+        const ensurePdfLib = () => {
+            if (window.PDFLib) return Promise.resolve();
+            if (!_pdfLibPromise) {
+                _pdfLibPromise = new Promise((resolve, reject) => {
+                    const s = document.createElement('script');
+                    s.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js';
+                    s.onload = resolve; s.onerror = reject;
+                    document.head.appendChild(s);
+                });
+            }
+            return _pdfLibPromise;
+        };
+        const driveFileIdFromUrl = (url) => {
+            const m = (url || '').match(/(?:id=|\/d\/)([a-zA-Z0-9_-]+)/);
+            return m ? m[1] : null;
+        };
+        // Normalize any image to JPEG bytes via canvas (handles HEIC/webp on iOS; pdf-lib only embeds JPG/PNG).
+        const imageToJpegBytes = (blob) => new Promise((resolve, reject) => {
+            const url = URL.createObjectURL(blob);
+            const img = new Image();
+            img.onload = () => {
+                const canvas = document.createElement('canvas');
+                canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+                canvas.getContext('2d').drawImage(img, 0, 0);
+                canvas.toBlob(b => { URL.revokeObjectURL(url); b ? b.arrayBuffer().then(resolve) : reject(new Error('image convert failed')); }, 'image/jpeg', 0.9);
+            };
+            img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('image load failed')); };
+            img.src = url;
+        });
+        // Merge an existing receipt blob + a newly added blob into ONE PDF (returns Uint8Array).
+        const mergeReceiptToPdf = async (existingBlob, newBlob) => {
+            await ensurePdfLib();
+            const { PDFDocument } = window.PDFLib;
+            const addImagePage = async (doc, blob) => {
+                let bytes, isPng = /png/i.test(blob.type || '');
+                if (isPng || /jpe?g/i.test(blob.type || '')) { bytes = await blob.arrayBuffer(); }
+                else { bytes = await imageToJpegBytes(blob); isPng = false; } // convert heic/webp/etc → jpeg
+                const img = isPng ? await doc.embedPng(bytes) : await doc.embedJpg(bytes);
+                const page = doc.addPage([img.width, img.height]);
+                page.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height });
+            };
+            const appendBlob = async (doc, blob) => {
+                if ((blob.type || '') === 'application/pdf') {
+                    const donor = await PDFDocument.load(await blob.arrayBuffer());
+                    const pages = await doc.copyPages(donor, donor.getPageIndices());
+                    pages.forEach(p => doc.addPage(p));
+                } else { await addImagePage(doc, blob); }
+            };
+            let doc;
+            if ((existingBlob.type || '') === 'application/pdf') { doc = await PDFDocument.load(await existingBlob.arrayBuffer()); }
+            else { doc = await PDFDocument.create(); await addImagePage(doc, existingBlob); }
+            await appendBlob(doc, newBlob);
+            return await doc.save();
+        };
+
         const AddExpenseModal = ({ isOpen, onClose, onAdd, onUpdate, editExpense, token, userName, expenses: allExpenses, merchantAccountMap, reconnect, inboxMode, inboxProgress, inboxIsLast, onInboxSkip, onInboxClose, onDismissReminder }) => {
             const isEdit = !!editExpense && !editExpense._prefill;
             const [merchant, setMerchant] = useState('');
@@ -3745,6 +3802,69 @@
                     .build();
                 picker.setVisible(true);
             }, [token, merchant, amount, allExpenses, isEdit, scanReceipt, uploadReceipt, userName, reconnect]);
+
+            // ===== Add a file and MERGE it into the existing receipt (one PDF per transaction) =====
+            const [mergingReceipt, setMergingReceipt] = useState(false);
+            const [mergeMsg, setMergeMsg] = useState('');
+            const addFileInputRef = useRef(null);
+            const scanAddInputRef = useRef(null);
+            const addToReceipt = async (file) => {
+                if (!file || !receipt || !token) return;
+                setMergeMsg(''); setMergingReceipt(true);
+                try {
+                    const existingId = driveFileIdFromUrl(receipt);
+                    if (!existingId) throw new Error('current receipt is not a Drive file');
+                    const existResp = await fetch(`https://www.googleapis.com/drive/v3/files/${existingId}?alt=media`, { headers: { 'Authorization': `Bearer ${token}` } });
+                    if (!existResp.ok) throw new Error(existResp.status === 401 ? 'Google connection expired — tap Reconnect' : 'could not fetch current receipt');
+                    const existingBlob = await existResp.blob();
+                    const mergedBytes = await mergeReceiptToPdf(existingBlob, file);
+                    const mergedFile = new File([mergedBytes], (merchant || 'receipt') + '.pdf', { type: 'application/pdf' });
+                    const newUrl = await uploadReceipt(mergedFile, merchant || 'receipt', userName);
+                    if (!newUrl) throw new Error('upload failed');
+                    const oldUrl = receipt;
+                    setReceipt(newUrl);
+                    uploadedReceiptUrl.current = null; // merged file is now the canonical receipt
+                    if (isEdit && editExpense?.rowIndex) {
+                        onUpdate(editExpense.rowIndex, { ...editExpense, receipt: newUrl });
+                    }
+                    // Cleanup: delete the OLD receipt file (now replaced by the merged one). The added file
+                    // came from device/scan (local, never a separate Drive receipt) or from the user's own
+                    // Drive (their file — we don't delete that), so only the old receipt needs removing.
+                    if (oldUrl && oldUrl !== newUrl) { try { deleteFile(oldUrl); } catch {} }
+                    setMergeMsg('✓ Merged into one receipt');
+                    setTimeout(() => setMergeMsg(''), 4000);
+                } catch (e) {
+                    console.error('Add-to-receipt failed:', e);
+                    setMergeMsg('Merge failed: ' + (e.message || 'try again'));
+                    setTimeout(() => setMergeMsg(''), 6000);
+                } finally {
+                    setMergingReceipt(false);
+                }
+            };
+            // Pick an existing Drive file to merge in (uses the same picker as import).
+            const pickDriveToMerge = useCallback(async () => {
+                if (!token) { reconnect().catch(() => {}); return; }
+                if (!window.gapi) {
+                    await new Promise((resolve, reject) => { const s = document.createElement('script'); s.src = 'https://apis.google.com/js/api.js'; s.onload = resolve; s.onerror = reject; document.head.appendChild(s); });
+                }
+                await new Promise((resolve) => { if (window.google?.picker) { resolve(); return; } gapi.load('picker', resolve); });
+                const driveView = new google.picker.DocsView().setParent('root').setIncludeFolders(true)
+                    .setMimeTypes('image/jpeg,image/png,image/webp,image/heic,application/pdf');
+                const picker = new google.picker.PickerBuilder()
+                    .setOAuthToken(token).setAppId('452837598284').addView(driveView)
+                    .setCallback(async (data) => {
+                        if (data.action === google.picker.Action.PICKED) {
+                            const doc = data.docs[0];
+                            try {
+                                const r = await fetch(`https://www.googleapis.com/drive/v3/files/${doc.id}?alt=media`, { headers: { 'Authorization': `Bearer ${token}` } });
+                                const blob = await r.blob();
+                                await addToReceipt(new File([blob], doc.name || 'file', { type: blob.type }));
+                            } catch (e) { console.error('Drive merge pick failed:', e); setMergeMsg('Merge failed: ' + (e.message || 'try again')); setTimeout(() => setMergeMsg(''), 6000); }
+                        }
+                    })
+                    .setTitle('Add a file to this receipt').build();
+                picker.setVisible(true);
+            }, [token, reconnect, receipt, merchant, userName, isEdit, editExpense]);
 
             // Cancel: delete uploaded Drive file if any
             const handleCancel = () => {
@@ -4410,6 +4530,33 @@
                                     </div>
                                 );
                             })()}
+
+                            {/* Add another file — merges into the single receipt PDF for this transaction */}
+                            {receipt && !inboxMode && driveFileIdFromUrl(receipt) && (
+                                <div className="mt-2">
+                                    <div className="text-xs text-gray-500 mb-1.5">Add another file — it merges into this one receipt PDF:</div>
+                                    <div className="flex gap-1.5">
+                                        <button type="button" disabled={mergingReceipt} onClick={() => addFileInputRef.current?.click()}
+                                            className="flex-1 flex items-center justify-center gap-1.5 bg-gray-100 text-gray-700 py-2 rounded-lg text-xs font-medium hover:bg-gray-200 disabled:opacity-50">
+                                            ⬆ Upload
+                                        </button>
+                                        <button type="button" disabled={mergingReceipt} onClick={() => scanAddInputRef.current?.click()}
+                                            className="flex-1 flex items-center justify-center gap-1.5 bg-gray-100 text-gray-700 py-2 rounded-lg text-xs font-medium hover:bg-gray-200 disabled:opacity-50">
+                                            <CameraIcon size={13} /> Scan
+                                        </button>
+                                        <button type="button" disabled={mergingReceipt} onClick={pickDriveToMerge}
+                                            className="flex-1 flex items-center justify-center gap-1.5 bg-gray-100 text-gray-700 py-2 rounded-lg text-xs font-medium hover:bg-gray-200 disabled:opacity-50">
+                                            Drive
+                                        </button>
+                                    </div>
+                                    <input ref={addFileInputRef} type="file" accept="image/*,application/pdf" className="hidden"
+                                        onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) addToReceipt(f); }} />
+                                    <input ref={scanAddInputRef} type="file" accept="image/*" capture="environment" className="hidden"
+                                        onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) addToReceipt(f); }} />
+                                    {mergingReceipt && <div className="text-xs text-gray-500 mt-1.5 flex items-center gap-1.5"><RefreshCwIcon size={12} className="animate-spin" /> Merging…</div>}
+                                    {mergeMsg && <div className={`text-xs mt-1.5 ${mergeMsg.startsWith('✓') ? 'text-green-600' : 'text-red-500'}`}>{mergeMsg}</div>}
+                                </div>
+                            )}
 
                             <div className="flex gap-2 pt-4">
                                 {inboxMode ? (
@@ -5192,6 +5339,24 @@
                 return results;
             })();
 
+            // Charge/deposit mix-up finder: a transaction logged with the wrong sign throws the balance off
+            // by 2x its amount (you lose it AND move it to the wrong side). So when the gap is even, look for
+            // a transaction equal to HALF the gap whose type, if flipped, would close it. Searches ALL this
+            // account's transactions (reconciled included — a mis-typed one may have been reconciled by mistake).
+            const flipCandidates = (() => {
+                if (!hasCardNum || reconMatches) return [];
+                const gapCents = Math.round(Math.abs(reconDiff) * 100);
+                if (gapCents <= 0 || gapCents % 2 !== 0) return [];
+                const halfCents = gapCents / 2;
+                // diff > 0 (app too low): a CHARGE flipped to a deposit raises the app balance.
+                // diff < 0 (app too high): a DEPOSIT flipped to a charge lowers it.
+                const wantCharge = reconDiff > 0;
+                return displayExpenses
+                    .filter(e => Math.round(Math.abs(e.amount) * 100) === halfCents
+                        && (wantCharge ? e.txnType === 'charge' : (e.txnType === 'deposit' || e.txnType === 'credit_refund')))
+                    .slice(0, 4);
+            })();
+
             const handleLock = () => {
                 if (unlockedReconciled.length === 0) return;
                 onLockItems(unlockedReconciled.map(e => e.rowIndex));
@@ -5305,6 +5470,16 @@
                                 <div className="flex justify-between text-gray-500 pt-1.5 border-t border-gray-100">
                                     <span>Unreconciled charges ({unreconItems.length})</span><span className="font-medium">${fmt(unreconTotal)}</span>
                                 </div>
+                                {!reconMatches && flipCandidates.length > 0 && (
+                                    <div className="mt-2 bg-blue-50 border border-blue-200 rounded p-2 text-xs">
+                                        <div className="font-medium text-blue-800 mb-1">Possible charge/deposit mix-up (gap is exactly 2× one transaction):</div>
+                                        {flipCandidates.map((e, i) => (
+                                            <div key={i} className="text-blue-700 mb-0.5">
+                                                {e.merchant} ${fmt(e.amount)} is logged as a <b>{e.txnType === 'charge' ? 'charge' : 'deposit'}</b> — if it should be a <b>{e.txnType === 'charge' ? 'deposit' : 'charge'}</b>, that closes the ${fmt(reconDiff)} gap.
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
                                 {!reconMatches && gapCombos.length > 0 && (
                                     <div className="mt-2 bg-amber-50 border border-amber-200 rounded p-2 text-xs">
                                         <div className="font-medium text-amber-800 mb-1">Unreconciled charges that add up to your ${fmt(reconDiff)} gap:</div>
@@ -5314,8 +5489,8 @@
                                         {gapCombos.length > 1 && <div className="text-amber-500 mt-1">More than one combination fits — pick the one that matches what happened.</div>}
                                     </div>
                                 )}
-                                {!reconMatches && gapCombos.length === 0 && (
-                                    <div className="mt-1 text-xs text-gray-400">No combination of unreconciled charges adds up to the gap — it may involve a pending/missing item, a mis-logged amount, or a charge on another card.</div>
+                                {!reconMatches && gapCombos.length === 0 && flipCandidates.length === 0 && (
+                                    <div className="mt-1 text-xs text-gray-400">No unreconciled charges (or 2× sign-flip) add up to the gap — it may involve a pending/missing item, a mis-logged amount, or a charge on another card.</div>
                                 )}
                             </div>
                         )}
