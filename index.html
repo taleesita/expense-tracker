@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.57.0-oct04';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.58.0-oct04';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -4471,7 +4471,7 @@
                                 const driveFileId = driveMatch ? driveMatch[1] : null;
                                 const isImage = receipt.startsWith('blob:') || /\.(jpg|jpeg|png|gif|webp)$/i.test(receipt);
                                 return (
-                                    <div className="relative rounded-xl border border-gray-200 overflow-hidden">
+                                    <div className="relative">
                                         {/* "+" menu — add another file that merges into this one receipt PDF */}
                                         <div className="absolute top-2 right-2 z-30">
                                             {mergingReceipt ? (
@@ -4483,7 +4483,7 @@
                                                     {showAddMenu && (
                                                         <>
                                                             <div className="fixed inset-0 z-40" onClick={() => setShowAddMenu(false)} />
-                                                            <div className="absolute right-0 top-9 z-50 bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-[160px] text-sm">
+                                                            <div className="absolute right-0 bottom-9 z-50 bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-[160px] text-sm">
                                                                 <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-gray-400">Add another file</div>
                                                                 <button type="button" onClick={() => { setShowAddMenu(false); addFileInputRef.current?.click(); }} className="w-full text-left px-3 py-2 hover:bg-gray-50">⬆ Upload</button>
                                                                 <button type="button" onClick={() => { setShowAddMenu(false); scanAddInputRef.current?.click(); }} className="w-full text-left px-3 py-2 hover:bg-gray-50 flex items-center gap-2"><CameraIcon size={14} /> Scan</button>
@@ -4494,6 +4494,7 @@
                                                 </div>
                                             )}
                                         </div>
+                                        <div className="rounded-xl border border-gray-200 overflow-hidden">
                                         {isImage ? (
                                             <div className="relative bg-gray-50">
                                                 <img src={receipt} alt="Receipt" className="w-full max-h-48 object-contain" />
@@ -4554,6 +4555,7 @@
                                                 </button>
                                             </div>
                                         )}
+                                        </div>
                                     </div>
                                 );
                             })()}
