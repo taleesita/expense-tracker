@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.54.0-oct04';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.55.0-oct04';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -3490,6 +3490,7 @@
             const [showSuggestions, setShowSuggestions] = useState(false);
             const [cropImage, setCropImage] = useState(null); // dataUrl for crop step
             const [cropFile, setCropFile] = useState(null);   // original File for fallback
+            const cropForMergeRef = useRef(false); // true when the crop result should be MERGED into the receipt (not a new scan)
             const uploadedReceiptUrl = useRef(null); // track file uploaded this session for cancel/rename
             const modalSessionId = useRef(0); // incremented each time modal opens to ignore stale async results
             const modalScrollRef = useRef(null); // ref to modal scroll container for scroll-to-top on inbox advance
@@ -4058,9 +4059,10 @@
                             const croppedFile = new File([blob], cropFile?.name || 'receipt.jpg', { type: 'image/jpeg' });
                             setCropImage(null);
                             setCropFile(null);
-                            handleScan(croppedFile);
+                            if (cropForMergeRef.current) { cropForMergeRef.current = false; addToReceipt(croppedFile); }
+                            else { handleScan(croppedFile); }
                         }}
-                        onCancel={() => { setCropImage(null); setCropFile(null); }}
+                        onCancel={() => { setCropImage(null); setCropFile(null); cropForMergeRef.current = false; }}
                     />
                 )}
                 <div className="fixed inset-0 bg-black bg-opacity-50 z-40 flex items-end" onClick={handleBackdropClick}>
@@ -4550,9 +4552,17 @@
                                         </button>
                                     </div>
                                     <input ref={addFileInputRef} type="file" accept="image/*,application/pdf" className="hidden"
-                                        onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) addToReceipt(f); }} />
+                                        onChange={(e) => {
+                                            const f = e.target.files?.[0]; e.target.value = ''; if (!f) return;
+                                            // Images go through the crop step first (also fixes photo orientation); PDFs merge directly.
+                                            if (f.type?.startsWith('image/')) { cropForMergeRef.current = true; const r = new FileReader(); r.onload = (ev) => { setCropImage(ev.target.result); setCropFile(f); }; r.readAsDataURL(f); }
+                                            else { addToReceipt(f); }
+                                        }} />
                                     <input ref={scanAddInputRef} type="file" accept="image/*" capture="environment" className="hidden"
-                                        onChange={(e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) addToReceipt(f); }} />
+                                        onChange={(e) => {
+                                            const f = e.target.files?.[0]; e.target.value = ''; if (!f) return;
+                                            cropForMergeRef.current = true; const r = new FileReader(); r.onload = (ev) => { setCropImage(ev.target.result); setCropFile(f); }; r.readAsDataURL(f);
+                                        }} />
                                     {mergingReceipt && <div className="text-xs text-gray-500 mt-1.5 flex items-center gap-1.5"><RefreshCwIcon size={12} className="animate-spin" /> Merging…</div>}
                                     {mergeMsg && <div className={`text-xs mt-1.5 ${mergeMsg.startsWith('✓') ? 'text-green-600' : 'text-red-500'}`}>{mergeMsg}</div>}
                                 </div>
