@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.58.0-oct04';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.59.0-oct04';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -3397,8 +3397,16 @@
                 if (isPng || /jpe?g/i.test(blob.type || '')) { bytes = await blob.arrayBuffer(); }
                 else { bytes = await imageToJpegBytes(blob); isPng = false; } // convert heic/webp/etc → jpeg
                 const img = isPng ? await doc.embedPng(bytes) : await doc.embedJpg(bytes);
-                const page = doc.addPage([img.width, img.height]);
-                page.drawImage(img, { x: 0, y: 0, width: img.width, height: img.height });
+                // Put the image on a standard Letter-size page (oriented to the image) and scale it to fit,
+                // centered — otherwise a phone photo's pixel size becomes a giant ~40-inch page next to the
+                // letter-size original pages.
+                const portrait = img.height >= img.width;
+                const pageW = portrait ? 612 : 792;   // 8.5x11" at 72pt/inch
+                const pageH = portrait ? 792 : 612;
+                const page = doc.addPage([pageW, pageH]);
+                const scale = Math.min(pageW / img.width, pageH / img.height);
+                const w = img.width * scale, h = img.height * scale;
+                page.drawImage(img, { x: (pageW - w) / 2, y: (pageH - h) / 2, width: w, height: h });
             };
             const appendBlob = async (doc, blob) => {
                 if ((blob.type || '') === 'application/pdf') {
@@ -3826,8 +3834,17 @@
                     const oldUrl = receipt;
                     setReceipt(newUrl);
                     uploadedReceiptUrl.current = null; // merged file is now the canonical receipt
+                    // Persist ONLY the receipt cell (column I) for this row — a targeted write, so we don't
+                    // clobber any unsaved form edits and don't fire the full "Charge Updated" save banner.
+                    // (Writes to getSheetId(), which is the TEST sheet in test mode — safe.)
                     if (isEdit && editExpense?.rowIndex) {
-                        onUpdate(editExpense.rowIndex, { ...editExpense, receipt: newUrl });
+                        try {
+                            await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!I${editExpense.rowIndex}?valueInputOption=USER_ENTERED`, {
+                                method: 'PUT',
+                                headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ values: [[newUrl]] })
+                            });
+                        } catch (e) { console.warn('receipt cell write failed:', e); }
                     }
                     // Cleanup: delete the OLD receipt file (now replaced by the merged one). The added file
                     // came from device/scan (local, never a separate Drive receipt) or from the user's own
@@ -3835,8 +3852,9 @@
                     // NEVER delete in test mode: the test sheet points at REAL receipt files, so a test merge
                     // must not touch them.
                     if (!_testMode && oldUrl && oldUrl !== newUrl) { try { deleteFile(oldUrl); } catch {} }
-                    setMergeMsg('✓ Merged into one receipt');
-                    setTimeout(() => setMergeMsg(''), 4000);
+                    // Receipt is saved — close the edit screen (the merge is a complete action on its own).
+                    if (isEdit) { onClose(); }
+                    else { setMergeMsg('✓ Merged into one receipt'); setTimeout(() => setMergeMsg(''), 4000); }
                 } catch (e) {
                     console.error('Add-to-receipt failed:', e);
                     setMergeMsg('Merge failed: ' + (e.message || 'try again'));
