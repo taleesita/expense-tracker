@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.55.0-oct04';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.57.0-oct04';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -3807,6 +3807,7 @@
             // ===== Add a file and MERGE it into the existing receipt (one PDF per transaction) =====
             const [mergingReceipt, setMergingReceipt] = useState(false);
             const [mergeMsg, setMergeMsg] = useState('');
+            const [showAddMenu, setShowAddMenu] = useState(false);
             const addFileInputRef = useRef(null);
             const scanAddInputRef = useRef(null);
             const addToReceipt = async (file) => {
@@ -3831,7 +3832,9 @@
                     // Cleanup: delete the OLD receipt file (now replaced by the merged one). The added file
                     // came from device/scan (local, never a separate Drive receipt) or from the user's own
                     // Drive (their file — we don't delete that), so only the old receipt needs removing.
-                    if (oldUrl && oldUrl !== newUrl) { try { deleteFile(oldUrl); } catch {} }
+                    // NEVER delete in test mode: the test sheet points at REAL receipt files, so a test merge
+                    // must not touch them.
+                    if (!_testMode && oldUrl && oldUrl !== newUrl) { try { deleteFile(oldUrl); } catch {} }
                     setMergeMsg('✓ Merged into one receipt');
                     setTimeout(() => setMergeMsg(''), 4000);
                 } catch (e) {
@@ -4468,11 +4471,33 @@
                                 const driveFileId = driveMatch ? driveMatch[1] : null;
                                 const isImage = receipt.startsWith('blob:') || /\.(jpg|jpeg|png|gif|webp)$/i.test(receipt);
                                 return (
-                                    <div className="rounded-xl border border-gray-200 overflow-hidden">
+                                    <div className="relative rounded-xl border border-gray-200 overflow-hidden">
+                                        {/* "+" menu — add another file that merges into this one receipt PDF */}
+                                        <div className="absolute top-2 right-2 z-30">
+                                            {mergingReceipt ? (
+                                                <div className="w-7 h-7 flex items-center justify-center bg-white rounded-lg shadow text-gray-500"><RefreshCwIcon size={14} className="animate-spin" /></div>
+                                            ) : (
+                                                <div className="relative">
+                                                    <button type="button" title="Add a page to this receipt" onClick={() => setShowAddMenu(v => !v)}
+                                                        className="w-7 h-7 flex items-center justify-center bg-white rounded-lg shadow text-gray-600 hover:text-blue-600 text-xl leading-none font-bold">+</button>
+                                                    {showAddMenu && (
+                                                        <>
+                                                            <div className="fixed inset-0 z-40" onClick={() => setShowAddMenu(false)} />
+                                                            <div className="absolute right-0 top-9 z-50 bg-white rounded-lg shadow-lg border border-gray-200 py-1 min-w-[160px] text-sm">
+                                                                <div className="px-3 py-1 text-[10px] uppercase tracking-wide text-gray-400">Add another file</div>
+                                                                <button type="button" onClick={() => { setShowAddMenu(false); addFileInputRef.current?.click(); }} className="w-full text-left px-3 py-2 hover:bg-gray-50">⬆ Upload</button>
+                                                                <button type="button" onClick={() => { setShowAddMenu(false); scanAddInputRef.current?.click(); }} className="w-full text-left px-3 py-2 hover:bg-gray-50 flex items-center gap-2"><CameraIcon size={14} /> Scan</button>
+                                                                <button type="button" onClick={() => { setShowAddMenu(false); pickDriveToMerge(); }} className="w-full text-left px-3 py-2 hover:bg-gray-50">Drive</button>
+                                                            </div>
+                                                        </>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
                                         {isImage ? (
                                             <div className="relative bg-gray-50">
                                                 <img src={receipt} alt="Receipt" className="w-full max-h-48 object-contain" />
-                                                <div className="absolute top-2 right-2 flex gap-1">
+                                                <div className="absolute top-2 left-2 flex gap-1">
                                                     <a href={receipt} target="_blank" rel="noopener noreferrer" className="p-1.5 bg-white rounded-lg shadow text-gray-600 hover:text-blue-600">
                                                         <ExternalLinkIcon size={14} />
                                                     </a>
@@ -4533,24 +4558,9 @@
                                 );
                             })()}
 
-                            {/* Add another file — merges into the single receipt PDF for this transaction */}
+                            {/* Hidden inputs + status for the "+" add-another-file menu on the receipt above */}
                             {receipt && !inboxMode && driveFileIdFromUrl(receipt) && (
-                                <div className="mt-2">
-                                    <div className="text-xs text-gray-500 mb-1.5">Add another file — it merges into this one receipt PDF:</div>
-                                    <div className="flex gap-1.5">
-                                        <button type="button" disabled={mergingReceipt} onClick={() => addFileInputRef.current?.click()}
-                                            className="flex-1 flex items-center justify-center gap-1.5 bg-gray-100 text-gray-700 py-2 rounded-lg text-xs font-medium hover:bg-gray-200 disabled:opacity-50">
-                                            ⬆ Upload
-                                        </button>
-                                        <button type="button" disabled={mergingReceipt} onClick={() => scanAddInputRef.current?.click()}
-                                            className="flex-1 flex items-center justify-center gap-1.5 bg-gray-100 text-gray-700 py-2 rounded-lg text-xs font-medium hover:bg-gray-200 disabled:opacity-50">
-                                            <CameraIcon size={13} /> Scan
-                                        </button>
-                                        <button type="button" disabled={mergingReceipt} onClick={pickDriveToMerge}
-                                            className="flex-1 flex items-center justify-center gap-1.5 bg-gray-100 text-gray-700 py-2 rounded-lg text-xs font-medium hover:bg-gray-200 disabled:opacity-50">
-                                            Drive
-                                        </button>
-                                    </div>
+                                <>
                                     <input ref={addFileInputRef} type="file" accept="image/*,application/pdf" className="hidden"
                                         onChange={(e) => {
                                             const f = e.target.files?.[0]; e.target.value = ''; if (!f) return;
@@ -4563,9 +4573,8 @@
                                             const f = e.target.files?.[0]; e.target.value = ''; if (!f) return;
                                             cropForMergeRef.current = true; const r = new FileReader(); r.onload = (ev) => { setCropImage(ev.target.result); setCropFile(f); }; r.readAsDataURL(f);
                                         }} />
-                                    {mergingReceipt && <div className="text-xs text-gray-500 mt-1.5 flex items-center gap-1.5"><RefreshCwIcon size={12} className="animate-spin" /> Merging…</div>}
                                     {mergeMsg && <div className={`text-xs mt-1.5 ${mergeMsg.startsWith('✓') ? 'text-green-600' : 'text-red-500'}`}>{mergeMsg}</div>}
-                                </div>
+                                </>
                             )}
 
                             <div className="flex gap-2 pt-4">
@@ -7389,11 +7398,11 @@
                             {testMode && (
                                 <button
                                     onClick={async () => {
-                                        if (!confirm('This will replace your test data with a fresh copy of your real sheet. Continue?')) return;
+                                        // No confirm() — it gets silently suppressed in standalone/PWA contexts,
+                                        // which looked like the button did nothing. Test data is just a copy, so run it.
                                         setRefreshing(true);
-                                        await onRefreshTestData();
-                                        setRefreshing(false);
-                                        setOpen(false);
+                                        try { await onRefreshTestData(); }
+                                        finally { setRefreshing(false); setOpen(false); }
                                     }}
                                     disabled={refreshing}
                                     className="w-full px-4 py-2.5 text-left hover:bg-gray-50 flex items-center gap-2 text-sm border-b border-gray-100"
