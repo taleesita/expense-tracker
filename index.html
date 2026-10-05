@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.59.0-oct04';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.60.0-oct04';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -3392,33 +3392,39 @@
         const mergeReceiptToPdf = async (existingBlob, newBlob) => {
             await ensurePdfLib();
             const { PDFDocument } = window.PDFLib;
-            const addImagePage = async (doc, blob) => {
+            // Add an image on a page sized to `target` {width,height} (so it matches the existing pages
+            // instead of ballooning to the photo's pixel size), scaled to fit and centered.
+            const addImagePage = async (doc, blob, target) => {
                 let bytes, isPng = /png/i.test(blob.type || '');
                 if (isPng || /jpe?g/i.test(blob.type || '')) { bytes = await blob.arrayBuffer(); }
                 else { bytes = await imageToJpegBytes(blob); isPng = false; } // convert heic/webp/etc → jpeg
                 const img = isPng ? await doc.embedPng(bytes) : await doc.embedJpg(bytes);
-                // Put the image on a standard Letter-size page (oriented to the image) and scale it to fit,
-                // centered — otherwise a phone photo's pixel size becomes a giant ~40-inch page next to the
-                // letter-size original pages.
-                const portrait = img.height >= img.width;
-                const pageW = portrait ? 612 : 792;   // 8.5x11" at 72pt/inch
-                const pageH = portrait ? 792 : 612;
+                const pageW = target.width, pageH = target.height;
                 const page = doc.addPage([pageW, pageH]);
                 const scale = Math.min(pageW / img.width, pageH / img.height);
                 const w = img.width * scale, h = img.height * scale;
                 page.drawImage(img, { x: (pageW - w) / 2, y: (pageH - h) / 2, width: w, height: h });
             };
-            const appendBlob = async (doc, blob) => {
+            const appendBlob = async (doc, blob, target) => {
                 if ((blob.type || '') === 'application/pdf') {
                     const donor = await PDFDocument.load(await blob.arrayBuffer());
                     const pages = await doc.copyPages(donor, donor.getPageIndices());
                     pages.forEach(p => doc.addPage(p));
-                } else { await addImagePage(doc, blob); }
+                } else { await addImagePage(doc, blob, target); }
             };
-            let doc;
-            if ((existingBlob.type || '') === 'application/pdf') { doc = await PDFDocument.load(await existingBlob.arrayBuffer()); }
-            else { doc = await PDFDocument.create(); await addImagePage(doc, existingBlob); }
-            await appendBlob(doc, newBlob);
+            const LETTER = { width: 612, height: 792 };
+            let doc, target;
+            if ((existingBlob.type || '') === 'application/pdf') {
+                doc = await PDFDocument.load(await existingBlob.arrayBuffer());
+                // Match the existing document's page size so an added photo page lines up with the originals.
+                const p0 = doc.getPageCount() > 0 ? doc.getPage(0) : null;
+                target = p0 ? { width: p0.getWidth(), height: p0.getHeight() } : LETTER;
+            } else {
+                doc = await PDFDocument.create();
+                target = LETTER;
+                await addImagePage(doc, existingBlob, target);
+            }
+            await appendBlob(doc, newBlob, target);
             return await doc.save();
         };
 
