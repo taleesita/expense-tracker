@@ -65,7 +65,25 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.61.0-oct23';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.62.0-oct23';  // visible in UI so we can confirm which code is live
+        // Google Identity Services (GIS) OAuth client — fetches the Sheets/Drive access token DIRECTLY,
+        // bypassing Firebase's hidden auth frame that some browsers (e.g. Arc) block with
+        // "operation-not-supported-in-this-environment". Firebase still handles identity (who you are).
+        const GOOGLE_OAUTH_CLIENT_ID = '452837598284-56sf24n460804qbj2rb1k2ob8ssukgag.apps.googleusercontent.com';
+        let _gisPromise = null;
+        const ensureGis = () => {
+            if (window.google && window.google.accounts && window.google.accounts.oauth2) return Promise.resolve();
+            if (!_gisPromise) {
+                _gisPromise = new Promise((resolve, reject) => {
+                    const s = document.createElement('script');
+                    s.src = 'https://accounts.google.com/gsi/client';
+                    s.async = true; s.defer = true;
+                    s.onload = resolve; s.onerror = reject;
+                    document.head.appendChild(s);
+                });
+            }
+            return _gisPromise;
+        };
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -1170,6 +1188,41 @@
                 return provider;
             }, []);
 
+            // Store an access token (from Firebase OR the GIS token client) uniformly.
+            const applyAccessToken = useCallback((accessToken, ttlMs) => {
+                const expiry = Date.now() + (ttlMs || 55 * 60 * 1000);
+                setToken(accessToken);
+                tokenExpiryRef.current = expiry;
+                saveToken(accessToken, expiry);
+                setNeedsReconnect(false);
+                console.log('Google access token obtained, length:', accessToken.length);
+                return accessToken;
+            }, [saveToken]);
+
+            // Fetch a fresh Sheets/Drive token via Google's token client (GIS). No Firebase auth frame,
+            // so it works in browsers (Arc) that block Firebase's popup/redirect. prompt:'' = silent when
+            // the scopes are already granted; otherwise Google shows its own consent.
+            const getTokenViaGIS = useCallback(() => new Promise((resolve, reject) => {
+                ensureGis().then(() => {
+                    try {
+                        const tc = google.accounts.oauth2.initTokenClient({
+                            client_id: GOOGLE_OAUTH_CLIENT_ID,
+                            scope: 'https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive',
+                            callback: (resp) => {
+                                if (resp && resp.access_token) {
+                                    applyAccessToken(resp.access_token, resp.expires_in ? resp.expires_in * 1000 : 55 * 60 * 1000);
+                                    resolve(resp.access_token);
+                                } else {
+                                    reject(new Error(resp && resp.error ? resp.error : 'no access token'));
+                                }
+                            },
+                            error_callback: (err) => reject(err || new Error('GIS token error')),
+                        });
+                        tc.requestAccessToken({ prompt: '' });
+                    } catch (e) { reject(e); }
+                }).catch(reject);
+            }), [applyAccessToken]);
+
             // Extract token from Firebase sign-in result
             const handleAuthResult = useCallback((result) => {
                 // Try multiple ways to extract the Google OAuth access token
@@ -1194,18 +1247,12 @@
                     console.error('Error extracting credential:', err);
                 }
                 if (accessToken) {
-                    const expiry = Date.now() + 55 * 60 * 1000; // ~55 min
-                    setToken(accessToken);
-                    tokenExpiryRef.current = expiry;
-                    saveToken(accessToken, expiry);
-                    setNeedsReconnect(false);
-                    console.log('Google access token obtained, length:', accessToken.length);
-                    return accessToken;
+                    return applyAccessToken(accessToken, 55 * 60 * 1000);
                 }
                 console.error('Failed to extract Google access token from Firebase result:', Object.keys(result));
                 setNeedsReconnect(true);
                 return null;
-            }, [saveToken]);
+            }, [applyAccessToken]);
 
             // Firebase auth state listener — persistent session
             useEffect(() => {
@@ -1274,11 +1321,14 @@
                 try { await doSignIn(); } catch (err) { console.error('Sign-in failed:', err.code, err.message); }
             }, [doSignIn]);
 
-            // Reconnect — get a fresh Google API token (user is already signed in via Firebase)
+            // Reconnect — get a fresh Google API token. Prefer GIS (works in Arc and other browsers that
+            // block Firebase's auth frame); fall back to Firebase popup/redirect if GIS fails.
             const reconnect = useCallback(async () => {
                 if (!expenseAuth.currentUser) { login(); return; }
-                try { await doSignIn(); } catch (err) { console.error('Reconnect failed:', err.code, err.message); throw err; }
-            }, [doSignIn, login]);
+                try { await getTokenViaGIS(); return; }
+                catch (e) { console.warn('GIS reconnect failed, trying Firebase:', e && (e.message || e.type || e)); }
+                try { await doSignIn(); } catch (err) { console.error('Reconnect failed:', err && err.code, err && err.message); throw err; }
+            }, [getTokenViaGIS, doSignIn, login]);
 
             // Token expiry check — show reconnect banner when token is expired/expiring
             // NOTE: We do NOT auto-open popups here because browsers block popups from timers.
@@ -1332,24 +1382,24 @@
                 if (!currentToken) throw new Error('Google connection expired — tap Reconnect, then try again.');
                 let resp = await doFetch(currentToken);
                 if (resp.status === 401) {
-                    // Token expired mid-session — try to auto-reconnect
-                    console.log('Got 401, attempting auto-reconnect...');
+                    // Token expired mid-session — try a SILENT refresh via GIS (no popup when scopes are
+                    // already granted). Works in Arc; falls through to the reconnect banner if it can't.
+                    console.log('Got 401, attempting silent token refresh...');
                     try {
-                        const result = await expenseAuth.signInWithPopup(buildProvider());
-                        const newToken = handleAuthResult(result);
+                        const newToken = await getTokenViaGIS();
                         if (newToken) {
                             currentToken = newToken;
                             resp = await doFetch(newToken);
                         }
                     } catch (err) {
-                        console.warn('Auto-reconnect on 401 failed:', err.code);
+                        console.warn('Auto token refresh on 401 failed:', err && (err.code || err.message || err.type));
                         setToken(null);
                         setNeedsReconnect(true);
                         throw new Error('Google connection expired — tap Reconnect, then try again.');
                     }
                 }
                 return resp;
-            }, [token, buildProvider, handleAuthResult]);
+            }, [token, getTokenViaGIS]);
 
             return { user, token, login, logout, authLoading, needsReconnect, reconnect, authenticatedFetch };
         };
