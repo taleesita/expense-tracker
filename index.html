@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.60.0-oct04';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.61.0-oct23';  // visible in UI so we can confirm which code is live
         const SHEET_TAB = '💸';
         const INBOX_TAB = '📥 Inbox';
         const REAL_DRIVE_FOLDER_ID = '1992EYnG3O2UMNdApsWopIKuFLrTCerfu';
@@ -1244,28 +1244,41 @@
                 return unsub;
             }, []);
 
-            // Sign in — always use popup (works in standalone PWA mode, matches kitchen app pattern)
-            const login = useCallback(async () => {
+            // Complete a REDIRECT-based sign-in when the page returns from the Google redirect flow
+            // (the fallback used when popups are blocked). Extracts the fresh token just like the popup path.
+            useEffect(() => {
+                expenseAuth.getRedirectResult()
+                    .then(result => { if (result && (result.credential || result.user)) handleAuthResult(result); })
+                    .catch(err => console.error('Redirect sign-in result error:', err && err.code, err && err.message));
+            }, []);
+
+            // Sign in — try popup first; if the browser blocks it (in-app webview, popup blocked, or
+            // "operation-not-supported-in-this-environment"), fall back to a full-page REDIRECT sign-in,
+            // which needs no popup. The redirect result is picked up by the getRedirectResult effect on load.
+            const doSignIn = useCallback(async () => {
                 try {
                     const result = await expenseAuth.signInWithPopup(buildProvider());
                     handleAuthResult(result);
                 } catch (err) {
-                    console.error('Sign-in failed:', err.code, err.message);
+                    const code = err && err.code;
+                    if (code === 'auth/operation-not-supported-in-this-environment' || code === 'auth/popup-blocked' || code === 'auth/web-storage-unsupported') {
+                        console.log('Popup sign-in unavailable (' + code + ') — using redirect fallback');
+                        await expenseAuth.signInWithRedirect(buildProvider()); // navigates away; result handled on return
+                        return;
+                    }
+                    throw err;
                 }
             }, [buildProvider, handleAuthResult]);
 
+            const login = useCallback(async () => {
+                try { await doSignIn(); } catch (err) { console.error('Sign-in failed:', err.code, err.message); }
+            }, [doSignIn]);
+
             // Reconnect — get a fresh Google API token (user is already signed in via Firebase)
-            // Uses popup (same pattern as kitchen app — works in standalone PWA mode)
             const reconnect = useCallback(async () => {
                 if (!expenseAuth.currentUser) { login(); return; }
-                try {
-                    const result = await expenseAuth.signInWithPopup(buildProvider());
-                    handleAuthResult(result);
-                } catch (err) {
-                    console.error('Reconnect failed:', err.code, err.message);
-                    throw err;
-                }
-            }, [buildProvider, handleAuthResult, login]);
+                try { await doSignIn(); } catch (err) { console.error('Reconnect failed:', err.code, err.message); throw err; }
+            }, [doSignIn, login]);
 
             // Token expiry check — show reconnect banner when token is expired/expiring
             // NOTE: We do NOT auto-open popups here because browsers block popups from timers.
