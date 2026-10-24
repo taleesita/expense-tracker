@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.63.1-oct24';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.63.2-oct24';  // visible in UI so we can confirm which code is live
         // Google Identity Services (GIS) OAuth client — fetches the Sheets/Drive access token DIRECTLY,
         // bypassing Firebase's hidden auth frame that some browsers (e.g. Arc) block with
         // "operation-not-supported-in-this-environment". Firebase still handles identity (who you are).
@@ -3295,7 +3295,7 @@
                         {isCredited ? (
                             <div className="flex flex-col items-end leading-tight">
                                 <span className="text-[11px] text-gray-400 line-through">-${fmt(expense.amount)}</span>
-                                <span className="font-semibold text-sm text-sky-600">{netAfterCredit > 0 ? '-$' + fmt(netAfterCredit) : '$0.00'} ✈️</span>
+                                <span className="font-semibold text-sm text-red-600">{netAfterCredit > 0 ? '-$' + fmt(netAfterCredit) : '$0.00'} ✈️</span>
                             </div>
                         ) : (
                             <span className={`font-semibold text-sm ${expense.reconcileStatus === 'missing' ? 'text-gray-300 line-through' : isPaymentOrTransfer ? 'text-gray-500' : isInflow ? 'text-green-600' : 'text-red-600'}`}>
@@ -5374,7 +5374,7 @@
                         {credited ? (
                             <div className="flex flex-col items-end leading-tight">
                                 <span className="text-[11px] text-gray-400 line-through">-${fmt(expense.amount)}</span>
-                                <span className="font-semibold text-sm text-sky-600">{Math.max(0, (parseFloat(expense.amount) || 0) - (parseFloat(expense.travelCredit) || 0)) > 0 ? '-$' + fmt(Math.max(0, (parseFloat(expense.amount) || 0) - (parseFloat(expense.travelCredit) || 0))) : '$0.00'}</span>
+                                <span className="font-semibold text-sm text-red-600">{Math.max(0, (parseFloat(expense.amount) || 0) - (parseFloat(expense.travelCredit) || 0)) > 0 ? '-$' + fmt(Math.max(0, (parseFloat(expense.amount) || 0) - (parseFloat(expense.travelCredit) || 0))) : '$0.00'}</span>
                             </div>
                         ) : (
                             <span className={`font-semibold text-sm ${isPaymentOrTransfer ? 'text-gray-500' : isInflow ? 'text-green-600' : 'text-red-600'}`}>
