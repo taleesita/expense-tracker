@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.63.2-oct24';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.63.3-oct24';  // visible in UI so we can confirm which code is live
         // Google Identity Services (GIS) OAuth client — fetches the Sheets/Drive access token DIRECTLY,
         // bypassing Firebase's hidden auth frame that some browsers (e.g. Arc) block with
         // "operation-not-supported-in-this-environment". Firebase still handles identity (who you are).
@@ -1425,6 +1425,11 @@
                     fee: e.fee, txnType: e.txnType, isCredit: e.isCredit,
                     _balanceOnly: e._balanceOnly,
                     _splitGroup: e._splitGroup, _splitIndex: e._splitIndex, _splitTotal: e._splitTotal,
+                    // Cache reconcile + travel-credit state so a cold load doesn't briefly show everything
+                    // as unreconciled / uncredited before the live fetch lands.
+                    reconciled: e.reconciled, reconcileStatus: e.reconcileStatus,
+                    reconciledLocked: e.reconciledLocked, reconciledAt: e.reconciledAt,
+                    travelCredit: e.travelCredit,
                 }));
                 localStorage.setItem(EXPENSES_CACHE_KEY, JSON.stringify(slim));
             } catch {}
@@ -1451,7 +1456,7 @@
                 if (!silent) setLoading(true);
                 try {
                     const resp = await fetch(
-                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A:K`,
+                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A:L`,
                         { headers: { 'Authorization': `Bearer ${token}` } }
                     );
                     if (!resp.ok) {
