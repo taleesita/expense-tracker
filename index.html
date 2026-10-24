@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.62.0-oct23';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.63.0-oct24';  // visible in UI so we can confirm which code is live
         // Google Identity Services (GIS) OAuth client — fetches the Sheets/Drive access token DIRECTLY,
         // bypassing Firebase's hidden auth frame that some browsers (e.g. Arc) block with
         // "operation-not-supported-in-this-environment". Firebase still handles identity (who you are).
@@ -658,7 +658,8 @@
                 const dep = parseFloat(e.rawDeposit) || 0;
                 const chg = parseFloat(e.rawCharge) || 0;
                 const fee = parseFloat(e.fee) || 0;
-                return sum + dep - chg - fee;
+                const tc = parseFloat(e.travelCredit) || 0; // statement credit offsets the charge
+                return sum + dep - chg - fee + tc;
             }, 0);
         };
 
@@ -1536,6 +1537,7 @@
                             })(),
                             reconciledLocked: (row[9] || '').trim().toUpperCase() === 'L',
                             reconciledAt: (row[10] || '').trim(),       // K: Reconciliation Status - Time
+                            travelCredit: parseNum(row[11]) || 0,        // L: Travel Credit amount applied to this charge
                             notes: '',
                             person: '',
                             _balanceOnly: !hasTimestamp,  // rows without timestamp: include in balance calc but hide from UI
@@ -1742,6 +1744,7 @@
 
                     console.log('[appendExpense] DONE — refreshing list...');
                     if (!skipRefresh) await fetchExpenses(true);
+                    return newRowNum;
                 } catch (err) {
                     console.error('[appendExpense] FAILED:', err.message || err);
                     throw err;
@@ -1778,6 +1781,21 @@
                         const errBody = await updateResp.text();
                         console.error('Sheet update failed:', updateResp.status, errBody);
                         throw new Error(updateResp.status === 401 ? 'Google connection expired — tap Reconnect, then try again.' : `Update failed (${updateResp.status}). Please try again.`);
+                    }
+                    // Travel credit lives in column L — written separately so we never clobber reconcile (J/K).
+                    // Only charges can carry a travel credit; inflows clear it.
+                    {
+                        const tcVal = (!isInflow && expense.travelCredit) ? expense.travelCredit : '';
+                        try {
+                            await fetch(
+                                `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!L${rowIndex}?valueInputOption=USER_ENTERED`,
+                                {
+                                    method: 'PUT',
+                                    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ values: [[tcVal]] })
+                                }
+                            );
+                        } catch (tcErr) { console.warn('Travel credit (col L) write failed:', tcErr?.message || tcErr); }
                     }
                     await fetchExpenses(true);
                 } catch (err) {
@@ -1908,6 +1926,24 @@
                 }
             }, [token]);
 
+            // Fast single-cell write for the Travel Credit amount (column L).
+            // value: a number (credit applied) or '' to clear.
+            const writeTravelCreditCell = useCallback(async (rowIndex, value) => {
+                if (!token) throw new Error('Google connection expired — tap Reconnect, then try again.');
+                const resp = await fetch(
+                    `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!L${rowIndex}?valueInputOption=USER_ENTERED`,
+                    {
+                        method: 'PUT',
+                        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ values: [[(value === '' || value == null) ? '' : value]] })
+                    }
+                );
+                if (!resp.ok) {
+                    console.error('Travel credit write failed:', resp.status);
+                    throw new Error(resp.status === 401 ? 'Google connection expired' : `Write failed (${resp.status})`);
+                }
+            }, [token]);
+
             return {
                 expenses,
                 setExpenses,
@@ -1919,6 +1955,7 @@
                 deleteExpense,
                 writeReconcileCell,
                 batchWriteReconcile,
+                writeTravelCreditCell,
                 apiError
             };
         };
@@ -3193,6 +3230,9 @@
             const account = getAccountById(expense.account);
             const isPaymentOrTransfer = expense.category === 'card_payment' || expense.category === 'transfer';
             const isInflow = !isPaymentOrTransfer && (expense.txnType === 'deposit' || expense.txnType === 'credit_refund');
+            const tcAmt = parseFloat(expense.travelCredit) || 0;
+            const isCredited = !isPaymentOrTransfer && !isInflow && tcAmt > 0;
+            const netAfterCredit = Math.max(0, (parseFloat(expense.amount) || 0) - tcAmt);
 
             return (
                 <>
@@ -3219,6 +3259,9 @@
                             )}
                             {!isPaymentOrTransfer && expense.txnType === 'credit_refund' && (
                                 <span className="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded flex-shrink-0 leading-none">Refund</span>
+                            )}
+                            {isCredited && (
+                                <span className="text-[10px] bg-sky-100 text-sky-700 px-1.5 py-0.5 rounded flex-shrink-0 leading-none" title={`Travel credit: $${fmt(tcAmt)}`}>✈️ credit</span>
                             )}
                         </div>
                         <div className="text-[11px] text-gray-400 flex items-center gap-1.5 mt-0.5">
@@ -3249,9 +3292,16 @@
                         )}
                     </div>
                     <div className="text-right flex-shrink-0">
-                        <span className={`font-semibold text-sm ${expense.reconcileStatus === 'missing' ? 'text-gray-300 line-through' : isPaymentOrTransfer ? 'text-gray-500' : isInflow ? 'text-green-600' : 'text-red-600'}`}>
-                            {isPaymentOrTransfer ? '' : isInflow ? '+' : '-'}${fmt(expense.amount)}
-                        </span>
+                        {isCredited ? (
+                            <div className="flex flex-col items-end leading-tight">
+                                <span className="text-[11px] text-gray-400 line-through">-${fmt(expense.amount)}</span>
+                                <span className="font-semibold text-sm text-sky-600">{netAfterCredit > 0 ? '-$' + fmt(netAfterCredit) : '$0.00'} ✈️</span>
+                            </div>
+                        ) : (
+                            <span className={`font-semibold text-sm ${expense.reconcileStatus === 'missing' ? 'text-gray-300 line-through' : isPaymentOrTransfer ? 'text-gray-500' : isInflow ? 'text-green-600' : 'text-red-600'}`}>
+                                {isPaymentOrTransfer ? '' : isInflow ? '+' : '-'}${fmt(expense.amount)}
+                            </span>
+                        )}
                     </div>
                     {(() => {
                         if (!showReconcile) return null;
@@ -3501,6 +3551,9 @@
             const [notes, setNotes] = useState('');
             const [receipt, setReceipt] = useState('');
             const [txnType, setTxnType] = useState('charge');
+            // Travel credit: when applied, the amount offsets this charge (defaults to the full charge).
+            const [tcApplied, setTcApplied] = useState(false);
+            const [travelCredit, setTravelCredit] = useState('');
             const [originalCurrency, setOriginalCurrency] = useState('USD');
             // Dual-entry state for card payments / transfers
             const [secondaryAccount, setSecondaryAccount] = useState('');
@@ -3529,6 +3582,8 @@
                     setNotes(editExpense.notes || '');
                     setReceipt(editExpense.receipt || '');
                     setTxnType(editExpense.txnType || 'charge');
+                    setTcApplied((parseFloat(editExpense.travelCredit) || 0) > 0);
+                    setTravelCredit((parseFloat(editExpense.travelCredit) || 0) > 0 ? String(editExpense.travelCredit) : '');
                     setOriginalCurrency(editExpense.originalCurrency || 'USD');
                     setOriginalAmount(editExpense.originalAmount?.toString() || '');
                 } else if (editExpense?._prefill && isOpen) {
@@ -3541,6 +3596,8 @@
                     setNotes('');
                     setReceipt(editExpense.receipt || '');
                     setTxnType(editExpense.txnType || 'charge');
+                    setTcApplied(false);
+                    setTravelCredit('');
                     setOriginalCurrency(editExpense.originalCurrency || 'USD');
                     setOriginalAmount(editExpense.originalAmount?.toString() || '');
                     setSecondaryAccount('');
@@ -3555,6 +3612,8 @@
                     setNotes('');
                     setReceipt('');
                     setTxnType('charge');
+                    setTcApplied(false);
+                    setTravelCredit('');
                     setOriginalCurrency('USD');
                     setOriginalAmount('');
                     setSecondaryAccount('');
@@ -4073,6 +4132,8 @@
                     originalAmount: originalAmount ? parseFloat(originalAmount) : parseFloat(amount),
                     person: userName,
                     date,
+                    // Travel credit (charges only): the applied amount, or '' to clear
+                    travelCredit: (txnType === 'charge' && tcApplied) ? (parseFloat(travelCredit) || parseFloat(amount) || 0) : '',
                     // Clear raw fields so updated values are written via getSheet*Name() helpers
                     accountRaw: null,
                     categoryRaw: null,
@@ -4551,6 +4612,44 @@
                                 onChange={(e) => setNotes(e.target.value)}
                                 className="w-full border rounded-lg px-3 py-2 text-sm"
                             />
+
+                            {/* Travel credit — charges only. Marks this charge as covered by the annual travel credit. */}
+                            {txnType === 'charge' && !isDualEntry && (
+                                <div className={`rounded-lg border px-3 py-2 ${tcApplied ? 'border-sky-300 bg-sky-50' : 'border-gray-200'}`}>
+                                    <label className="flex items-center gap-2 cursor-pointer select-none">
+                                        <input
+                                            type="checkbox"
+                                            checked={tcApplied}
+                                            onChange={(e) => {
+                                                const on = e.target.checked;
+                                                setTcApplied(on);
+                                                if (on && !travelCredit) setTravelCredit(amount || '');
+                                                if (!on) setTravelCredit('');
+                                            }}
+                                            className="w-4 h-4 accent-sky-600"
+                                        />
+                                        <span className="text-sm font-medium text-gray-700">✈️ Travel credit applied</span>
+                                    </label>
+                                    {tcApplied && (
+                                        <div className="mt-2 flex items-center gap-2">
+                                            <span className="text-xs text-gray-500">Credit amount</span>
+                                            <div className="flex items-center gap-1">
+                                                <span className="text-sm text-sky-700">$</span>
+                                                <input
+                                                    type="number"
+                                                    inputMode="decimal"
+                                                    step="0.01"
+                                                    placeholder={amount || '0.00'}
+                                                    value={travelCredit}
+                                                    onChange={(e) => setTravelCredit(e.target.value)}
+                                                    className="w-24 border rounded-lg px-2 py-1 text-sm text-right"
+                                                />
+                                            </div>
+                                            <span className="text-[11px] text-gray-400">defaults to full charge · nets toward $0</span>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
 
                             {receipt && !inboxMode && (() => {
                                 // Extract Google Drive file ID for thumbnail
@@ -5221,7 +5320,85 @@
             );
         };
 
-        const AccountTabView = ({ accountId, expenses, onUpdate, onReconcile, onDelete, onEdit, onSplit, onLockItems, onClearUnlocked, onBatchUpdate, deletingRowIndex }) => {
+        // Row shown in "✈️ Credits" mode — a lightweight read-only row with a travel-credit checkbox + editable amount.
+        const TravelCreditRow = ({ expense, onTravelCredit, showDateSeparator, dateSeparatorLabel, isSplitHeader }) => {
+            if (isSplitHeader || expense._isSplitHeader) {
+                const children = expense._children || [];
+                return (
+                    <>
+                    {showDateSeparator && (
+                        <div className="bg-gray-50 px-3 py-1.5 border-b-2 border-gray-200">
+                            <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">{dateSeparatorLabel}</span>
+                        </div>
+                    )}
+                    {children.map(child => (
+                        <TravelCreditRow key={child.rowIndex} expense={child} onTravelCredit={onTravelCredit} showDateSeparator={false} dateSeparatorLabel="" isSplitHeader={false} />
+                    ))}
+                    </>
+                );
+            }
+            const category = getCategoryById(expense.category);
+            const isPaymentOrTransfer = expense.category === 'card_payment' || expense.category === 'transfer';
+            const isInflow = !isPaymentOrTransfer && (expense.txnType === 'deposit' || expense.txnType === 'credit_refund');
+            const eligible = !isPaymentOrTransfer && !isInflow && expense.txnType === 'charge';
+            const credited = (parseFloat(expense.travelCredit) || 0) > 0;
+            const [localAmt, setLocalAmt] = useState(credited ? String(expense.travelCredit) : '');
+            React.useEffect(() => { setLocalAmt(credited ? String(expense.travelCredit) : ''); }, [expense.travelCredit, expense.rowIndex]);
+
+            const toggle = () => {
+                if (!eligible) return;
+                if (credited) onTravelCredit(expense.rowIndex, '');
+                else onTravelCredit(expense.rowIndex, expense.amount);
+            };
+            const commitAmt = () => {
+                const v = parseFloat(localAmt);
+                if (!localAmt || isNaN(v) || v <= 0) onTravelCredit(expense.rowIndex, '');
+                else onTravelCredit(expense.rowIndex, v);
+            };
+            return (
+                <>
+                {showDateSeparator && (
+                    <div className="bg-gray-50 px-3 py-1.5 border-b-2 border-gray-200">
+                        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">{dateSeparatorLabel}</span>
+                    </div>
+                )}
+                <div className={`flex items-center gap-2 py-2 border-b border-gray-100 px-3 ${credited ? 'bg-sky-50' : ''}`}>
+                    <div className="text-lg flex-shrink-0">{category?.emoji || '📦'}</div>
+                    <div className="flex-1 min-w-0">
+                        <div className="text-sm font-medium truncate">{expense.merchant}</div>
+                        <div className="text-xs text-gray-400">
+                            {isPaymentOrTransfer ? '' : isInflow ? '+$' : '$'}{(parseFloat(expense.amount) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            {credited && <span className="text-sky-600"> → ${Math.max(0, (parseFloat(expense.amount) || 0) - (parseFloat(expense.travelCredit) || 0)).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>}
+                        </div>
+                    </div>
+                    {eligible ? (
+                        <div className="flex items-center gap-1.5 flex-shrink-0">
+                            {credited && (
+                                <div className="flex items-center gap-0.5">
+                                    <span className="text-xs text-sky-600">✈️ $</span>
+                                    <input
+                                        type="number" inputMode="decimal" step="0.01"
+                                        value={localAmt}
+                                        onChange={(e) => setLocalAmt(e.target.value)}
+                                        onBlur={commitAmt}
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="w-16 text-sm font-semibold text-right text-sky-700 bg-transparent border-b border-dashed border-sky-400 outline-none px-0 py-0.5"
+                                    />
+                                </div>
+                            )}
+                            <button onClick={(e) => { e.stopPropagation(); toggle(); }} className="ml-1 flex-shrink-0" title="Travel credit applied">
+                                {credited ? <CheckCircleIcon size={20} className="text-sky-600" /> : <CircleIcon size={20} className="text-gray-300" />}
+                            </button>
+                        </div>
+                    ) : (
+                        <span className="text-[10px] text-gray-300 flex-shrink-0 pr-1 italic">n/a</span>
+                    )}
+                </div>
+                </>
+            );
+        };
+
+        const AccountTabView = ({ accountId, expenses, onUpdate, onReconcile, onDelete, onEdit, onSplit, onLockItems, onClearUnlocked, onBatchUpdate, onTravelCredit, deletingRowIndex }) => {
             const account = getAccountById(accountId);
             const accountExpenses = expenses.filter(e => e.account === accountId);
             const displayExpenses = accountExpenses.filter(e => !e._balanceOnly); // exclude balance-only rows from UI
@@ -5255,6 +5432,15 @@
             const [pendingEdits, setPendingEdits] = useState({}); // { rowIndex: { merchant?, amount? } }
             const [batchSaving, setBatchSaving] = useState(false);
             const pendingCount = Object.keys(pendingEdits).length;
+            // Travel-credit tagging mode (reveals a checkbox per charge in the list)
+            const [tcMode, setTcMode] = useState(false);
+            const TC_CAP = 300;
+            const _tcYear = String(new Date().getFullYear());
+            const tcUsedThisYear = accountExpenses.reduce((s, e) => {
+                const d = parseDateToISO(e.date || e.timestamp) || '';
+                return ((parseFloat(e.travelCredit) || 0) > 0 && d.slice(0, 4) === _tcYear) ? s + (parseFloat(e.travelCredit) || 0) : s;
+            }, 0);
+            const tcCount = accountExpenses.filter(e => (parseFloat(e.travelCredit) || 0) > 0).length;
 
             const handleEditField = (rowIndex, field, value) => {
                 setPendingEdits(prev => {
@@ -5635,7 +5821,7 @@
                         </div>
                         <div className="flex gap-1.5">
                         <button
-                            onClick={() => editMode ? cancelEditMode() : setEditMode(true)}
+                            onClick={() => editMode ? cancelEditMode() : (setTcMode(false), setEditMode(true))}
                             className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
                                 editMode
                                     ? 'bg-indigo-100 text-indigo-700 border border-indigo-300'
@@ -5643,6 +5829,16 @@
                             }`}
                         >
                             {editMode ? 'Cancel edit' : '✏️ Edit'}
+                        </button>
+                        <button
+                            onClick={() => tcMode ? setTcMode(false) : (cancelEditMode(), setTcMode(true))}
+                            className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${
+                                tcMode
+                                    ? 'bg-sky-100 text-sky-700 border border-sky-300'
+                                    : 'bg-gray-100 text-gray-500 border border-gray-200 hover:bg-gray-200'
+                            }`}
+                        >
+                            {tcMode ? 'Done ✈️' : '✈️ Credits'}
                         </button>
                         <div className="relative">
                             <button
@@ -5680,6 +5876,30 @@
                         </div>
                     </div>
 
+                    {(tcMode || tcCount > 0) && (
+                        <div className="bg-sky-50 border border-sky-200 rounded-lg px-3 py-2">
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                    <span className="text-base">✈️</span>
+                                    <span className="text-xs font-semibold text-sky-800">Travel credit used · {_tcYear}</span>
+                                </div>
+                                <div className="text-xs text-sky-700">
+                                    <span className="font-bold">${tcUsedThisYear.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                    {' '}of ${TC_CAP}.00
+                                    {tcUsedThisYear > TC_CAP
+                                        ? <span className="text-amber-600 font-medium"> · over cap</span>
+                                        : <span className="text-sky-500"> · ${(TC_CAP - tcUsedThisYear).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} left</span>}
+                                </div>
+                            </div>
+                            <div className="mt-1.5 h-1.5 bg-sky-100 rounded-full overflow-hidden">
+                                <div className={`h-full rounded-full ${tcUsedThisYear > TC_CAP ? 'bg-amber-500' : 'bg-sky-500'}`} style={{ width: Math.min(100, (tcUsedThisYear / TC_CAP) * 100) + '%' }} />
+                            </div>
+                            {tcMode && (
+                                <div className="mt-1.5 text-[11px] text-sky-600">Tap the ○ on a charge to mark it covered by the travel credit (defaults to the full amount; tap the number to adjust).</div>
+                            )}
+                        </div>
+                    )}
+
                     <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
                         {filteredExpenses.length === 0 ? (
                             <div className="p-4 text-center text-gray-500">No expenses</div>
@@ -5708,7 +5928,16 @@
                                             }
                                         }
                                         elements.push(
-                                            editMode ? (
+                                            tcMode ? (
+                                            <TravelCreditRow
+                                                key={item._isSplitHeader ? item._splitGroupKey : item.rowIndex}
+                                                expense={item}
+                                                onTravelCredit={onTravelCredit}
+                                                showDateSeparator={idx === 0 || getDateKey(item, sortMode) !== getDateKey(arr[idx - 1], sortMode)}
+                                                dateSeparatorLabel={formatDateLabel(item, sortMode)}
+                                                isSplitHeader={!!item._isSplitHeader}
+                                            />
+                                            ) : editMode ? (
                                             <EditableExpenseRow
                                                 key={item._isSplitHeader ? item._splitGroupKey : item.rowIndex}
                                                 expense={item._isSplitHeader ? item : item}
@@ -7767,7 +7996,7 @@
             // Keep a ref to the latest token so async callbacks always use the freshest value
             const tokenRef = useRef(token);
             useEffect(() => { tokenRef.current = token; }, [token]);
-            const { expenses, setExpenses, loading, fetchExpenses, appendExpense, updateExpense, batchUpdateExpenses, deleteExpense, writeReconcileCell, batchWriteReconcile, apiError } = useGoogleSheets(token);
+            const { expenses, setExpenses, loading, fetchExpenses, appendExpense, updateExpense, batchUpdateExpenses, deleteExpense, writeReconcileCell, batchWriteReconcile, writeTravelCreditCell, apiError } = useGoogleSheets(token);
             const { push: pushUndo, undo: undoAction, canUndo } = useUndoStack();
             const { inboxItems, inboxLoading, fetchInbox, markInboxItem, ocrCacheRef, inFlightRowsRef } = useInbox(token);
 
@@ -8354,7 +8583,8 @@
 
                     // Queue the sheet write — confirmation shows when save completes
                     enqueueBgSave(expenseData.merchant || 'expense', async () => {
-                        await appendExpense(expenseData);
+                        const _rn = await appendExpense(expenseData);
+                        if (_rn && expenseData.travelCredit) { try { await writeTravelCreditCell(_rn, expenseData.travelCredit); } catch (e) { console.warn('TC write (inbox) failed:', e?.message); } }
                         await markInboxItem(reviewItem.rowIndex, 'done');
                         inFlightRowsRef.current.delete(reviewItem.rowIndex);
                         setConfirmationData({
@@ -8399,7 +8629,8 @@
                     });
                 } else {
                     enqueueBgSave(expenseData.merchant || 'expense', async () => {
-                        await appendExpense(expenseData);
+                        const _rn = await appendExpense(expenseData);
+                        if (_rn && expenseData.travelCredit) { try { await writeTravelCreditCell(_rn, expenseData.travelCredit); } catch (e) { console.warn('TC write (add) failed:', e?.message); } }
                         setConfirmationData({
                             isDual: false,
                             isNew: true,
@@ -8541,6 +8772,22 @@
                         reconciledAt: prevReconciledAt,
                     } : e));
                     setToast('Reconcile failed — ' + (err.message || 'try again'));
+                    setTimeout(() => setToast(''), 4000);
+                });
+            };
+
+            // Toggle / set a charge's travel credit from the list view (column L). value: number or '' to clear.
+            const handleTravelCredit = (rowIndex, value) => {
+                const expense = expenses.find(e => e.rowIndex === rowIndex);
+                if (!expense) return;
+                const prev = expense.travelCredit || 0;
+                const next = (value === '' || value == null) ? 0 : (parseFloat(value) || 0);
+                // Optimistic update — instant UI + live balance netting
+                setExpenses(p => p.map(e => e.rowIndex === rowIndex ? { ...e, travelCredit: next } : e));
+                writeTravelCreditCell(rowIndex, next === 0 ? '' : next).catch(err => {
+                    console.error('Travel credit write failed, reverting:', err);
+                    setExpenses(p => p.map(e => e.rowIndex === rowIndex ? { ...e, travelCredit: prev } : e));
+                    setToast('Travel credit save failed — ' + (err.message || 'try again'));
                     setTimeout(() => setToast(''), 4000);
                 });
             };
@@ -8855,6 +9102,7 @@
                                             onLockItems={handleLockItems}
                                             onClearUnlocked={handleClearUnlocked}
                                             onBatchUpdate={batchUpdateExpenses}
+                                            onTravelCredit={handleTravelCredit}
                                             deletingRowIndex={deletingRowIndex}
                                         />
                                     </div>
@@ -8884,6 +9132,7 @@
                                             onLockItems={handleLockItems}
                                             onClearUnlocked={handleClearUnlocked}
                                             onBatchUpdate={batchUpdateExpenses}
+                                            onTravelCredit={handleTravelCredit}
                                             deletingRowIndex={deletingRowIndex}
                                         />
                                     </div>
