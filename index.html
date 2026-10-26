@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.63.5-oct24';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.63.8-oct25';  // visible in UI so we can confirm which code is live
         // Google Identity Services (GIS) OAuth client — fetches the Sheets/Drive access token DIRECTLY,
         // bypassing Firebase's hidden auth frame that some browsers (e.g. Arc) block with
         // "operation-not-supported-in-this-environment". Firebase still handles identity (who you are).
@@ -3286,9 +3286,6 @@
                             {!isPaymentOrTransfer && expense.txnType === 'credit_refund' && (
                                 <span className="text-[10px] bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded flex-shrink-0 leading-none">Refund</span>
                             )}
-                            {isCredited && (
-                                <span className="text-[10px] bg-sky-100 text-sky-700 px-1.5 py-0.5 rounded flex-shrink-0 leading-none" title={`Travel credit: $${fmt(tcAmt)}`}>✈️ credit</span>
-                            )}
                         </div>
                         <div className="text-[11px] text-gray-400 flex items-center gap-1.5 mt-0.5">
                             {!hideAccount && account && <span className="font-medium" style={{ color: account.color }}>{account.shortName}</span>}
@@ -4556,6 +4553,12 @@
                                                     <option key={curr} value={curr}>{curr}</option>
                                                 ))}
                                             </select>
+                                            {txnType === 'charge' && (
+                                                <button type="button" title="Travel credit applied"
+                                                    onClick={() => { const on = !tcApplied; setTcApplied(on); if (on && !travelCredit) setTravelCredit(amount || ''); if (!on) setTravelCredit(''); }}
+                                                    className={`shrink-0 px-3 py-2.5 rounded-lg text-sm font-medium border transition-colors ${tcApplied ? 'bg-sky-100 text-sky-700 border-sky-300' : 'bg-white text-gray-500 border-gray-300 hover:bg-gray-50'}`}
+                                                >✈️ credit</button>
+                                            )}
                                         </div>
                                     ) : (
                                         <>
@@ -4595,11 +4598,30 @@
                                                         <option key={curr} value={curr}>{curr}</option>
                                                     ))}
                                                 </select>
+                                                {txnType === 'charge' && (
+                                                    <button type="button" title="Travel credit applied"
+                                                        onClick={() => { const on = !tcApplied; setTcApplied(on); if (on && !travelCredit) setTravelCredit(amount || ''); if (!on) setTravelCredit(''); }}
+                                                        className={`shrink-0 px-3 py-2.5 rounded-lg text-sm font-medium border transition-colors ${tcApplied ? 'bg-sky-100 text-sky-700 border-sky-300' : 'bg-white text-gray-500 border-gray-300 hover:bg-gray-50'}`}
+                                                    >✈️ credit</button>
+                                                )}
                                             </div>
                                             {amount && originalAmount && (
                                                 <div className="text-xs text-gray-400 text-right -mt-1">≈ ${parseFloat(amount).toFixed(2)} USD</div>
                                             )}
                                         </>
+                                    )}
+
+                                    {txnType === 'charge' && tcApplied && (
+                                        <div className="flex items-center gap-2 text-sm -mt-1">
+                                            <span className="text-gray-500">✈️ Credit covers</span>
+                                            <div className="flex items-center gap-0.5">
+                                                <span className="text-sky-700">$</span>
+                                                <input type="number" inputMode="decimal" step="0.01" value={travelCredit} placeholder={amount || '0.00'}
+                                                    onChange={(e) => setTravelCredit(e.target.value)}
+                                                    className="w-20 border rounded-lg px-2 py-1 text-right text-sky-700" />
+                                            </div>
+                                            <span className="text-[11px] text-gray-400">nets to $0</span>
+                                        </div>
                                     )}
                                 </>
                             )}
@@ -4638,44 +4660,6 @@
                                 onChange={(e) => setNotes(e.target.value)}
                                 className="w-full border rounded-lg px-3 py-2 text-sm"
                             />
-
-                            {/* Travel credit — charges only. Marks this charge as covered by the annual travel credit. */}
-                            {txnType === 'charge' && !isDualEntry && (
-                                <div className={`rounded-lg border px-3 py-2 ${tcApplied ? 'border-sky-300 bg-sky-50' : 'border-gray-200'}`}>
-                                    <label className="flex items-center gap-2 cursor-pointer select-none">
-                                        <input
-                                            type="checkbox"
-                                            checked={tcApplied}
-                                            onChange={(e) => {
-                                                const on = e.target.checked;
-                                                setTcApplied(on);
-                                                if (on && !travelCredit) setTravelCredit(amount || '');
-                                                if (!on) setTravelCredit('');
-                                            }}
-                                            className="w-4 h-4 accent-sky-600"
-                                        />
-                                        <span className="text-sm font-medium text-gray-700">✈️ Travel credit applied</span>
-                                    </label>
-                                    {tcApplied && (
-                                        <div className="mt-2 flex items-center gap-2">
-                                            <span className="text-xs text-gray-500">Credit amount</span>
-                                            <div className="flex items-center gap-1">
-                                                <span className="text-sm text-sky-700">$</span>
-                                                <input
-                                                    type="number"
-                                                    inputMode="decimal"
-                                                    step="0.01"
-                                                    placeholder={amount || '0.00'}
-                                                    value={travelCredit}
-                                                    onChange={(e) => setTravelCredit(e.target.value)}
-                                                    className="w-24 border rounded-lg px-2 py-1 text-sm text-right"
-                                                />
-                                            </div>
-                                            <span className="text-[11px] text-gray-400">defaults to full charge · nets toward $0</span>
-                                        </div>
-                                    )}
-                                </div>
-                            )}
 
                             {receipt && !inboxMode && (() => {
                                 // Extract Google Drive file ID for thumbnail
