@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.65.0-nov2';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.66.0-nov2';  // visible in UI so we can confirm which code is live
         // Google Identity Services (GIS) OAuth client — fetches the Sheets/Drive access token DIRECTLY,
         // bypassing Firebase's hidden auth frame that some browsers (e.g. Arc) block with
         // "operation-not-supported-in-this-environment". Firebase still handles identity (who you are).
@@ -8070,7 +8070,7 @@
                 setLoading(true); setErr(null);
                 try {
                     const resp = await fetch(
-                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(BENEFITS_TAB)}!A2:J?valueRenderOption=FORMATTED_VALUE`,
+                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(BENEFITS_TAB)}!A2:K?valueRenderOption=FORMATTED_VALUE`,
                         { headers: { 'Authorization': `Bearer ${token}` } }
                     );
                     if (!resp.ok) {
@@ -8084,30 +8084,99 @@
             }, [token]);
             useEffect(() => { load(); }, [load]);
 
+            const [editing, setEditing] = useState(null); // rowNum being edited
+            const [editVal, setEditVal] = useState('');
+
+            // Brand color per card (loose name match) for the section-divider header.
+            const cardColor = (name) => {
+                const n = (name || '').toLowerCase();
+                if (n.includes('reserve')) return '#2563EB';
+                if (n.includes('united')) return '#4F46E5';
+                if (n.includes('venture') || n.includes('capital') || n.includes('cap1')) return '#DC2626';
+                if (n.includes('amazon')) return '#D97706';
+                return '#475569';
+            };
+
+            // Write the Used amount (column H) for one benefit row, optimistic + revert-on-fail.
+            const saveUsed = async (b, raw) => {
+                const val = raw === '' ? '' : (parseFloat(raw) || 0);
+                setRows(prev => prev.map((row, i) => (i + 2 === b.rowNum) ? (() => { const c = [...row]; while (c.length < 8) c.push(''); c[7] = (val === '' ? '' : String(val)); return c; })() : row));
+                setEditing(null);
+                try {
+                    const resp = await fetch(
+                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(BENEFITS_TAB)}!H${b.rowNum}?valueInputOption=USER_ENTERED`,
+                        { method: 'PUT', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ values: [[val === '' ? '' : val]] }) }
+                    );
+                    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                } catch (e) { console.error('Benefit used write failed, reloading:', e); load(); }
+            };
+
             const now = new Date();
-            const benefits = (rows || []).map(r => ({
+            const benefits = (rows || []).map((r, i) => ({
+                rowNum: i + 2,
                 card: (r[0] || '').trim(), name: (r[1] || '').trim(), cap: _benNum(r[2]),
                 unit: ((r[3] || '$').trim() || '$'), period: (r[4] || '').trim(), basis: (r[5] || '').trim(),
                 anniv: (r[6] || '').trim(), usedRaw: _benNum(r[7]),
                 active: ((r[8] || 'Y').trim().toUpperCase() !== 'N'), notes: (r[9] || '').trim(),
+                match: (r[10] || '').trim(),
             })).filter(b => b.card && b.name && b.active);
+
+            const toLocalISO = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+            const acctForCard = (name) => {
+                const n = (name || '').toLowerCase();
+                if (n.includes('reserve')) return 'reserve_chase';
+                if (n.includes('united')) return 'united_chase';
+                if (n.includes('amazon')) return 'amazon_chase';
+                if (n.includes('venture') || n.includes('capital') || n.includes('cap1')) return 'cap1_cc';
+                return null;
+            };
+            // Sum charges matching a benefit's keyword(s) within [startD, endD]. Returns {sum,count} or null.
+            const sumMatches = (b, startD, endD) => {
+                const kws = (b.match || '').toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
+                if (!kws.length) return null;
+                const acct = acctForCard(b.card);
+                const s = toLocalISO(startD), e = toLocalISO(endD);
+                let count = 0;
+                const sum = (expenses || []).filter(x => {
+                    if (acct && x.account !== acct) return false;
+                    const isCharge = !(x.txnType === 'deposit' || x.txnType === 'credit_refund') && (parseFloat(x.rawCharge) || 0) > 0;
+                    if (!isCharge) return false;
+                    const d = parseDateToISO(x.date || x.timestamp) || '';
+                    if (!(d >= s && d <= e)) return false;
+                    const mer = (x.merchant || '').toLowerCase();
+                    return kws.some(k => mer.includes(k));
+                }).reduce((t, x) => { count++; return t + (parseFloat(x.rawCharge) || parseFloat(x.amount) || 0); }, 0);
+                return { sum, count };
+            };
 
             benefits.forEach(b => {
                 b.win = _benWindow(b.period, b.basis, b.anniv, now);
-                let used = b.usedRaw; b.auto = false;
-                // Auto-fill the Sapphire Reserve travel credit from charges tagged in the app.
+                const isMonthly = (b.period || '').toLowerCase().includes('month');
+                let used = b.usedRaw; b.auto = false; b.matchCount = 0;
+                // Reserve travel credit → from charges tagged in the app (column L).
                 if (/reserve/i.test(b.card) && /travel\s*credit/i.test(b.name) && b.win && b.win.start) {
-                    const toLocalISO = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
                     const s = toLocalISO(b.win.start), e = toLocalISO(b.win.end);
-                    used = (expenses || []).filter(x => x.account === 'reserve_chase' && (parseFloat(x.travelCredit) || 0) > 0)
+                    const sum = (expenses || []).filter(x => x.account === 'reserve_chase' && (parseFloat(x.travelCredit) || 0) > 0)
                         .reduce((t, x) => { const d = parseDateToISO(x.date || x.timestamp) || ''; return (d >= s && d <= e) ? t + (parseFloat(x.travelCredit) || 0) : t; }, 0);
-                    b.auto = true;
+                    used = b.cap > 0 ? Math.min(sum, b.cap) : sum; b.auto = true; b.autoKind = 'tag';
+                } else if (b.match && b.win && b.win.start) {
+                    // Auto-match by merchant keyword within the current window.
+                    const m = sumMatches(b, b.win.start, b.win.end);
+                    if (m) { used = b.cap > 0 ? Math.min(m.sum, b.cap) : m.sum; b.matchCount = m.count; b.auto = true; b.autoKind = 'match'; }
                 }
                 b.used = used;
                 b.remaining = Math.max(0, b.cap - used);
                 b.pct = b.cap > 0 ? Math.min(100, (used / b.cap) * 100) : 0;
                 b.maxed = b.cap > 0 && used >= b.cap - 0.001;
                 b.atRisk = !b.maxed && b.remaining > 0 && b.win && !b.win.noWindow && !b.win.long && b.win.daysLeft != null && b.win.daysLeft <= 45;
+                // Monthly credits: also roll up the calendar-year total (auto-match only).
+                if (isMonthly && b.cap > 0) {
+                    b.annualCap = b.cap * 12;
+                    if (b.autoKind === 'match') {
+                        const ym = sumMatches(b, new Date(now.getFullYear(), 0, 1), new Date(now.getFullYear(), 11, 31));
+                        if (ym) { b.yearUsed = Math.min(b.annualCap, ym.sum); b.hasYear = true; }
+                    }
+                }
             });
 
             // Group by card (preserve first-seen order)
@@ -8150,11 +8219,12 @@
                     {cardOrder.map(card => {
                         const items = byCard[card];
                         const cardLeft = items.filter(b => b.unit === '$' && b.win && !b.win.long).reduce((t, b) => t + b.remaining, 0);
+                        const col = cardColor(card);
                         return (
                             <div key={card} className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
-                                <div className="flex items-center justify-between px-4 py-3 border-b border-gray-100 bg-gray-50">
-                                    <span className="font-semibold text-sm text-gray-800">{card}</span>
-                                    <span className="text-xs text-gray-500">${fmtN(cardLeft)} left</span>
+                                <div className="flex items-center justify-between px-4 py-3" style={{ backgroundColor: col, borderTopLeftRadius: 14, borderTopRightRadius: 14 }}>
+                                    <span className="font-bold text-base text-white tracking-tight">{card}</span>
+                                    <span className="text-xs font-semibold" style={{ color: 'rgba(255,255,255,0.92)' }}>${fmtN(cardLeft)} left</span>
                                 </div>
                                 <div className="px-4">
                                     {items.map((b, i) => {
@@ -8167,17 +8237,48 @@
                                                         {b.name}
                                                         {b.auto && <span className="ml-1.5 text-[10px] text-sky-600 font-normal align-middle">auto</span>}
                                                     </div>
-                                                    <div className="text-xs font-semibold text-gray-700 whitespace-nowrap flex-shrink-0">{usedStr}</div>
+                                                    {b.auto ? (
+                                                        <div className="text-xs font-semibold text-gray-700 whitespace-nowrap flex-shrink-0">{usedStr}</div>
+                                                    ) : editing === b.rowNum ? (
+                                                        <div className="flex items-center gap-1 flex-shrink-0">
+                                                            <span className="text-xs text-gray-500">{b.unit === '#' ? '#' : '$'}</span>
+                                                            <input autoFocus type="number" inputMode="decimal" step="0.01" value={editVal}
+                                                                onChange={(e) => setEditVal(e.target.value)}
+                                                                onKeyDown={(e) => { if (e.key === 'Enter') saveUsed(b, editVal); if (e.key === 'Escape') setEditing(null); }}
+                                                                className="w-14 border rounded px-1.5 py-0.5 text-xs text-right" />
+                                                            <span className="text-[11px] text-gray-400">/ {b.unit === '#' ? Math.round(b.cap) : '$' + fmtN(b.cap)}</span>
+                                                            <button onClick={() => saveUsed(b, b.cap)} className="text-[10px] text-sky-600 font-medium px-1">max</button>
+                                                            <button onClick={() => saveUsed(b, editVal)} className="text-sky-600 text-sm px-0.5" title="Save">✓</button>
+                                                            <button onClick={() => setEditing(null)} className="text-gray-400 text-sm px-0.5" title="Cancel">✕</button>
+                                                        </div>
+                                                    ) : (
+                                                        <button onClick={() => { setEditing(b.rowNum); setEditVal(b.used ? String(b.used) : ''); }}
+                                                            className="text-xs font-semibold text-gray-700 whitespace-nowrap flex-shrink-0 border-b border-dashed border-gray-300 hover:border-sky-400">{usedStr}</button>
+                                                    )}
                                                 </div>
                                                 <div className="mt-1.5 h-1.5 bg-gray-100 rounded-full overflow-hidden">
                                                     <div className={`h-full rounded-full ${barColor}`} style={{ width: b.pct + '%' }} />
                                                 </div>
                                                 <div className="mt-1 flex items-center justify-between gap-2">
-                                                    <span className="text-[11px] text-gray-400 truncate">{b.win.noWindow ? b.win.label : (b.win.label + (b.win.daysLeft != null && !b.win.long ? ` · ${b.win.daysLeft}d left` : ''))}</span>
+                                                    <span className="text-[11px] text-gray-400 truncate">
+                                                        {b.win.noWindow ? b.win.label : (b.win.label + (b.win.daysLeft != null && !b.win.long ? ` · ${b.win.daysLeft}d left` : ''))}
+                                                        {b.autoKind === 'match' && b.matchCount > 0 ? ` · ${b.matchCount} matched` : ''}
+                                                    </span>
                                                     {b.maxed ? <span className="text-[11px] font-medium text-green-600 flex-shrink-0">maxed ✓</span>
                                                         : b.atRisk ? <span className="text-[11px] font-medium text-amber-600 flex-shrink-0">${fmtN(b.remaining)} left</span>
                                                             : b.remaining > 0 && b.unit === '$' ? <span className="text-[11px] text-gray-400 flex-shrink-0">${fmtN(b.remaining)} left</span> : null}
                                                 </div>
+                                                {b.hasYear && (
+                                                    <div className="mt-1.5">
+                                                        <div className="flex items-center justify-between">
+                                                            <span className="text-[10px] text-gray-400">{now.getFullYear()} to date</span>
+                                                            <span className="text-[10px] font-medium text-gray-500">${fmtN(b.yearUsed)} / ${fmtN(b.annualCap)}</span>
+                                                        </div>
+                                                        <div className="mt-0.5 h-1 bg-gray-100 rounded-full overflow-hidden">
+                                                            <div className="h-full bg-gray-400 rounded-full" style={{ width: (b.annualCap > 0 ? Math.min(100, b.yearUsed / b.annualCap * 100) : 0) + '%' }} />
+                                                        </div>
+                                                    </div>
+                                                )}
                                                 {b.notes && <div className="text-[10px] text-gray-400 mt-0.5 leading-snug">{b.notes}</div>}
                                             </div>
                                         );
@@ -8187,7 +8288,7 @@
                         );
                     })}
 
-                    <p className="text-[11px] text-gray-400 px-1 pb-2">Edit caps, used amounts, and anniversary dates in the "{BENEFITS_TAB}" tab of your sheet. The Reserve travel credit marked “auto” fills from charges you tag in the app.</p>
+                    <p className="text-[11px] text-gray-400 px-1 pb-2">Tap any amount to record what you've used ("max" marks it fully used) — it saves to the "{BENEFITS_TAB}" tab. Edit caps, periods, and anniversary dates there too. The Reserve travel credit marked “auto” fills from charges you tag in the app.</p>
                 </div>
             );
         };
