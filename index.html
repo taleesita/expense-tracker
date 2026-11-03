@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.63.8-oct25';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.64.0-nov2';  // visible in UI so we can confirm which code is live
         // Google Identity Services (GIS) OAuth client — fetches the Sheets/Drive access token DIRECTLY,
         // bypassing Firebase's hidden auth frame that some browsers (e.g. Arc) block with
         // "operation-not-supported-in-this-environment". Firebase still handles identity (who you are).
@@ -8114,18 +8114,20 @@
                         const lockedQuarters = (() => { try { return JSON.parse(localStorage.getItem('qr_locked') || '[]'); } catch { return []; } })();
                         if (lockedQuarters.includes(prevQLockLabel)) return; // Already locked
 
-                        // Fetch header row from quarterly sheet to find the column
+                        // Fetch top rows from quarterly sheet to find the column
                         const resp = await fetch(
-                            'https://sheets.googleapis.com/v4/spreadsheets/' + QR_SHEET_ID + '/values/' + encodeURIComponent(QR_SHEET_TAB) + '!1:3?valueRenderOption=FORMATTED_VALUE',
+                            'https://sheets.googleapis.com/v4/spreadsheets/' + QR_SHEET_ID + '/values/' + encodeURIComponent(QR_SHEET_TAB) + '!1:8?valueRenderOption=FORMATTED_VALUE',
                             { headers: { 'Authorization': 'Bearer ' + token } }
                         );
                         if (!resp.ok) return;
                         const sheetData = await resp.json();
                         const rows = sheetData.values || [];
-                        if (rows.length < 2) return;
+                        if (rows.length < 3) return;
 
-                        // Look for the quarter's column in header — try multiple formats
-                        const headerRow = rows[0] || [];
+                        // Look for the quarter's column in header — try multiple formats.
+                        // The period headers live on ROW 2 (index 1); row 1 is blank. (Matches the
+                        // main quarterly parser — reading row 1 here was why Q3 never auto-cleared.)
+                        const headerRow = rows[1] || [];
                         const prevQ = qNum === 0 ? 4 : qNum;
                         const prevQYear = qNum === 0 ? now.getFullYear() - 1 : now.getFullYear();
                         const possibleLabels = [
@@ -8147,8 +8149,8 @@
                             return;
                         }
 
-                        // Check if there's data in that column (row 2 or 3)
-                        const hasData = rows.some((row, ri) => ri > 0 && row[colIdx] && String(row[colIdx]).trim() !== '');
+                        // Check if there's actual data in that column (data rows start at row 3 / index 2)
+                        const hasData = rows.some((row, ri) => ri >= 2 && row[colIdx] && String(row[colIdx]).trim() !== '');
                         if (hasData) {
                             // Auto-lock this quarter
                             const updated = [...lockedQuarters, prevQLockLabel];
