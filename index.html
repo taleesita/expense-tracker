@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.74.1-nov3';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.74.2-nov3';  // visible in UI so we can confirm which code is live
         // Google Identity Services (GIS) OAuth client — fetches the Sheets/Drive access token DIRECTLY,
         // bypassing Firebase's hidden auth frame that some browsers (e.g. Arc) block with
         // "operation-not-supported-in-this-environment". Firebase still handles identity (who you are).
@@ -8519,13 +8519,15 @@
                                                     </button>
                                                 )}
                                                 </div>
-                                                {b.enrollState !== 'none' && (
-                                                    <button onClick={() => saveEnroll(b, b.enrollState === 'done' ? 'Required' : 'Done')}
-                                                        title={b.enrollState === 'done' ? 'Enrolled — tap to undo' : 'Enrollment required — tap when done'}
-                                                        className={`flex-shrink-0 text-[10px] font-medium px-2.5 py-1 rounded-full border ${b.enrollState === 'done' ? 'bg-green-50 text-green-700 border-green-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}>
-                                                        {b.enrollState === 'done' ? '✓ enrolled' : 'enroll'}
-                                                    </button>
-                                                )}
+                                                <div className="w-20 flex-shrink-0 flex justify-end">
+                                                    {b.enrollState !== 'none' && (
+                                                        <button onClick={() => saveEnroll(b, b.enrollState === 'done' ? 'Required' : 'Done')}
+                                                            title={b.enrollState === 'done' ? 'Enrolled — tap to undo' : 'Enrollment required — tap when done'}
+                                                            className={`whitespace-nowrap text-[10px] font-medium px-2 py-0.5 rounded-full border ${b.enrollState === 'done' ? 'bg-green-50 text-green-700 border-green-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}>
+                                                            {b.enrollState === 'done' ? '✓ enrolled' : 'enroll'}
+                                                        </button>
+                                                    )}
+                                                </div>
                                             </div>
                                         );
                                     })}
