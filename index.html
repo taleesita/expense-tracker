@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.68.0-nov3';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.68.1-nov3';  // visible in UI so we can confirm which code is live
         // Google Identity Services (GIS) OAuth client — fetches the Sheets/Drive access token DIRECTLY,
         // bypassing Firebase's hidden auth frame that some browsers (e.g. Arc) block with
         // "operation-not-supported-in-this-environment". Firebase still handles identity (who you are).
@@ -8315,8 +8315,14 @@
                 if (isMonthly && b.cap > 0) {
                     b.annualCap = b.cap * 12;
                     if (b.autoKind === 'match') {
-                        const ym = sumMatches(b, new Date(now.getFullYear(), 0, 1), new Date(now.getFullYear(), 11, 31));
-                        if (ym) { b.yearUsed = Math.min(b.annualCap, ym.sum); b.hasYear = true; }
+                        // Year-to-date = sum of EACH month's credit (capped per month), not total spend
+                        // capped at the annual cap — a $10/mo credit can only earn $10 × months elapsed.
+                        let yr = 0;
+                        for (let mo = 0; mo <= now.getMonth(); mo++) {
+                            const mm = sumMatches(b, new Date(now.getFullYear(), mo, 1), new Date(now.getFullYear(), mo + 1, 0));
+                            if (mm) yr += Math.min(b.cap, mm.sum);
+                        }
+                        b.yearUsed = yr; b.hasYear = true;
                     }
                 }
             });
