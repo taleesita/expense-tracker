@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.74.0-nov3';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.74.1-nov3';  // visible in UI so we can confirm which code is live
         // Google Identity Services (GIS) OAuth client — fetches the Sheets/Drive access token DIRECTLY,
         // bypassing Firebase's hidden auth frame that some browsers (e.g. Arc) block with
         // "operation-not-supported-in-this-environment". Firebase still handles identity (who you are).
@@ -8413,9 +8413,10 @@
                                     ) : cardOrder.map(card => {
                                         const items = shown.filter(b => b.card === card);
                                         if (!items.length) return null;
+                                        const gcol = cardColor(card);
                                         return (
-                                            <div key={card} className="mb-2.5 last:mb-0">
-                                                <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500 mb-1">{card}</div>
+                                            <div key={card} className="bg-white rounded-xl border border-gray-200 p-2.5 mb-2 last:mb-0">
+                                                <div className="text-[10px] font-bold uppercase tracking-wide mb-1.5" style={{ color: gcol }}>{card}</div>
                                                 {items.map((b, i) => (
                                                     <div key={i} className="flex items-center justify-between gap-2 py-0.5">
                                                         <div className="min-w-0 flex-1">
