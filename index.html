@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.66.0-nov2';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.68.0-nov3';  // visible in UI so we can confirm which code is live
         // Google Identity Services (GIS) OAuth client — fetches the Sheets/Drive access token DIRECTLY,
         // bypassing Firebase's hidden auth frame that some browsers (e.g. Arc) block with
         // "operation-not-supported-in-this-environment". Firebase still handles identity (who you are).
@@ -1437,7 +1437,7 @@
                     // as unreconciled / uncredited before the live fetch lands.
                     reconciled: e.reconciled, reconcileStatus: e.reconcileStatus,
                     reconciledLocked: e.reconciledLocked, reconciledAt: e.reconciledAt,
-                    travelCredit: e.travelCredit,
+                    travelCredit: e.travelCredit, benefitTag: e.benefitTag,
                 }));
                 localStorage.setItem(EXPENSES_CACHE_KEY, JSON.stringify(slim));
             } catch {}
@@ -1464,7 +1464,7 @@
                 if (!silent) setLoading(true);
                 try {
                     const resp = await fetch(
-                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A:L`,
+                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A:M`,
                         { headers: { 'Authorization': `Bearer ${token}` } }
                     );
                     if (!resp.ok) {
@@ -1551,6 +1551,7 @@
                             reconciledLocked: (row[9] || '').trim().toUpperCase() === 'L',
                             reconciledAt: (row[10] || '').trim(),       // K: Reconciliation Status - Time
                             travelCredit: parseNum(row[11]) || 0,        // L: Travel Credit amount applied to this charge
+                            benefitTag: (row[12] || '').trim(),          // M: Card-benefit this charge is linked to (the Edit, Dining, etc.)
                             notes: '',
                             person: '',
                             _balanceOnly: !hasTimestamp,  // rows without timestamp: include in balance calc but hide from UI
@@ -1978,6 +1979,38 @@
                 }
             }, [token]);
 
+            // Write the benefit tag (column M) for a charge, with the same timestamp safety net as travel credit.
+            const writeBenefitTagCell = useCallback(async (rowIndex, value, expectedStamp) => {
+                if (!token) throw new Error('Google connection expired — tap Reconnect, then try again.');
+                if (expectedStamp) {
+                    const chk = await fetch(
+                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!A${rowIndex}`,
+                        { headers: { 'Authorization': `Bearer ${token}` } }
+                    );
+                    if (chk.ok) {
+                        const chkData = await chk.json();
+                        const onSheet = ((chkData.values && chkData.values[0] && chkData.values[0][0]) || '').toString().trim();
+                        if (onSheet !== expectedStamp.toString().trim()) {
+                            const e = new Error('Row moved — list is out of date.');
+                            e.code = 'ROW_MISMATCH';
+                            throw e;
+                        }
+                    }
+                }
+                const resp = await fetch(
+                    `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(SHEET_TAB)}!M${rowIndex}?valueInputOption=USER_ENTERED`,
+                    {
+                        method: 'PUT',
+                        headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ values: [[(value === '' || value == null) ? '' : value]] })
+                    }
+                );
+                if (!resp.ok) {
+                    console.error('Benefit tag write failed:', resp.status);
+                    throw new Error(resp.status === 401 ? 'Google connection expired' : `Write failed (${resp.status})`);
+                }
+            }, [token]);
+
             return {
                 expenses,
                 setExpenses,
@@ -1990,6 +2023,7 @@
                 writeReconcileCell,
                 batchWriteReconcile,
                 writeTravelCreditCell,
+                writeBenefitTagCell,
                 apiError
             };
         };
@@ -8060,7 +8094,80 @@
             const s = mk(Y, 0, 1), e = mk(Y, 11, 31); return { start: s, end: e, label: String(Y), daysLeft: daysLeft(e) };
         };
 
-        const BenefitsView = ({ token, expenses }) => {
+        // Modal: pick which of this card's charges count toward a benefit (writes column M).
+        const LinkChargesModal = ({ benefit, expenses, onToggle, onClose }) => {
+            const [q, setQ] = useState('');
+            const [showAll, setShowAll] = useState(false);
+            const acct = benefit.acct;
+            const win = benefit.win;
+            const hasWin = !!(win && win.start);
+            const toISO = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+            const s = hasWin ? toISO(win.start) : null, e = hasWin ? toISO(win.end) : null;
+            const inWin = (x) => { if (!hasWin) return true; const d = parseDateToISO(x.date || x.timestamp) || ''; return d >= s && d <= e; };
+            const isLinked = (x) => (x.benefitTag || '').toLowerCase() === benefit.name.toLowerCase();
+
+            const list = (expenses || []).filter(x => {
+                if (acct && x.account !== acct) return false;
+                const isCharge = !(x.txnType === 'deposit' || x.txnType === 'credit_refund') && (parseFloat(x.rawCharge) || 0) > 0;
+                if (!isCharge) return false;
+                if (!showAll && !inWin(x) && !isLinked(x)) return false;
+                if (q && !((x.merchant || '').toLowerCase().includes(q.toLowerCase()))) return false;
+                return true;
+            }).sort((a, b) => (parseDateToISO(b.date || b.timestamp) || '').localeCompare(parseDateToISO(a.date || a.timestamp) || ''));
+
+            const linkedSum = (expenses || []).filter(x => isLinked(x) && (!acct || x.account === acct) && inWin(x))
+                .reduce((t, x) => t + (parseFloat(x.rawCharge) || parseFloat(x.amount) || 0), 0);
+            const fmtN = (n) => (n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+            return (
+                <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center" onClick={onClose}>
+                    <div className="bg-white w-full sm:max-w-md sm:rounded-2xl rounded-t-2xl flex flex-col" style={{ maxHeight: '85vh' }} onClick={ev => ev.stopPropagation()}>
+                        <div className="px-4 pt-4 pb-3 border-b border-gray-100">
+                            <div className="flex items-start justify-between gap-2">
+                                <div>
+                                    <div className="font-bold text-base text-gray-900">{benefit.name}</div>
+                                    <div className="text-xs text-gray-500">{benefit.card}</div>
+                                </div>
+                                <button onClick={onClose} className="text-gray-400 text-xl leading-none px-1">✕</button>
+                            </div>
+                            <div className="mt-2 flex items-center justify-between">
+                                <span className="text-xs text-gray-500">Linked{hasWin ? ` · ${win.label}` : ''}</span>
+                                <span className="text-sm font-semibold text-sky-700">${fmtN(linkedSum)}{benefit.cap > 0 ? ` / $${fmtN(benefit.cap)}` : ''}</span>
+                            </div>
+                            <div className="mt-2 flex gap-2 items-center">
+                                <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search merchant…" className="flex-1 border rounded-lg px-3 py-1.5 text-sm" />
+                                <button onClick={() => setShowAll(v => !v)} className={`text-xs px-2.5 py-1.5 rounded-lg border whitespace-nowrap ${showAll ? 'bg-sky-100 text-sky-700 border-sky-300' : 'bg-white text-gray-500 border-gray-300'}`}>{showAll ? 'All dates' : 'This window'}</button>
+                            </div>
+                        </div>
+                        <div className="overflow-y-auto px-4" style={{ WebkitOverflowScrolling: 'touch' }}>
+                            {list.length === 0 ? (
+                                <div className="py-8 text-center text-gray-400 text-sm">No matching charges{hasWin && !showAll ? ' in this window — try "All dates"' : ''}.</div>
+                            ) : list.map(x => {
+                                const linked = isLinked(x);
+                                const otherTag = x.benefitTag && !linked ? x.benefitTag : '';
+                                return (
+                                    <button key={x.rowIndex} onClick={() => onToggle(x.rowIndex, linked ? '' : benefit.name)}
+                                        className={`w-full text-left flex items-center gap-2.5 py-2.5 border-b border-gray-100 ${linked ? 'bg-sky-50' : ''}`}>
+                                        <span className={`w-5 h-5 rounded border flex items-center justify-center flex-shrink-0 ${linked ? 'bg-sky-600 border-sky-600 text-white' : 'border-gray-300'}`}>{linked ? '✓' : ''}</span>
+                                        <div className="flex-1 min-w-0">
+                                            <div className="text-sm font-medium text-gray-800 truncate">{x.merchant}{otherTag && <span className="ml-1.5 text-[10px] text-amber-600">→ {otherTag}</span>}</div>
+                                            <div className="text-[11px] text-gray-400">{x.date || x.timestamp}</div>
+                                        </div>
+                                        <div className="text-sm font-semibold text-red-600 flex-shrink-0">-${fmtN(x.amount)}</div>
+                                    </button>
+                                );
+                            })}
+                        </div>
+                        <div className="px-4 py-3 border-t border-gray-100">
+                            <button onClick={onClose} className="w-full py-2.5 bg-gray-900 text-white rounded-xl font-medium text-sm">Done</button>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        const BenefitsView = ({ token, expenses, onLinkBenefit }) => {
+            const [linkFor, setLinkFor] = useState(null);
             const [rows, setRows] = useState(null);
             const [err, setErr] = useState(null);
             const [loading, setLoading] = useState(false);
@@ -8149,10 +8256,28 @@
                 return { sum, count };
             };
 
+            // Most recent "Annual Fee" charge date on a card → MM/DD anchor for anniversary resets.
+            const latestAnnualFee = (acct) => {
+                if (!acct) return null;
+                const fees = (expenses || []).filter(x => x.account === acct && /annual\s*fee/i.test(x.merchant || '') && (parseFloat(x.rawCharge) || 0) > 0);
+                if (!fees.length) return null;
+                fees.sort((a, b) => (parseDateToISO(b.date || b.timestamp) || '').localeCompare(parseDateToISO(a.date || a.timestamp) || ''));
+                const d = parseDateToISO(fees[0].date || fees[0].timestamp);
+                if (!d) return null;
+                const parts = d.split('-').map(Number);
+                return `${parts[1]}/${parts[2]}`;
+            };
+
             benefits.forEach(b => {
-                b.win = _benWindow(b.period, b.basis, b.anniv, now);
+                // Resolve the anniversary anchor: typed date wins, else derive from the last annual-fee charge.
+                let annivStr = b.anniv; b.annivSource = annivStr ? 'set' : '';
+                if ((b.basis || '').toLowerCase().includes('anniv') && !annivStr) {
+                    const fee = latestAnnualFee(acctForCard(b.card));
+                    if (fee) { annivStr = fee; b.annivSource = 'fee'; }
+                }
+                b.win = _benWindow(b.period, b.basis, annivStr, now);
                 const isMonthly = (b.period || '').toLowerCase().includes('month');
-                let used = b.usedRaw; b.auto = false; b.matchCount = 0;
+                let used = b.usedRaw; b.auto = false; b.matchCount = 0; b.linkedCount = 0;
                 // Reserve travel credit → from charges tagged in the app (column L).
                 if (/reserve/i.test(b.card) && /travel\s*credit/i.test(b.name) && b.win && b.win.start) {
                     const s = toLocalISO(b.win.start), e = toLocalISO(b.win.end);
@@ -8163,6 +8288,23 @@
                     // Auto-match by merchant keyword within the current window.
                     const m = sumMatches(b, b.win.start, b.win.end);
                     if (m) { used = b.cap > 0 ? Math.min(m.sum, b.cap) : m.sum; b.matchCount = m.count; b.auto = true; b.autoKind = 'match'; }
+                }
+                // Manual-linked charges (column M === this benefit name), account-scoped, within window.
+                if (!b.auto) {
+                    const acct = acctForCard(b.card);
+                    const hasWin = !!(b.win && b.win.start);
+                    const s = hasWin ? toLocalISO(b.win.start) : null, e = hasWin ? toLocalISO(b.win.end) : null;
+                    const linked = (expenses || []).filter(x => {
+                        if ((x.benefitTag || '').toLowerCase() !== b.name.toLowerCase()) return false;
+                        if (acct && x.account !== acct) return false;
+                        if (hasWin) { const d = parseDateToISO(x.date || x.timestamp) || ''; if (!(d >= s && d <= e)) return false; }
+                        return true;
+                    });
+                    if (linked.length) {
+                        const sum = linked.reduce((t, x) => t + (parseFloat(x.rawCharge) || parseFloat(x.amount) || 0), 0);
+                        used = b.cap > 0 ? Math.min(sum, b.cap) : sum;
+                        b.linkedCount = linked.length; b.auto = true; b.autoKind = 'linked';
+                    }
                 }
                 b.used = used;
                 b.remaining = Math.max(0, b.cap - used);
@@ -8262,6 +8404,7 @@
                                                 <div className="mt-1 flex items-center justify-between gap-2">
                                                     <span className="text-[11px] text-gray-400 truncate">
                                                         {b.win.noWindow ? b.win.label : (b.win.label + (b.win.daysLeft != null && !b.win.long ? ` · ${b.win.daysLeft}d left` : ''))}
+                                                        {b.annivSource === 'fee' ? ' · from annual fee' : ''}
                                                         {b.autoKind === 'match' && b.matchCount > 0 ? ` · ${b.matchCount} matched` : ''}
                                                     </span>
                                                     {b.maxed ? <span className="text-[11px] font-medium text-green-600 flex-shrink-0">maxed ✓</span>
@@ -8280,6 +8423,12 @@
                                                     </div>
                                                 )}
                                                 {b.notes && <div className="text-[10px] text-gray-400 mt-0.5 leading-snug">{b.notes}</div>}
+                                                {b.unit !== '#' && b.autoKind !== 'match' && b.autoKind !== 'tag' && (
+                                                    <button onClick={() => setLinkFor({ name: b.name, card: b.card, cap: b.cap, unit: b.unit, win: b.win, acct: acctForCard(b.card) })}
+                                                        className="mt-1.5 text-[11px] font-medium text-sky-700 bg-sky-50 border border-sky-200 rounded-full px-2.5 py-1">
+                                                        🔗 {b.linkedCount > 0 ? `${b.linkedCount} charge${b.linkedCount === 1 ? '' : 's'} linked` : 'Link charges'}
+                                                    </button>
+                                                )}
                                             </div>
                                         );
                                     })}
@@ -8288,7 +8437,16 @@
                         );
                     })}
 
-                    <p className="text-[11px] text-gray-400 px-1 pb-2">Tap any amount to record what you've used ("max" marks it fully used) — it saves to the "{BENEFITS_TAB}" tab. Edit caps, periods, and anniversary dates there too. The Reserve travel credit marked “auto” fills from charges you tag in the app.</p>
+                    <p className="text-[11px] text-gray-400 px-1 pb-2">Tap any amount to record what you've used ("max" marks it fully used). Use 🔗 Link charges to point the Edit/Dining-type credits at specific transactions. Auto-matched and linked credits compute themselves; edit caps, periods, and anniversary dates in the "{BENEFITS_TAB}" tab.</p>
+
+                    {linkFor && (
+                        <LinkChargesModal
+                            benefit={linkFor}
+                            expenses={expenses}
+                            onToggle={(rowIndex, name) => onLinkBenefit && onLinkBenefit(rowIndex, name)}
+                            onClose={() => setLinkFor(null)}
+                        />
+                    )}
                 </div>
             );
         };
@@ -8299,7 +8457,7 @@
             // Keep a ref to the latest token so async callbacks always use the freshest value
             const tokenRef = useRef(token);
             useEffect(() => { tokenRef.current = token; }, [token]);
-            const { expenses, setExpenses, loading, fetchExpenses, appendExpense, updateExpense, batchUpdateExpenses, deleteExpense, writeReconcileCell, batchWriteReconcile, writeTravelCreditCell, apiError } = useGoogleSheets(token);
+            const { expenses, setExpenses, loading, fetchExpenses, appendExpense, updateExpense, batchUpdateExpenses, deleteExpense, writeReconcileCell, batchWriteReconcile, writeTravelCreditCell, writeBenefitTagCell, apiError } = useGoogleSheets(token);
             const { push: pushUndo, undo: undoAction, canUndo } = useUndoStack();
             const { inboxItems, inboxLoading, fetchInbox, markInboxItem, ocrCacheRef, inFlightRowsRef } = useInbox(token);
 
@@ -9107,6 +9265,27 @@
                 });
             };
 
+            // Link / unlink a charge to a card benefit (column M), with timestamp safety net.
+            const handleLinkBenefit = (rowIndex, benefitName) => {
+                const expense = expenses.find(e => e.rowIndex === rowIndex);
+                if (!expense) return;
+                const prev = expense.benefitTag || '';
+                const next = benefitName || '';
+                setExpenses(p => p.map(e => e.rowIndex === rowIndex ? { ...e, benefitTag: next } : e));
+                writeBenefitTagCell(rowIndex, next, expense.timestamp).catch(err => {
+                    setExpenses(p => p.map(e => e.rowIndex === rowIndex ? { ...e, benefitTag: prev } : e));
+                    if (err && err.code === 'ROW_MISMATCH') {
+                        setToast('The sheet changed — refreshing the list, then tap again.');
+                        setTimeout(() => setToast(''), 5000);
+                        fetchExpenses(true);
+                    } else {
+                        console.error('Benefit link write failed:', err);
+                        setToast('Link failed — ' + (err.message || 'try again'));
+                        setTimeout(() => setToast(''), 4000);
+                    }
+                });
+            };
+
             // Lock (cement) a batch of reconciled items — writes 'L' to column J
             const handleLockItems = (rowIndexes) => {
                 // Optimistic update
@@ -9455,7 +9634,7 @@
 
                                 {activeTab === 'benefits' && (
                                     <div className="pb-24 p-4">
-                                        <BenefitsView token={token} expenses={expenses} />
+                                        <BenefitsView token={token} expenses={expenses} onLinkBenefit={handleLinkBenefit} />
                                     </div>
                                 )}
 
