@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.72.0-nov3';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.73.0-nov3';  // visible in UI so we can confirm which code is live
         // Google Identity Services (GIS) OAuth client — fetches the Sheets/Drive access token DIRECTLY,
         // bypassing Firebase's hidden auth frame that some browsers (e.g. Arc) block with
         // "operation-not-supported-in-this-environment". Firebase still handles identity (who you are).
@@ -8169,6 +8169,7 @@
         const BenefitsView = ({ token, expenses, onLinkBenefit }) => {
             const [linkFor, setLinkFor] = useState(null);
             const [matchFor, setMatchFor] = useState(null);
+            const [showBreakdown, setShowBreakdown] = useState(false);
             const [rows, setRows] = useState(null);
             const [err, setErr] = useState(null);
             const [loading, setLoading] = useState(false);
@@ -8328,6 +8329,8 @@
                 b.pct = b.cap > 0 ? Math.min(100, (used / b.cap) * 100) : 0;
                 b.maxed = b.cap > 0 && used >= b.cap - 0.001;
                 b.atRisk = !b.maxed && b.remaining > 0 && b.win && !b.win.noWindow && !b.win.long && b.win.daysLeft != null && b.win.daysLeft <= 45;
+                // Informational benefit (no dollar cap): show name + note + enroll only — no bar/amount/link.
+                b.informational = !(b.cap > 0) && b.unit !== '#';
                 // Monthly credits: also roll up the calendar-year total (auto-match only).
                 if (isMonthly && b.cap > 0) {
                     b.annualCap = b.cap * 12;
@@ -8349,6 +8352,9 @@
             benefits.forEach(b => { if (!byCard[b.card]) { byCard[b.card] = []; cardOrder.push(b.card); } byCard[b.card].push(b); });
             const dollarsLeft = benefits.filter(b => b.unit === '$' && b.win && !b.win.long).reduce((t, b) => t + b.remaining, 0);
             const atRiskTotal = benefits.filter(b => b.atRisk && b.unit === '$').reduce((t, b) => t + b.remaining, 0);
+            // Benefits making up the "left on the table" total — at-risk first, then soonest to expire.
+            const leftItems = benefits.filter(b => b.unit === '$' && b.win && !b.win.long && b.remaining > 0)
+                .sort((a, c) => ((c.atRisk ? 1 : 0) - (a.atRisk ? 1 : 0)) || (((a.win.daysLeft == null ? 99999 : a.win.daysLeft)) - ((c.win.daysLeft == null ? 99999 : c.win.daysLeft))));
             const fmtN = (n) => (n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
             if (err) {
@@ -8368,15 +8374,33 @@
                     {/* Headline */}
                     <div className="bg-sky-50 border border-sky-200 rounded-2xl p-4">
                         <div className="flex items-center justify-between">
-                            <div>
+                            <button onClick={() => setShowBreakdown(v => !v)} className="text-left">
                                 <div className="text-xs font-semibold text-sky-800 uppercase tracking-wide">Credits left on the table</div>
-                                <div className="text-2xl font-bold text-sky-900 mt-0.5">${fmtN(dollarsLeft)}</div>
-                            </div>
-                            <button onClick={load} className="text-xs text-sky-700 bg-white border border-sky-200 rounded-full px-3 py-1.5">↻ Refresh</button>
+                                <div className="text-2xl font-bold text-sky-900 mt-0.5 flex items-center gap-1.5">
+                                    ${fmtN(dollarsLeft)}
+                                    <span className="text-xs text-sky-500">{showBreakdown ? '▲ hide' : '▼ what?'}</span>
+                                </div>
+                            </button>
+                            <button onClick={load} className="text-xs text-sky-700 bg-white border border-sky-200 rounded-full px-3 py-1.5 flex-shrink-0">↻ Refresh</button>
                         </div>
                         {atRiskTotal > 0 && (
-                            <div className="mt-2 text-xs font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
-                                ⏳ ${fmtN(atRiskTotal)} expiring within ~45 days — use it or lose it
+                            <button onClick={() => setShowBreakdown(true)} className="mt-2 w-full text-left text-xs font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                                ⏳ ${fmtN(atRiskTotal)} expiring within ~45 days — tap to see what
+                            </button>
+                        )}
+                        {showBreakdown && (
+                            <div className="mt-3 border-t border-sky-200 pt-3 space-y-2">
+                                {leftItems.length === 0 ? (
+                                    <div className="text-xs text-sky-700">Nothing outstanding — nice.</div>
+                                ) : leftItems.map((b, i) => (
+                                    <div key={i} className="flex items-center justify-between gap-2">
+                                        <div className="min-w-0 flex-1">
+                                            <div className="text-xs font-medium text-gray-800 truncate">{b.name}</div>
+                                            <div className="text-[10px] text-gray-400">{b.card}{b.atRisk && b.win.daysLeft != null ? ` · ${b.win.daysLeft}d left` : ''}</div>
+                                        </div>
+                                        <span className={`text-xs font-semibold flex-shrink-0 ${b.atRisk ? 'text-amber-700' : 'text-gray-700'}`}>${fmtN(b.remaining)}</span>
+                                    </div>
+                                ))}
                             </div>
                         )}
                     </div>
@@ -8404,7 +8428,7 @@
                                                         {b.auto && <span className="ml-1.5 text-[10px] text-sky-600 font-normal align-middle">auto</span>}
                                                     </div>
                                                     <div className="flex items-center gap-2 flex-shrink-0">
-                                                        {b.auto ? (
+                                                        {!b.informational && (b.auto ? (
                                                             <div className="text-xs font-semibold text-gray-700 whitespace-nowrap">{usedStr}</div>
                                                         ) : editing === b.rowNum ? (
                                                             <div className="flex items-center gap-1">
@@ -8421,12 +8445,15 @@
                                                         ) : (
                                                             <button onClick={() => { setEditing(b.rowNum); setEditVal(b.used ? String(b.used) : ''); }}
                                                                 className="text-xs font-semibold text-gray-700 whitespace-nowrap border-b border-dashed border-gray-300 hover:border-sky-400">{usedStr}</button>
-                                                        )}
+                                                        ))}
                                                     </div>
                                                 </div>
+                                                {!b.informational && (
                                                 <div className="mt-1.5 h-1.5 bg-gray-100 rounded-full overflow-hidden">
                                                     <div className={`h-full rounded-full ${barColor}`} style={{ width: b.pct + '%' }} />
                                                 </div>
+                                                )}
+                                                {!b.informational && (
                                                 <div className="mt-1 flex items-center justify-between gap-2">
                                                     <div className="flex items-center gap-1.5 min-w-0">
                                                         <span className="text-[11px] text-gray-400 truncate">
@@ -8443,6 +8470,7 @@
                                                         : b.atRisk ? <span className="text-[11px] font-medium text-amber-600 flex-shrink-0">${fmtN(b.remaining)} left</span>
                                                             : b.remaining > 0 && b.unit === '$' ? <span className="text-[11px] text-gray-400 flex-shrink-0">${fmtN(b.remaining)} left</span> : null}
                                                 </div>
+                                                )}
                                                 {b.hasYear && (
                                                     <div className="mt-2">
                                                         <div className="flex items-center justify-between">
@@ -8455,7 +8483,7 @@
                                                     </div>
                                                 )}
                                                 {b.notes && <div className="text-[10px] text-gray-400 mt-0.5 leading-snug">{b.notes}</div>}
-                                                {b.unit !== '#' && b.autoKind !== 'match' && b.autoKind !== 'tag' && (
+                                                {!b.informational && b.unit !== '#' && b.autoKind !== 'match' && b.autoKind !== 'tag' && (
                                                     <button onClick={() => setLinkFor({ name: b.name, card: b.card, cap: b.cap, unit: b.unit, win: b.win, acct: acctForCard(b.card) })}
                                                         className="mt-1.5 text-[11px] font-medium text-sky-700 bg-sky-50 border border-sky-200 rounded-full px-2.5 py-1">
                                                         🔗 {b.linkedCount > 0 ? `${b.linkedCount} charge${b.linkedCount === 1 ? '' : 's'} linked` : 'Link charges'}
