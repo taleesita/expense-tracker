@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.73.0-nov3';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.74.0-nov3';  // visible in UI so we can confirm which code is live
         // Google Identity Services (GIS) OAuth client — fetches the Sheets/Drive access token DIRECTLY,
         // bypassing Firebase's hidden auth frame that some browsers (e.g. Arc) block with
         // "operation-not-supported-in-this-environment". Firebase still handles identity (who you are).
@@ -8170,6 +8170,7 @@
             const [linkFor, setLinkFor] = useState(null);
             const [matchFor, setMatchFor] = useState(null);
             const [showBreakdown, setShowBreakdown] = useState(false);
+            const [breakdownFilter, setBreakdownFilter] = useState('all');
             const [rows, setRows] = useState(null);
             const [err, setErr] = useState(null);
             const [loading, setLoading] = useState(false);
@@ -8374,7 +8375,7 @@
                     {/* Headline */}
                     <div className="bg-sky-50 border border-sky-200 rounded-2xl p-4">
                         <div className="flex items-center justify-between">
-                            <button onClick={() => setShowBreakdown(v => !v)} className="text-left">
+                            <button onClick={() => { setBreakdownFilter('all'); setShowBreakdown(v => !v); }} className="text-left">
                                 <div className="text-xs font-semibold text-sky-800 uppercase tracking-wide">Credits left on the table</div>
                                 <div className="text-2xl font-bold text-sky-900 mt-0.5 flex items-center gap-1.5">
                                     ${fmtN(dollarsLeft)}
@@ -8384,25 +8385,52 @@
                             <button onClick={load} className="text-xs text-sky-700 bg-white border border-sky-200 rounded-full px-3 py-1.5 flex-shrink-0">↻ Refresh</button>
                         </div>
                         {atRiskTotal > 0 && (
-                            <button onClick={() => setShowBreakdown(true)} className="mt-2 w-full text-left text-xs font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+                            <button onClick={() => { setBreakdownFilter('expiring'); setShowBreakdown(true); }} className="mt-2 w-full text-left text-xs font-medium text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
                                 ⏳ ${fmtN(atRiskTotal)} expiring within ~45 days — tap to see what
                             </button>
                         )}
-                        {showBreakdown && (
-                            <div className="mt-3 border-t border-sky-200 pt-3 space-y-2">
-                                {leftItems.length === 0 ? (
-                                    <div className="text-xs text-sky-700">Nothing outstanding — nice.</div>
-                                ) : leftItems.map((b, i) => (
-                                    <div key={i} className="flex items-center justify-between gap-2">
-                                        <div className="min-w-0 flex-1">
-                                            <div className="text-xs font-medium text-gray-800 truncate">{b.name}</div>
-                                            <div className="text-[10px] text-gray-400">{b.card}{b.atRisk && b.win.daysLeft != null ? ` · ${b.win.daysLeft}d left` : ''}</div>
-                                        </div>
-                                        <span className={`text-xs font-semibold flex-shrink-0 ${b.atRisk ? 'text-amber-700' : 'text-gray-700'}`}>${fmtN(b.remaining)}</span>
+                        {showBreakdown && (() => {
+                            const periodLabel = (b) => {
+                                const p = (b.period || '').toLowerCase();
+                                if (p.includes('month')) return 'monthly';
+                                if (p.includes('semi')) return 'semiannual';
+                                if (p.includes('quarter')) return 'quarterly';
+                                if (p.includes('one')) return 'one-time';
+                                if (p.includes('4')) return 'every 4 yrs';
+                                return 'annual';
+                            };
+                            const shown = leftItems.filter(b => breakdownFilter === 'all' || b.atRisk);
+                            return (
+                                <div className="mt-3 border-t border-sky-200 pt-3">
+                                    <div className="flex gap-1.5 mb-2">
+                                        {[['all', 'All'], ['expiring', 'Expiring soon']].map(([f, lbl]) => (
+                                            <button key={f} onClick={() => setBreakdownFilter(f)}
+                                                className={`text-[11px] font-medium px-2.5 py-0.5 rounded-full border ${breakdownFilter === f ? 'bg-sky-600 text-white border-sky-600' : 'bg-white text-sky-700 border-sky-200'}`}>{lbl}</button>
+                                        ))}
                                     </div>
-                                ))}
-                            </div>
-                        )}
+                                    {shown.length === 0 ? (
+                                        <div className="text-xs text-sky-700">{breakdownFilter === 'expiring' ? 'Nothing expiring soon.' : 'Nothing outstanding — nice.'}</div>
+                                    ) : cardOrder.map(card => {
+                                        const items = shown.filter(b => b.card === card);
+                                        if (!items.length) return null;
+                                        return (
+                                            <div key={card} className="mb-2.5 last:mb-0">
+                                                <div className="text-[10px] font-semibold uppercase tracking-wide text-gray-500 mb-1">{card}</div>
+                                                {items.map((b, i) => (
+                                                    <div key={i} className="flex items-center justify-between gap-2 py-0.5">
+                                                        <div className="min-w-0 flex-1">
+                                                            <span className="text-xs font-medium text-gray-800">{b.name}</span>
+                                                            <span className="text-[10px] text-gray-400 ml-1.5">{periodLabel(b)}{!b.win.noWindow && !b.win.long && b.win.daysLeft != null ? ` · ${b.win.daysLeft}d left` : ''}</span>
+                                                        </div>
+                                                        <span className={`text-xs font-semibold flex-shrink-0 ${b.atRisk ? 'text-amber-700' : 'text-gray-700'}`}>${fmtN(b.remaining)}</span>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            );
+                        })()}
                     </div>
 
                     {cardOrder.map(card => {
