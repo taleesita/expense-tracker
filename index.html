@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.70.0-nov3';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.72.0-nov3';  // visible in UI so we can confirm which code is live
         // Google Identity Services (GIS) OAuth client — fetches the Sheets/Drive access token DIRECTLY,
         // bypassing Firebase's hidden auth frame that some browsers (e.g. Arc) block with
         // "operation-not-supported-in-this-environment". Firebase still handles identity (who you are).
@@ -8391,25 +8391,19 @@
                                     <span className="font-bold text-base text-white tracking-tight">{card}</span>
                                     <span className="text-xs font-semibold" style={{ color: 'rgba(255,255,255,0.92)' }}>${fmtN(cardLeft)} left</span>
                                 </div>
-                                <div className="px-4">
+                                <div className="p-2.5 space-y-2 bg-gray-50">
                                     {items.map((b, i) => {
                                         const barColor = b.maxed ? 'bg-green-500' : b.atRisk ? 'bg-amber-500' : 'bg-sky-500';
                                         const usedStr = b.unit === '#' ? `${Math.round(b.used)} / ${Math.round(b.cap)}` : `$${fmtN(b.used)} / $${fmtN(b.cap)}`;
                                         return (
-                                            <div key={i} className="py-3.5 border-b border-gray-200 last:border-0">
+                                            <div key={i} className="bg-white rounded-xl border border-gray-200 p-3 flex gap-3 items-center">
+                                                <div className="flex-1 min-w-0">
                                                 <div className="flex items-center justify-between gap-2">
                                                     <div className="text-sm font-medium text-gray-800 min-w-0 truncate flex-1">
                                                         {b.name}
                                                         {b.auto && <span className="ml-1.5 text-[10px] text-sky-600 font-normal align-middle">auto</span>}
                                                     </div>
                                                     <div className="flex items-center gap-2 flex-shrink-0">
-                                                        {b.enrollState !== 'none' && (
-                                                            <button onClick={() => saveEnroll(b, b.enrollState === 'done' ? 'Required' : 'Done')}
-                                                                title={b.enrollState === 'done' ? 'Enrolled — tap to undo' : 'Enrollment required — tap when done'}
-                                                                className={`text-[10px] font-medium px-2 py-0.5 rounded-full border ${b.enrollState === 'done' ? 'bg-green-50 text-green-700 border-green-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}>
-                                                                {b.enrollState === 'done' ? '✓ enrolled' : 'enroll'}
-                                                            </button>
-                                                        )}
                                                         {b.auto ? (
                                                             <div className="text-xs font-semibold text-gray-700 whitespace-nowrap">{usedStr}</div>
                                                         ) : editing === b.rowNum ? (
@@ -8465,6 +8459,14 @@
                                                     <button onClick={() => setLinkFor({ name: b.name, card: b.card, cap: b.cap, unit: b.unit, win: b.win, acct: acctForCard(b.card) })}
                                                         className="mt-1.5 text-[11px] font-medium text-sky-700 bg-sky-50 border border-sky-200 rounded-full px-2.5 py-1">
                                                         🔗 {b.linkedCount > 0 ? `${b.linkedCount} charge${b.linkedCount === 1 ? '' : 's'} linked` : 'Link charges'}
+                                                    </button>
+                                                )}
+                                                </div>
+                                                {b.enrollState !== 'none' && (
+                                                    <button onClick={() => saveEnroll(b, b.enrollState === 'done' ? 'Required' : 'Done')}
+                                                        title={b.enrollState === 'done' ? 'Enrolled — tap to undo' : 'Enrollment required — tap when done'}
+                                                        className={`flex-shrink-0 text-[10px] font-medium px-2.5 py-1 rounded-full border ${b.enrollState === 'done' ? 'bg-green-50 text-green-700 border-green-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}>
+                                                        {b.enrollState === 'done' ? '✓ enrolled' : 'enroll'}
                                                     </button>
                                                 )}
                                             </div>
