@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.74.2-nov3';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.75.0-nov3';  // visible in UI so we can confirm which code is live
         // Google Identity Services (GIS) OAuth client — fetches the Sheets/Drive access token DIRECTLY,
         // bypassing Firebase's hidden auth frame that some browsers (e.g. Arc) block with
         // "operation-not-supported-in-this-environment". Firebase still handles identity (who you are).
@@ -8075,11 +8075,11 @@
             if (P.includes('quarter')) { const q = Math.floor(M / 3); const s = mk(Y, q * 3, 1), e = mk(Y, q * 3 + 3, 0); return { start: s, end: e, label: 'Q' + (q + 1) + ' ' + Y, daysLeft: daysLeft(e) }; }
             if (P.includes('semi')) { const h = M < 6 ? 0 : 1; const s = mk(Y, h * 6, 1), e = mk(Y, h * 6 + 6, 0); return { start: s, end: e, label: (h === 0 ? 'Jan–Jun ' : 'Jul–Dec ') + Y, daysLeft: daysLeft(e) }; }
             if (P.includes('4')) {
-                const av = _benAnniv(annivStr);
-                if (!av) return { noWindow: true, label: 'every 4 yrs' };
-                let ay = Y; if (mk(Y, av.month, av.day) > now) ay = Y - 1;
-                const s = mk(ay, av.month, av.day), e = mk(ay + 4, av.month, av.day - 1);
-                return { start: s, end: e, label: 'resets ' + fmtMD(mk(ay + 4, av.month, av.day)), daysLeft: daysLeft(e), long: true };
+                // "Once every 4 years" — roll back 4 years from today (NOT the card anniversary, which was
+                // excluding recent application charges). Any matching charge in the last 4 years counts as used.
+                const s = mk(Y - 4, M, now.getDate());
+                const e = mk(Y, M, now.getDate());
+                return { start: s, end: e, label: 'every 4 yrs', long: true };
             }
             // Annual
             if (B.includes('anniv')) {
@@ -8338,12 +8338,12 @@
                     if (b.autoKind === 'match') {
                         // Year-to-date = sum of EACH month's credit (capped per month), not total spend
                         // capped at the annual cap — a $10/mo credit can only earn $10 × months elapsed.
-                        let yr = 0;
+                        let yr = 0; const yitems = [];
                         for (let mo = 0; mo <= now.getMonth(); mo++) {
                             const mm = sumMatches(b, new Date(now.getFullYear(), mo, 1), new Date(now.getFullYear(), mo + 1, 0));
-                            if (mm) yr += Math.min(b.cap, mm.sum);
+                            if (mm) { yr += Math.min(b.cap, mm.sum); for (const it of mm.items) yitems.push(it); }
                         }
-                        b.yearUsed = yr; b.hasYear = true;
+                        b.yearUsed = yr; b.hasYear = true; b.yearMatchItems = yitems;
                     }
                 }
             });
@@ -8503,7 +8503,12 @@
                                                 {b.hasYear && (
                                                     <div className="mt-2">
                                                         <div className="flex items-center justify-between">
-                                                            <span className="text-[11px] font-medium text-gray-500">This year ({now.getFullYear()})</span>
+                                                            {b.yearMatchItems && b.yearMatchItems.length > 0 ? (
+                                                                <button onClick={() => setMatchFor({ name: b.name, card: b.card, win: { label: String(now.getFullYear()) }, items: b.yearMatchItems })}
+                                                                    className="text-[11px] font-medium text-sky-600 underline">This year ({now.getFullYear()}) · {b.yearMatchItems.length} charges</button>
+                                                            ) : (
+                                                                <span className="text-[11px] font-medium text-gray-500">This year ({now.getFullYear()})</span>
+                                                            )}
                                                             <span className="text-[11px] font-medium text-gray-500">${fmtN(b.yearUsed)} / ${fmtN(b.annualCap)}</span>
                                                         </div>
                                                         <div className="mt-1 h-1.5 bg-gray-100 rounded-full overflow-hidden">
