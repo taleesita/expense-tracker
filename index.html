@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.68.1-nov3';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.69.1-nov3';  // visible in UI so we can confirm which code is live
         // Google Identity Services (GIS) OAuth client — fetches the Sheets/Drive access token DIRECTLY,
         // bypassing Firebase's hidden auth frame that some browsers (e.g. Arc) block with
         // "operation-not-supported-in-this-environment". Firebase still handles identity (who you are).
@@ -8168,6 +8168,7 @@
 
         const BenefitsView = ({ token, expenses, onLinkBenefit }) => {
             const [linkFor, setLinkFor] = useState(null);
+            const [matchFor, setMatchFor] = useState(null);
             const [rows, setRows] = useState(null);
             const [err, setErr] = useState(null);
             const [loading, setLoading] = useState(false);
@@ -8177,7 +8178,7 @@
                 setLoading(true); setErr(null);
                 try {
                     const resp = await fetch(
-                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(BENEFITS_TAB)}!A2:K?valueRenderOption=FORMATTED_VALUE`,
+                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(BENEFITS_TAB)}!A2:L?valueRenderOption=FORMATTED_VALUE`,
                         { headers: { 'Authorization': `Bearer ${token}` } }
                     );
                     if (!resp.ok) {
@@ -8218,6 +8219,18 @@
                 } catch (e) { console.error('Benefit used write failed, reloading:', e); load(); }
             };
 
+            // Toggle enrollment status (column L of the Benefits tab).
+            const saveEnroll = async (b, value) => {
+                setRows(prev => prev.map((row, i) => (i + 2 === b.rowNum) ? (() => { const c = [...row]; while (c.length < 12) c.push(''); c[11] = value; return c; })() : row));
+                try {
+                    const resp = await fetch(
+                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(BENEFITS_TAB)}!L${b.rowNum}?valueInputOption=USER_ENTERED`,
+                        { method: 'PUT', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ values: [[value]] }) }
+                    );
+                    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                } catch (e) { console.error('Enroll write failed, reloading:', e); load(); }
+            };
+
             const now = new Date();
             const benefits = (rows || []).map((r, i) => ({
                 rowNum: i + 2,
@@ -8225,7 +8238,7 @@
                 unit: ((r[3] || '$').trim() || '$'), period: (r[4] || '').trim(), basis: (r[5] || '').trim(),
                 anniv: (r[6] || '').trim(), usedRaw: _benNum(r[7]),
                 active: ((r[8] || 'Y').trim().toUpperCase() !== 'N'), notes: (r[9] || '').trim(),
-                match: (r[10] || '').trim(),
+                match: (r[10] || '').trim(), enroll: (r[11] || '').trim(),
             })).filter(b => b.card && b.name && b.active);
 
             const toLocalISO = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -8237,14 +8250,13 @@
                 if (n.includes('venture') || n.includes('capital') || n.includes('cap1')) return 'cap1_cc';
                 return null;
             };
-            // Sum charges matching a benefit's keyword(s) within [startD, endD]. Returns {sum,count} or null.
+            // Charges matching a benefit's keyword(s) within [startD, endD]. Returns {sum,count,items} or null.
             const sumMatches = (b, startD, endD) => {
                 const kws = (b.match || '').toLowerCase().split(',').map(s => s.trim()).filter(Boolean);
                 if (!kws.length) return null;
                 const acct = acctForCard(b.card);
                 const s = toLocalISO(startD), e = toLocalISO(endD);
-                let count = 0;
-                const sum = (expenses || []).filter(x => {
+                const items = (expenses || []).filter(x => {
                     if (acct && x.account !== acct) return false;
                     const isCharge = !(x.txnType === 'deposit' || x.txnType === 'credit_refund') && (parseFloat(x.rawCharge) || 0) > 0;
                     if (!isCharge) return false;
@@ -8252,8 +8264,9 @@
                     if (!(d >= s && d <= e)) return false;
                     const mer = (x.merchant || '').toLowerCase();
                     return kws.some(k => mer.includes(k));
-                }).reduce((t, x) => { count++; return t + (parseFloat(x.rawCharge) || parseFloat(x.amount) || 0); }, 0);
-                return { sum, count };
+                }).sort((a, c) => (parseDateToISO(c.date || c.timestamp) || '').localeCompare(parseDateToISO(a.date || a.timestamp) || ''));
+                const sum = items.reduce((t, x) => t + (parseFloat(x.rawCharge) || parseFloat(x.amount) || 0), 0);
+                return { sum, count: items.length, items };
             };
 
             // Most recent "Annual Fee" charge date on a card → MM/DD anchor for anniversary resets.
@@ -8269,6 +8282,9 @@
             };
 
             benefits.forEach(b => {
+                // Enrollment state from column L: empty = not needed, "done/enrolled/✓/yes" = enrolled, else = required.
+                const en = (b.enroll || '').toLowerCase();
+                b.enrollState = !en ? 'none' : (/(done|enrolled|yes|true|✓|^y$)/.test(en) ? 'done' : 'required');
                 // Resolve the anniversary anchor: typed date wins, else derive from the last annual-fee charge.
                 let annivStr = b.anniv; b.annivSource = annivStr ? 'set' : '';
                 if ((b.basis || '').toLowerCase().includes('anniv') && !annivStr) {
@@ -8287,7 +8303,7 @@
                 } else if (b.match && b.win && b.win.start) {
                     // Auto-match by merchant keyword within the current window.
                     const m = sumMatches(b, b.win.start, b.win.end);
-                    if (m) { used = b.cap > 0 ? Math.min(m.sum, b.cap) : m.sum; b.matchCount = m.count; b.auto = true; b.autoKind = 'match'; }
+                    if (m) { used = b.cap > 0 ? Math.min(m.sum, b.cap) : m.sum; b.matchCount = m.count; b.matchItems = m.items; b.auto = true; b.autoKind = 'match'; }
                 }
                 // Manual-linked charges (column M === this benefit name), account-scoped, within window.
                 if (!b.auto) {
@@ -8408,15 +8424,28 @@
                                                     <div className={`h-full rounded-full ${barColor}`} style={{ width: b.pct + '%' }} />
                                                 </div>
                                                 <div className="mt-1 flex items-center justify-between gap-2">
-                                                    <span className="text-[11px] text-gray-400 truncate">
-                                                        {b.win.noWindow ? b.win.label : (b.win.label + (b.win.daysLeft != null && !b.win.long ? ` · ${b.win.daysLeft}d left` : ''))}
-                                                        {b.annivSource === 'fee' ? ' · from annual fee' : ''}
-                                                        {b.autoKind === 'match' && b.matchCount > 0 ? ` · ${b.matchCount} matched` : ''}
-                                                    </span>
+                                                    <div className="flex items-center gap-1.5 min-w-0">
+                                                        <span className="text-[11px] text-gray-400 truncate">
+                                                            {b.win.noWindow ? b.win.label : (b.win.label + (b.win.daysLeft != null && !b.win.long ? ` · ${b.win.daysLeft}d left` : ''))}
+                                                            {b.annivSource === 'fee' ? ' · from annual fee' : ''}
+                                                        </span>
+                                                        {b.autoKind === 'match' && b.matchCount > 0 && (
+                                                            <button onClick={() => setMatchFor({ name: b.name, card: b.card, win: b.win, items: b.matchItems || [] })}
+                                                                className="text-[11px] text-sky-600 underline flex-shrink-0">{b.matchCount} matched</button>
+                                                        )}
+                                                    </div>
                                                     {b.maxed ? <span className="text-[11px] font-medium text-green-600 flex-shrink-0">maxed ✓</span>
                                                         : b.atRisk ? <span className="text-[11px] font-medium text-amber-600 flex-shrink-0">${fmtN(b.remaining)} left</span>
                                                             : b.remaining > 0 && b.unit === '$' ? <span className="text-[11px] text-gray-400 flex-shrink-0">${fmtN(b.remaining)} left</span> : null}
                                                 </div>
+                                                {b.enrollState !== 'none' && (
+                                                    <div className="mt-1.5">
+                                                        <button onClick={() => saveEnroll(b, b.enrollState === 'done' ? 'Required' : 'Done')}
+                                                            className={`text-[11px] font-medium px-2 py-0.5 rounded-full border ${b.enrollState === 'done' ? 'bg-green-50 text-green-700 border-green-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}>
+                                                            {b.enrollState === 'done' ? '✓ Enrolled' : '⚠ Enroll required — tap when done'}
+                                                        </button>
+                                                    </div>
+                                                )}
                                                 {b.hasYear && (
                                                     <div className="mt-1.5">
                                                         <div className="flex items-center justify-between">
@@ -8452,6 +8481,37 @@
                             onToggle={(rowIndex, name) => onLinkBenefit && onLinkBenefit(rowIndex, name)}
                             onClose={() => setLinkFor(null)}
                         />
+                    )}
+
+                    {matchFor && (
+                        <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center" onClick={() => setMatchFor(null)}>
+                            <div className="bg-white w-full sm:max-w-md sm:rounded-2xl rounded-t-2xl flex flex-col" style={{ maxHeight: '85vh' }} onClick={ev => ev.stopPropagation()}>
+                                <div className="px-4 pt-4 pb-3 border-b border-gray-100 flex items-start justify-between gap-2">
+                                    <div>
+                                        <div className="font-bold text-base text-gray-900">{matchFor.name}</div>
+                                        <div className="text-xs text-gray-500">{matchFor.card} · matched this {matchFor.win && !matchFor.win.noWindow ? (matchFor.win.label || 'window') : 'period'}</div>
+                                    </div>
+                                    <button onClick={() => setMatchFor(null)} className="text-gray-400 text-xl leading-none px-1">✕</button>
+                                </div>
+                                <div className="overflow-y-auto px-4" style={{ WebkitOverflowScrolling: 'touch' }}>
+                                    {matchFor.items.length === 0 ? (
+                                        <div className="py-8 text-center text-gray-400 text-sm">No matching charges.</div>
+                                    ) : matchFor.items.map(x => (
+                                        <div key={x.rowIndex} className="flex items-center gap-2.5 py-2.5 border-b border-gray-100">
+                                            <div className="flex-1 min-w-0">
+                                                <div className="text-sm font-medium text-gray-800 truncate">{x.merchant}</div>
+                                                <div className="text-[11px] text-gray-400">{x.date || x.timestamp}</div>
+                                            </div>
+                                            <div className="text-sm font-semibold text-red-600 flex-shrink-0">-${(parseFloat(x.amount) || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="px-4 py-3 border-t border-gray-100">
+                                    <p className="text-[11px] text-gray-400 mb-2">Auto-matched by the keyword in the Match column. To change what's included, edit that keyword in the "{BENEFITS_TAB}" tab.</p>
+                                    <button onClick={() => setMatchFor(null)} className="w-full py-2.5 bg-gray-900 text-white rounded-xl font-medium text-sm">Done</button>
+                                </div>
+                            </div>
+                        </div>
                     )}
                 </div>
             );
