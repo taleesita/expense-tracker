@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.75.0-nov3';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.76.0-nov4';  // visible in UI so we can confirm which code is live
         // Google Identity Services (GIS) OAuth client — fetches the Sheets/Drive access token DIRECTLY,
         // bypassing Firebase's hidden auth frame that some browsers (e.g. Arc) block with
         // "operation-not-supported-in-this-environment". Firebase still handles identity (who you are).
@@ -8449,8 +8449,7 @@
                                         const barColor = b.maxed ? 'bg-green-500' : b.atRisk ? 'bg-amber-500' : 'bg-sky-500';
                                         const usedStr = b.unit === '#' ? `${Math.round(b.used)} / ${Math.round(b.cap)}` : `$${fmtN(b.used)} / $${fmtN(b.cap)}`;
                                         return (
-                                            <div key={i} className="bg-white rounded-xl border border-gray-200 p-3 flex gap-3 items-center">
-                                                <div className="flex-1 min-w-0">
+                                            <div key={i} className="bg-white rounded-xl border border-gray-200 p-3">
                                                 <div className="flex items-center justify-between gap-2">
                                                     <div className="text-sm font-medium text-gray-800 min-w-0 truncate flex-1">
                                                         {b.name}
@@ -8475,6 +8474,13 @@
                                                             <button onClick={() => { setEditing(b.rowNum); setEditVal(b.used ? String(b.used) : ''); }}
                                                                 className="text-xs font-semibold text-gray-700 whitespace-nowrap border-b border-dashed border-gray-300 hover:border-sky-400">{usedStr}</button>
                                                         ))}
+                                                        {b.enrollState !== 'none' && (
+                                                            <button onClick={() => saveEnroll(b, b.enrollState === 'done' ? 'Required' : 'Done')}
+                                                                title={b.enrollState === 'done' ? 'Enrolled — tap to undo' : 'Enrollment required — tap when done'}
+                                                                className={`w-5 h-5 rounded-full flex items-center justify-center text-[11px] font-bold flex-shrink-0 ${b.enrollState === 'done' ? 'bg-green-100 text-green-700' : 'bg-amber-100 text-amber-700'}`}>
+                                                                {b.enrollState === 'done' ? '✓' : '!'}
+                                                            </button>
+                                                        )}
                                                     </div>
                                                 </div>
                                                 {!b.informational && (
@@ -8523,16 +8529,6 @@
                                                         🔗 {b.linkedCount > 0 ? `${b.linkedCount} charge${b.linkedCount === 1 ? '' : 's'} linked` : 'Link charges'}
                                                     </button>
                                                 )}
-                                                </div>
-                                                <div className="w-20 flex-shrink-0 flex justify-end">
-                                                    {b.enrollState !== 'none' && (
-                                                        <button onClick={() => saveEnroll(b, b.enrollState === 'done' ? 'Required' : 'Done')}
-                                                            title={b.enrollState === 'done' ? 'Enrolled — tap to undo' : 'Enrollment required — tap when done'}
-                                                            className={`whitespace-nowrap text-[10px] font-medium px-2 py-0.5 rounded-full border ${b.enrollState === 'done' ? 'bg-green-50 text-green-700 border-green-200' : 'bg-amber-50 text-amber-700 border-amber-200'}`}>
-                                                            {b.enrollState === 'done' ? '✓ enrolled' : 'enroll'}
-                                                        </button>
-                                                    )}
-                                                </div>
                                             </div>
                                         );
                                     })}
