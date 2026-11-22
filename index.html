@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.76.0-nov4';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.77.0-nov22';  // visible in UI so we can confirm which code is live
         // Google Identity Services (GIS) OAuth client — fetches the Sheets/Drive access token DIRECTLY,
         // bypassing Firebase's hidden auth frame that some browsers (e.g. Arc) block with
         // "operation-not-supported-in-this-environment". Firebase still handles identity (who you are).
@@ -8303,6 +8303,22 @@
                     const sum = (expenses || []).filter(x => x.account === 'reserve_chase' && (parseFloat(x.travelCredit) || 0) > 0)
                         .reduce((t, x) => { const d = parseDateToISO(x.date || x.timestamp) || ''; return (d >= s && d <= e) ? t + (parseFloat(x.travelCredit) || 0) : t; }, 0);
                     used = b.cap > 0 ? Math.min(sum, b.cap) : sum; b.auto = true; b.autoKind = 'tag';
+                } else if ((b.match || '').trim().charAt(0) === '@' && b.win && b.win.start) {
+                    // Spend-based tracker: total card spend (@spend) or PQP earned from spend (@pqp = $20/PQP).
+                    const tok = (b.match || '').toLowerCase().trim();
+                    const acct = acctForCard(b.card);
+                    const s = toLocalISO(b.win.start), e = toLocalISO(b.win.end);
+                    const total = (expenses || []).filter(x => {
+                        if (acct && x.account !== acct) return false;
+                        const isCharge = !(x.txnType === 'deposit' || x.txnType === 'credit_refund') && (parseFloat(x.rawCharge) || 0) > 0;
+                        if (!isCharge) return false;
+                        const d = parseDateToISO(x.date || x.timestamp) || '';
+                        return d >= s && d <= e;
+                    }).reduce((t, x) => t + (parseFloat(x.rawCharge) || 0), 0);
+                    b.totalSpend = total;
+                    const raw = tok === '@pqp' ? Math.floor(total / 20) : total;
+                    used = b.cap > 0 ? Math.min(raw, b.cap) : raw;
+                    b.auto = true; b.autoKind = 'spend';
                 } else if (b.match && b.win && b.win.start) {
                     // Auto-match by merchant keyword within the current window.
                     const m = sumMatches(b, b.win.start, b.win.end);
@@ -8332,6 +8348,8 @@
                 b.atRisk = !b.maxed && b.remaining > 0 && b.win && !b.win.noWindow && !b.win.long && b.win.daysLeft != null && b.win.daysLeft <= 45;
                 // Informational benefit (no dollar cap): show name + note + enroll only — no bar/amount/link.
                 b.informational = !(b.cap > 0) && b.unit !== '#';
+                // Spend trackers aren't credits — never flag them as "at risk / left on the table".
+                if (b.autoKind === 'spend') b.atRisk = false;
                 // Monthly credits: also roll up the calendar-year total (auto-match only).
                 if (isMonthly && b.cap > 0) {
                     b.annualCap = b.cap * 12;
@@ -8351,10 +8369,10 @@
             // Group by card (preserve first-seen order)
             const cardOrder = []; const byCard = {};
             benefits.forEach(b => { if (!byCard[b.card]) { byCard[b.card] = []; cardOrder.push(b.card); } byCard[b.card].push(b); });
-            const dollarsLeft = benefits.filter(b => b.unit === '$' && b.win && !b.win.long).reduce((t, b) => t + b.remaining, 0);
-            const atRiskTotal = benefits.filter(b => b.atRisk && b.unit === '$').reduce((t, b) => t + b.remaining, 0);
+            const dollarsLeft = benefits.filter(b => b.unit === '$' && b.win && !b.win.long && b.autoKind !== 'spend').reduce((t, b) => t + b.remaining, 0);
+            const atRiskTotal = benefits.filter(b => b.atRisk && b.unit === '$' && b.autoKind !== 'spend').reduce((t, b) => t + b.remaining, 0);
             // Benefits making up the "left on the table" total — at-risk first, then soonest to expire.
-            const leftItems = benefits.filter(b => b.unit === '$' && b.win && !b.win.long && b.remaining > 0)
+            const leftItems = benefits.filter(b => b.unit === '$' && b.win && !b.win.long && b.remaining > 0 && b.autoKind !== 'spend')
                 .sort((a, c) => ((c.atRisk ? 1 : 0) - (a.atRisk ? 1 : 0)) || (((a.win.daysLeft == null ? 99999 : a.win.daysLeft)) - ((c.win.daysLeft == null ? 99999 : c.win.daysLeft))));
             const fmtN = (n) => (n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
@@ -8435,8 +8453,9 @@
                     </div>
 
                     {cardOrder.map(card => {
-                        const items = byCard[card];
-                        const cardLeft = items.filter(b => b.unit === '$' && b.win && !b.win.long).reduce((t, b) => t + b.remaining, 0);
+                        // Unused/partial credits float to the top; fully-maxed ones sink to the bottom.
+                        const items = byCard[card].slice().sort((a, b) => (a.maxed ? 1 : 0) - (b.maxed ? 1 : 0));
+                        const cardLeft = items.filter(b => b.unit === '$' && b.win && !b.win.long && b.autoKind !== 'spend').reduce((t, b) => t + b.remaining, 0);
                         const col = cardColor(card);
                         return (
                             <div key={card} className="bg-white rounded-2xl border border-gray-200 overflow-hidden">
@@ -8447,7 +8466,9 @@
                                 <div className="p-2.5 space-y-2 bg-gray-50">
                                     {items.map((b, i) => {
                                         const barColor = b.maxed ? 'bg-green-500' : b.atRisk ? 'bg-amber-500' : 'bg-sky-500';
-                                        const usedStr = b.unit === '#' ? `${Math.round(b.used)} / ${Math.round(b.cap)}` : `$${fmtN(b.used)} / $${fmtN(b.cap)}`;
+                                        const usedStr = b.unit === '#' ? `${Math.round(b.used)} / ${Math.round(b.cap)}`
+                                            : b.unit === '$' ? `$${fmtN(b.used)} / $${fmtN(b.cap)}`
+                                                : `${Math.round(b.used).toLocaleString()} / ${Math.round(b.cap).toLocaleString()} ${b.unit}`;
                                         return (
                                             <div key={i} className="bg-white rounded-xl border border-gray-200 p-3">
                                                 <div className="flex items-center justify-between gap-2">
