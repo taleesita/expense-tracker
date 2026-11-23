@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.80.2-nov22';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.81.0-nov22';  // visible in UI so we can confirm which code is live
         // Google Identity Services (GIS) OAuth client — fetches the Sheets/Drive access token DIRECTLY,
         // bypassing Firebase's hidden auth frame that some browsers (e.g. Arc) block with
         // "operation-not-supported-in-this-environment". Firebase still handles identity (who you are).
@@ -5670,12 +5670,20 @@
             const reconMatches = hasCardNum && Math.abs(reconDiff) < 0.005;
             const unreconItems = unlockedUnreconciled.filter(e => Math.abs(e.amount) > 0);
             const unreconTotal = unreconItems.reduce((s, e) => s + Math.abs(e.amount), 0);
+            // You've reconciled through the last payment, so the gap should only involve activity SINCE the
+            // most recent reconciled/locked transaction — scope the suggestions to that so old stragglers
+            // don't clutter the list.
+            const reconCutoff = accountExpenses
+                .filter(e => e.reconcileStatus === 'reconciled' || e.reconciledLocked)
+                .reduce((mx, e) => { const d = parseDateToISO(e.date || e.timestamp) || ''; return d > mx ? d : mx; }, '');
+            const sinceCutoff = (e) => !reconCutoff || (parseDateToISO(e.date || e.timestamp) || '') >= reconCutoff;
+            const recentUnrecon = unreconItems.filter(sinceCutoff);
             // Gap finder: combinations (up to 4) of unreconciled charges that sum to |difference|
             const gapCombos = (() => {
                 if (!hasCardNum || reconMatches) return [];
                 const target = Math.round(Math.abs(reconDiff) * 100);
                 if (target <= 0) return [];
-                const items = unreconItems
+                const items = recentUnrecon
                     .map(e => ({ cents: Math.round(Math.abs(e.amount) * 100), e }))
                     .filter(x => x.cents > 0 && x.cents <= target)
                     .sort((a, b) => a.cents - b.cents)
@@ -5709,6 +5717,7 @@
                 // diff < 0 (app too high): a DEPOSIT flipped to a charge lowers it.
                 const wantCharge = reconDiff > 0;
                 return displayExpenses
+                    .filter(sinceCutoff)
                     .filter(e => Math.round(Math.abs(e.amount) * 100) === halfCents
                         && (wantCharge ? e.txnType === 'charge' : (e.txnType === 'deposit' || e.txnType === 'credit_refund')))
                     .slice(0, 4);
@@ -5832,16 +5841,20 @@
                                         <div className="font-medium text-blue-800 mb-1">Possible charge/deposit mix-up (gap is exactly 2× one transaction):</div>
                                         {flipCandidates.map((e, i) => (
                                             <div key={i} className="text-blue-700 mb-0.5">
-                                                {e.merchant} ${fmt(e.amount)} is logged as a <b>{e.txnType === 'charge' ? 'charge' : 'deposit'}</b> — if it should be a <b>{e.txnType === 'charge' ? 'deposit' : 'charge'}</b>, that closes the ${fmt(reconDiff)} gap.
+                                                <span className="font-medium">{e.date || e.timestamp}</span> · {e.merchant} ${fmt(e.amount)} is logged as a <b>{e.txnType === 'charge' ? 'charge' : 'deposit'}</b> — if it should be a <b>{e.txnType === 'charge' ? 'deposit' : 'charge'}</b>, that closes the ${fmt(reconDiff)} gap.
                                             </div>
                                         ))}
                                     </div>
                                 )}
                                 {!reconMatches && gapCombos.length > 0 && (
                                     <div className="mt-2 bg-amber-50 border border-amber-200 rounded p-2 text-xs">
-                                        <div className="font-medium text-amber-800 mb-1">Unreconciled charges that add up to your ${fmt(reconDiff)} gap:</div>
+                                        <div className="font-medium text-amber-800 mb-1">Charges since your last reconcile that add up to your ${fmt(reconDiff)} gap:</div>
                                         {gapCombos.map((combo, ci) => (
-                                            <div key={ci} className="text-amber-700 mb-0.5">{combo.map(e => `${e.merchant} $${fmt(e.amount)}`).join('  +  ')}</div>
+                                            <div key={ci} className="text-amber-700 mb-1">
+                                                {combo.map((e, k) => (
+                                                    <span key={k}>{k > 0 ? '  +  ' : ''}<span className="text-amber-500">{e.date || e.timestamp}</span> {e.merchant} ${fmt(e.amount)}</span>
+                                                ))}
+                                            </div>
                                         ))}
                                         {gapCombos.length > 1 && <div className="text-amber-500 mt-1">More than one combination fits — pick the one that matches what happened.</div>}
                                     </div>
