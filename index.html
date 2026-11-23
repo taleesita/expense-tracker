@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.77.0-nov22';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.78.0-nov22';  // visible in UI so we can confirm which code is live
         // Google Identity Services (GIS) OAuth client — fetches the Sheets/Drive access token DIRECTLY,
         // bypassing Firebase's hidden auth frame that some browsers (e.g. Arc) block with
         // "operation-not-supported-in-this-environment". Firebase still handles identity (who you are).
@@ -8166,11 +8166,13 @@
             );
         };
 
-        const BenefitsView = ({ token, expenses, onLinkBenefit }) => {
+        const BenefitsView = ({ token, expenses, onLinkBenefit, onRecordCredit }) => {
             const [linkFor, setLinkFor] = useState(null);
             const [matchFor, setMatchFor] = useState(null);
             const [showBreakdown, setShowBreakdown] = useState(false);
             const [breakdownFilter, setBreakdownFilter] = useState('all');
+            const [recordFor, setRecordFor] = useState(null);
+            const [recordAmt, setRecordAmt] = useState('');
             const [rows, setRows] = useState(null);
             const [err, setErr] = useState(null);
             const [loading, setLoading] = useState(false);
@@ -8231,6 +8233,20 @@
                     );
                     if (!resp.ok) throw new Error('HTTP ' + resp.status);
                 } catch (e) { console.error('Enroll write failed, reloading:', e); load(); }
+            };
+
+            // Record a statement credit received → create the offsetting inflow transaction (and reflect in
+            // Used for pure-manual benefits; linked/auto benefits already compute their own used).
+            const doRecord = async (b) => {
+                const amt = parseFloat(recordAmt);
+                if (!(amt > 0)) { setRecordFor(null); return; }
+                setRecordFor(null);
+                let category = 'other';
+                const linked = (expenses || []).find(x => (x.benefitTag || '').toLowerCase() === b.name.toLowerCase() && x.category);
+                if (linked) category = linked.category;
+                else if (b.matchItems && b.matchItems[0] && b.matchItems[0].category) category = b.matchItems[0].category;
+                if (onRecordCredit) await onRecordCredit({ accountId: acctForCard(b.card), merchant: b.name + ' credit', amount: amt, category });
+                if (!b.auto) saveUsed(b, (parseFloat(b.usedRaw) || 0) + amt);
             };
 
             const now = new Date();
@@ -8546,9 +8562,27 @@
                                                 {b.notes && <div className="text-[10px] text-gray-400 mt-0.5 leading-snug">{b.notes}</div>}
                                                 {!b.informational && b.unit !== '#' && b.autoKind !== 'match' && b.autoKind !== 'tag' && (
                                                     <button onClick={() => setLinkFor({ name: b.name, card: b.card, cap: b.cap, unit: b.unit, win: b.win, acct: acctForCard(b.card) })}
-                                                        className="mt-1.5 text-[11px] font-medium text-sky-700 bg-sky-50 border border-sky-200 rounded-full px-2.5 py-1">
+                                                        className="mt-1.5 mr-1.5 text-[11px] font-medium text-sky-700 bg-sky-50 border border-sky-200 rounded-full px-2.5 py-1">
                                                         🔗 {b.linkedCount > 0 ? `${b.linkedCount} charge${b.linkedCount === 1 ? '' : 's'} linked` : 'Link charges'}
                                                     </button>
+                                                )}
+                                                {!b.informational && b.unit === '$' && b.autoKind !== 'spend' && b.autoKind !== 'tag' && (
+                                                    recordFor === b.rowNum ? (
+                                                        <span className="mt-1.5 inline-flex items-center gap-1.5">
+                                                            <span className="text-[11px] text-gray-500">Record $</span>
+                                                            <input autoFocus type="number" inputMode="decimal" step="0.01" value={recordAmt}
+                                                                onChange={(e) => setRecordAmt(e.target.value)}
+                                                                onKeyDown={(e) => { if (e.key === 'Enter') doRecord(b); if (e.key === 'Escape') setRecordFor(null); }}
+                                                                className="w-16 border rounded px-1.5 py-0.5 text-xs text-right" />
+                                                            <button onClick={() => doRecord(b)} className="text-[11px] font-medium text-white bg-green-600 rounded-full px-2.5 py-1">Add credit</button>
+                                                            <button onClick={() => setRecordFor(null)} className="text-gray-400 text-sm px-1">✕</button>
+                                                        </span>
+                                                    ) : (
+                                                        <button onClick={() => { setRecordFor(b.rowNum); setRecordAmt(String(b.cap || '')); }}
+                                                            className="mt-1.5 text-[11px] font-medium text-green-700 bg-green-50 border border-green-200 rounded-full px-2.5 py-1">
+                                                            ＋ Record credit received
+                                                        </button>
+                                                    )
                                                 )}
                                             </div>
                                         );
@@ -9438,6 +9472,27 @@
                 });
             };
 
+            // Record a statement credit received for a benefit — creates an offsetting inflow on the card.
+            const handleRecordCredit = async ({ accountId, merchant, amount, category }) => {
+                const amt = parseFloat(amount);
+                if (!accountId || !(amt > 0)) return;
+                setToast('Recording ' + merchant + '…');
+                try {
+                    await appendExpense({
+                        merchant, amount: amt, category: category || 'other', account: accountId,
+                        txnType: 'credit_refund', isCredit: true, receipt: '', notes: 'Statement credit',
+                        originalCurrency: 'USD', originalAmount: amt, person: user?.name || '',
+                        date: todayLocalStr(), accountRaw: null, categoryRaw: null, merchantRaw: null,
+                    });
+                    setToast('Credit recorded — balance updated');
+                    setTimeout(() => setToast(''), 3000);
+                } catch (e) {
+                    console.error('Record credit failed:', e);
+                    setToast('Failed to record credit — ' + (e.message || 'try again'));
+                    setTimeout(() => setToast(''), 4000);
+                }
+            };
+
             // Lock (cement) a batch of reconciled items — writes 'L' to column J
             const handleLockItems = (rowIndexes) => {
                 // Optimistic update
@@ -9786,7 +9841,7 @@
 
                                 {activeTab === 'benefits' && (
                                     <div className="pb-24 p-4">
-                                        <BenefitsView token={token} expenses={expenses} onLinkBenefit={handleLinkBenefit} />
+                                        <BenefitsView token={token} expenses={expenses} onLinkBenefit={handleLinkBenefit} onRecordCredit={handleRecordCredit} />
                                     </div>
                                 )}
 
