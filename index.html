@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.80.1-nov22';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.80.2-nov22';  // visible in UI so we can confirm which code is live
         // Google Identity Services (GIS) OAuth client — fetches the Sheets/Drive access token DIRECTLY,
         // bypassing Firebase's hidden auth frame that some browsers (e.g. Arc) block with
         // "operation-not-supported-in-this-environment". Firebase still handles identity (who you are).
@@ -8332,11 +8332,15 @@
                     if (hasWin) return yd >= s && yd <= e;
                     return yd.slice(0, 4) === (parseDateToISO(linked[0].date) || '').slice(0, 4);
                 };
+                const nameLc = b.name.toLowerCase();
                 const existingByAmt = {};
                 (expenses || []).forEach(y => {
                     if (!(y.txnType === 'credit_refund' || y.txnType === 'deposit')) return;
                     if (acct && y.account !== acct) return;
                     if (!inWindow(y)) return;
+                    // Scope to THIS benefit's credits (by merchant) so another benefit's same-amount credit
+                    // (e.g. a $250 Edit credit) isn't mistaken for this one.
+                    if (!((y.merchant || '').toLowerCase().includes(nameLc))) return;
                     const k = Math.round((parseFloat(y.amount) || 0) * 100);
                     existingByAmt[k] = (existingByAmt[k] || 0) + 1;
                 });
