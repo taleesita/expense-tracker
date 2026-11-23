@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.78.0-nov22';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.80.1-nov22';  // visible in UI so we can confirm which code is live
         // Google Identity Services (GIS) OAuth client — fetches the Sheets/Drive access token DIRECTLY,
         // bypassing Firebase's hidden auth frame that some browsers (e.g. Arc) block with
         // "operation-not-supported-in-this-environment". Firebase still handles identity (who you are).
@@ -8166,13 +8166,87 @@
             );
         };
 
+        // Modal: pick the charge a statement credit landed on, so the recorded credit inherits its date + category.
+        const RecordCreditModal = ({ benefit, expenses, onConfirm, onClose }) => {
+            const [q, setQ] = useState('');
+            const [showAll, setShowAll] = useState(false);
+            const [sel, setSel] = useState(null);
+            const [amt, setAmt] = useState('');
+            const acct = benefit.acct;
+            const win = benefit.win;
+            const hasWin = !!(win && win.start);
+            const toISO = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+            const s = hasWin ? toISO(win.start) : null, e = hasWin ? toISO(win.end) : null;
+            const inWin = (x) => { if (!hasWin) return true; const d = parseDateToISO(x.date || x.timestamp) || ''; return d >= s && d <= e; };
+            const fmtN = (n) => (n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            const list = (expenses || []).filter(x => {
+                if (acct && x.account !== acct) return false;
+                const isCharge = !(x.txnType === 'deposit' || x.txnType === 'credit_refund') && (parseFloat(x.rawCharge) || 0) > 0;
+                if (!isCharge) return false;
+                if (!showAll && !inWin(x)) return false;
+                if (q && !((x.merchant || '').toLowerCase().includes(q.toLowerCase()))) return false;
+                return true;
+            }).sort((a, c) => (parseDateToISO(c.date || c.timestamp) || '').localeCompare(parseDateToISO(a.date || a.timestamp) || ''));
+            const pick = (x) => { setSel(x); const cap = benefit.cap > 0 ? benefit.cap : (parseFloat(x.amount) || 0); setAmt(String(Math.min(parseFloat(x.amount) || 0, cap) || '')); };
+            return (
+                <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center" onClick={onClose}>
+                    <div className="bg-white w-full sm:max-w-md sm:rounded-2xl rounded-t-2xl flex flex-col" style={{ maxHeight: '85vh' }} onClick={ev => ev.stopPropagation()}>
+                        <div className="px-4 pt-4 pb-3 border-b border-gray-100">
+                            <div className="flex items-start justify-between gap-2">
+                                <div>
+                                    <div className="font-bold text-base text-gray-900">Record {benefit.name} credit</div>
+                                    <div className="text-xs text-gray-500">{benefit.card} · pick the charge it credited</div>
+                                </div>
+                                <button onClick={onClose} className="text-gray-400 text-xl leading-none px-1">✕</button>
+                            </div>
+                            {!sel && (
+                                <div className="mt-2 flex gap-2 items-center">
+                                    <input value={q} onChange={e => setQ(e.target.value)} placeholder="Search merchant…" className="flex-1 border rounded-lg px-3 py-1.5 text-sm" />
+                                    <button onClick={() => setShowAll(v => !v)} className={`text-xs px-2.5 py-1.5 rounded-lg border whitespace-nowrap ${showAll ? 'bg-sky-100 text-sky-700 border-sky-300' : 'bg-white text-gray-500 border-gray-300'}`}>{showAll ? 'All dates' : 'This window'}</button>
+                                </div>
+                            )}
+                        </div>
+                        {sel ? (
+                            <div className="p-4">
+                                <div className="text-sm text-gray-700">Credit on <span className="font-medium">{sel.merchant}</span></div>
+                                <div className="text-xs text-gray-400 mb-3">Will post as a credit dated {sel.date || sel.timestamp}, same category.</div>
+                                <div className="flex items-center gap-2">
+                                    <span className="text-sm text-gray-500">Amount $</span>
+                                    <input autoFocus type="number" inputMode="decimal" step="0.01" value={amt} onChange={e => setAmt(e.target.value)} className="w-28 border rounded-lg px-2 py-1.5 text-sm text-right" />
+                                </div>
+                                <div className="flex gap-2 mt-4">
+                                    <button onClick={() => setSel(null)} className="flex-1 py-2.5 bg-gray-100 text-gray-700 rounded-xl text-sm">Back</button>
+                                    <button onClick={() => { const v = parseFloat(amt); if (v > 0) onConfirm({ charge: sel, amount: v }); }} className="flex-1 py-2.5 bg-green-600 text-white rounded-xl font-medium text-sm">Record ${fmtN(parseFloat(amt) || 0)}</button>
+                                </div>
+                            </div>
+                        ) : (
+                            <div className="overflow-y-auto px-4" style={{ WebkitOverflowScrolling: 'touch' }}>
+                                {list.length === 0 ? (
+                                    <div className="py-8 text-center text-gray-400 text-sm">No matching charges{hasWin && !showAll ? ' in this window — try "All dates"' : ''}.</div>
+                                ) : list.map(x => (
+                                    <button key={x.rowIndex} onClick={() => pick(x)} className="w-full text-left flex items-center gap-2.5 py-2.5 border-b border-gray-100">
+                                        <div className="flex-1 min-w-0">
+                                            <div className="text-sm font-medium text-gray-800 truncate">{x.merchant}</div>
+                                            <div className="text-[11px] text-gray-400">{x.date || x.timestamp}</div>
+                                        </div>
+                                        <div className="text-sm font-semibold text-red-600 flex-shrink-0">-${fmtN(x.amount)}</div>
+                                    </button>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                </div>
+            );
+        };
+
         const BenefitsView = ({ token, expenses, onLinkBenefit, onRecordCredit }) => {
             const [linkFor, setLinkFor] = useState(null);
             const [matchFor, setMatchFor] = useState(null);
             const [showBreakdown, setShowBreakdown] = useState(false);
             const [breakdownFilter, setBreakdownFilter] = useState('all');
             const [recordFor, setRecordFor] = useState(null);
-            const [recordAmt, setRecordAmt] = useState('');
+            const [recordConfirm, setRecordConfirm] = useState(null);
+            const [flash, setFlash] = useState('');
             const [rows, setRows] = useState(null);
             const [err, setErr] = useState(null);
             const [loading, setLoading] = useState(false);
@@ -8235,18 +8309,60 @@
                 } catch (e) { console.error('Enroll write failed, reloading:', e); load(); }
             };
 
-            // Record a statement credit received → create the offsetting inflow transaction (and reflect in
-            // Used for pure-manual benefits; linked/auto benefits already compute their own used).
-            const doRecord = async (b) => {
-                const amt = parseFloat(recordAmt);
-                if (!(amt > 0)) { setRecordFor(null); return; }
-                setRecordFor(null);
-                let category = 'other';
-                const linked = (expenses || []).find(x => (x.benefitTag || '').toLowerCase() === b.name.toLowerCase() && x.category);
-                if (linked) category = linked.category;
-                else if (b.matchItems && b.matchItems[0] && b.matchItems[0].category) category = b.matchItems[0].category;
-                if (onRecordCredit) await onRecordCredit({ accountId: acctForCard(b.card), merchant: b.name + ' credit', amount: amt, category });
-                if (!b.auto) saveUsed(b, (parseFloat(b.usedRaw) || 0) + amt);
+            // Record offsetting credit line items straight from a benefit's already-linked charges.
+            // Each linked charge → one credit dated that charge, same category, amount = min(charge, cap).
+            // A duplicate guard skips any linked charge that already has a matching credit, so re-tapping is safe.
+            const recordFromLinked = (b) => {
+                const acct = acctForCard(b.card);
+                const hasWin = b.win && b.win.start;
+                const s = hasWin ? toLocalISO(b.win.start) : null, e = hasWin ? toLocalISO(b.win.end) : null;
+                const linked = (expenses || []).filter(x => {
+                    if ((x.benefitTag || '').toLowerCase() !== b.name.toLowerCase()) return false;
+                    if (acct && x.account !== acct) return false;
+                    if (hasWin) { const d = parseDateToISO(x.date || x.timestamp) || ''; if (!(d >= s && d <= e)) return false; }
+                    return true;
+                });
+                if (!linked.length) return;
+                // "Already logged" guard — dedupe by COUNT, not just presence, so two identical credits
+                // (e.g. both $250 the same day) each need their own line item and only the number already
+                // logged gets skipped. Count existing credit inflows of each amount within this benefit's window.
+                const inWindow = (y) => {
+                    const yd = parseDateToISO(y.date || y.timestamp) || '';
+                    if (!yd) return false;
+                    if (hasWin) return yd >= s && yd <= e;
+                    return yd.slice(0, 4) === (parseDateToISO(linked[0].date) || '').slice(0, 4);
+                };
+                const existingByAmt = {};
+                (expenses || []).forEach(y => {
+                    if (!(y.txnType === 'credit_refund' || y.txnType === 'deposit')) return;
+                    if (acct && y.account !== acct) return;
+                    if (!inWindow(y)) return;
+                    const k = Math.round((parseFloat(y.amount) || 0) * 100);
+                    existingByAmt[k] = (existingByAmt[k] || 0) + 1;
+                });
+                const consumed = {};
+                const rows = linked.map(x => {
+                    const amount = Math.min(parseFloat(x.amount) || 0, b.cap > 0 ? b.cap : (parseFloat(x.amount) || 0));
+                    const k = Math.round(amount * 100);
+                    const exists = ((existingByAmt[k] || 0) - (consumed[k] || 0)) > 0;
+                    if (exists) consumed[k] = (consumed[k] || 0) + 1;
+                    return { charge: x, amount, category: x.category, date: x.date, exists };
+                }).filter(r => r.amount > 0);
+                setRecordConfirm({ benefit: b, acct, rows });
+            };
+
+            const doCreateCredits = async () => {
+                if (!recordConfirm) return;
+                const { benefit, acct, rows } = recordConfirm;
+                const toMake = rows.filter(r => !r.exists);
+                setRecordConfirm(null);
+                let made = 0;
+                for (const r of toMake) {
+                    if (onRecordCredit) await onRecordCredit({ accountId: acct, merchant: benefit.name + ' credit', amount: r.amount, category: r.category, date: r.date });
+                    made++;
+                }
+                setFlash(made ? `Recorded ${made} credit${made === 1 ? '' : 's'} on the card` : 'Nothing new to add');
+                setTimeout(() => setFlash(''), 3500);
             };
 
             const now = new Date();
@@ -8566,23 +8682,11 @@
                                                         🔗 {b.linkedCount > 0 ? `${b.linkedCount} charge${b.linkedCount === 1 ? '' : 's'} linked` : 'Link charges'}
                                                     </button>
                                                 )}
-                                                {!b.informational && b.unit === '$' && b.autoKind !== 'spend' && b.autoKind !== 'tag' && (
-                                                    recordFor === b.rowNum ? (
-                                                        <span className="mt-1.5 inline-flex items-center gap-1.5">
-                                                            <span className="text-[11px] text-gray-500">Record $</span>
-                                                            <input autoFocus type="number" inputMode="decimal" step="0.01" value={recordAmt}
-                                                                onChange={(e) => setRecordAmt(e.target.value)}
-                                                                onKeyDown={(e) => { if (e.key === 'Enter') doRecord(b); if (e.key === 'Escape') setRecordFor(null); }}
-                                                                className="w-16 border rounded px-1.5 py-0.5 text-xs text-right" />
-                                                            <button onClick={() => doRecord(b)} className="text-[11px] font-medium text-white bg-green-600 rounded-full px-2.5 py-1">Add credit</button>
-                                                            <button onClick={() => setRecordFor(null)} className="text-gray-400 text-sm px-1">✕</button>
-                                                        </span>
-                                                    ) : (
-                                                        <button onClick={() => { setRecordFor(b.rowNum); setRecordAmt(String(b.cap || '')); }}
-                                                            className="mt-1.5 text-[11px] font-medium text-green-700 bg-green-50 border border-green-200 rounded-full px-2.5 py-1">
-                                                            ＋ Record credit received
-                                                        </button>
-                                                    )
+                                                {!b.informational && b.unit === '$' && b.autoKind !== 'spend' && b.autoKind !== 'tag' && b.autoKind !== 'match' && (
+                                                    <button onClick={() => b.linkedCount > 0 ? recordFromLinked(b) : setRecordFor(b)}
+                                                        className="mt-1.5 text-[11px] font-medium text-green-700 bg-green-50 border border-green-200 rounded-full px-2.5 py-1">
+                                                        ＋ {b.linkedCount > 0 ? `Record credit (${b.linkedCount} linked)` : 'Record credit received'}
+                                                    </button>
                                                 )}
                                             </div>
                                         );
@@ -8631,6 +8735,61 @@
                                     <button onClick={() => setMatchFor(null)} className="w-full py-2.5 bg-gray-900 text-white rounded-xl font-medium text-sm">Done</button>
                                 </div>
                             </div>
+                        </div>
+                    )}
+
+                    {recordFor && (
+                        <RecordCreditModal
+                            benefit={{ ...recordFor, acct: acctForCard(recordFor.card) }}
+                            expenses={expenses}
+                            onConfirm={async ({ charge, amount }) => {
+                                const b = recordFor; setRecordFor(null);
+                                if (onRecordCredit) await onRecordCredit({ accountId: acctForCard(b.card), merchant: b.name + ' credit', amount, category: charge.category, date: charge.date });
+                                if (!b.auto) saveUsed(b, (parseFloat(b.usedRaw) || 0) + amount);
+                            }}
+                            onClose={() => setRecordFor(null)}
+                        />
+                    )}
+
+                    {recordConfirm && (
+                        <div className="fixed inset-0 z-50 bg-black/40 flex items-end sm:items-center justify-center" onClick={() => setRecordConfirm(null)}>
+                            <div className="bg-white w-full sm:max-w-md sm:rounded-2xl rounded-t-2xl flex flex-col" style={{ maxHeight: '85vh' }} onClick={ev => ev.stopPropagation()}>
+                                <div className="px-4 pt-4 pb-3 border-b border-gray-100 flex items-start justify-between gap-2">
+                                    <div>
+                                        <div className="font-bold text-base text-gray-900">Record {recordConfirm.benefit.name} credits</div>
+                                        <div className="text-xs text-gray-500">{recordConfirm.benefit.card} · from your linked charges</div>
+                                    </div>
+                                    <button onClick={() => setRecordConfirm(null)} className="text-gray-400 text-xl leading-none px-1">✕</button>
+                                </div>
+                                <div className="overflow-y-auto px-4" style={{ WebkitOverflowScrolling: 'touch' }}>
+                                    {recordConfirm.rows.map((r, i) => (
+                                        <div key={i} className="flex items-center justify-between gap-2 py-2.5 border-b border-gray-100">
+                                            <div className="min-w-0 flex-1">
+                                                <div className="text-sm font-medium text-gray-800 truncate">{r.charge.merchant}</div>
+                                                <div className="text-[11px] text-gray-400">{r.date}{r.exists ? ' · looks already logged — will skip' : ''}</div>
+                                            </div>
+                                            <span className={`text-sm font-semibold flex-shrink-0 ${r.exists ? 'text-gray-300 line-through' : 'text-green-600'}`}>+${fmtN(r.amount)}</span>
+                                        </div>
+                                    ))}
+                                </div>
+                                <div className="px-4 py-3 border-t border-gray-100">
+                                    {(() => {
+                                        const n = recordConfirm.rows.filter(r => !r.exists).length;
+                                        return (
+                                            <>
+                                                <p className="text-[11px] text-gray-400 mb-2">Creates a credit on {recordConfirm.benefit.card} for each (dated the charge, same category). Anything that looks already logged is skipped.</p>
+                                                <button onClick={doCreateCredits} disabled={n === 0} className={`w-full py-2.5 rounded-xl font-medium text-sm ${n === 0 ? 'bg-gray-200 text-gray-400' : 'bg-green-600 text-white'}`}>{n > 0 ? `Create ${n} credit${n === 1 ? '' : 's'}` : 'All already logged'}</button>
+                                            </>
+                                        );
+                                    })()}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
+                    {flash && (
+                        <div className="fixed left-4 right-4 bottom-24 z-50 flex justify-center">
+                            <div className="bg-gray-900 text-white text-sm rounded-xl px-4 py-2.5 shadow-lg max-w-sm text-center">{flash}</div>
                         </div>
                     )}
                 </div>
@@ -9473,7 +9632,7 @@
             };
 
             // Record a statement credit received for a benefit — creates an offsetting inflow on the card.
-            const handleRecordCredit = async ({ accountId, merchant, amount, category }) => {
+            const handleRecordCredit = async ({ accountId, merchant, amount, category, date }) => {
                 const amt = parseFloat(amount);
                 if (!accountId || !(amt > 0)) return;
                 setToast('Recording ' + merchant + '…');
@@ -9482,7 +9641,7 @@
                         merchant, amount: amt, category: category || 'other', account: accountId,
                         txnType: 'credit_refund', isCredit: true, receipt: '', notes: 'Statement credit',
                         originalCurrency: 'USD', originalAmount: amt, person: user?.name || '',
-                        date: todayLocalStr(), accountRaw: null, categoryRaw: null, merchantRaw: null,
+                        date: date || todayLocalStr(), accountRaw: null, categoryRaw: null, merchantRaw: null,
                     });
                     setToast('Credit recorded — balance updated');
                     setTimeout(() => setToast(''), 3000);
