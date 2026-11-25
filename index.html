@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.81.0-nov22';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.82.0-nov25';  // visible in UI so we can confirm which code is live
         // Google Identity Services (GIS) OAuth client — fetches the Sheets/Drive access token DIRECTLY,
         // bypassing Firebase's hidden auth frame that some browsers (e.g. Arc) block with
         // "operation-not-supported-in-this-environment". Firebase still handles identity (who you are).
@@ -8497,6 +8497,9 @@
                 b.atRisk = !b.maxed && b.remaining > 0 && b.win && !b.win.noWindow && !b.win.long && b.win.daysLeft != null && b.win.daysLeft <= 45;
                 // Informational benefit (no dollar cap): show name + note + enroll only — no bar/amount/link.
                 b.informational = !(b.cap > 0) && b.unit !== '#';
+                // "Settled" = nothing left to optimize this period: a maxed-out credit, or any
+                // informational benefit (no dollar progress to track). These sink to the bottom.
+                b.settled = b.maxed || b.informational;
                 // Spend trackers aren't credits — never flag them as "at risk / left on the table".
                 if (b.autoKind === 'spend') b.atRisk = false;
                 // Monthly credits: also roll up the calendar-year total (auto-match only).
@@ -8602,8 +8605,8 @@
                     </div>
 
                     {cardOrder.map(card => {
-                        // Unused/partial credits float to the top; fully-maxed ones sink to the bottom.
-                        const items = byCard[card].slice().sort((a, b) => (a.maxed ? 1 : 0) - (b.maxed ? 1 : 0));
+                        // Unused/partial credits float to the top; maxed-out and informational ones sink.
+                        const items = byCard[card].slice().sort((a, b) => (a.settled ? 1 : 0) - (b.settled ? 1 : 0));
                         const cardLeft = items.filter(b => b.unit === '$' && b.win && !b.win.long && b.autoKind !== 'spend').reduce((t, b) => t + b.remaining, 0);
                         const col = cardColor(card);
                         return (
