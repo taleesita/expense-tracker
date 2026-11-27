@@ -65,7 +65,7 @@
         firebase.initializeApp(FB_CONFIG);
         const expenseAuth = firebase.auth();
         const REAL_SHEET_ID = '1mQOhxJPqNWZm7krsE9BwNcqH8Wo3NRC36OAZRiY6gM0';
-        const APP_VERSION = 'v4.83.0-nov27';  // visible in UI so we can confirm which code is live
+        const APP_VERSION = 'v4.84.0-nov27';  // visible in UI so we can confirm which code is live
         // Google Identity Services (GIS) OAuth client — fetches the Sheets/Drive access token DIRECTLY,
         // bypassing Firebase's hidden auth frame that some browsers (e.g. Arc) block with
         // "operation-not-supported-in-this-environment". Firebase still handles identity (who you are).
@@ -8259,6 +8259,7 @@
             const [breakdownFilter, setBreakdownFilter] = useState('all');
             const [recordFor, setRecordFor] = useState(null);
             const [recordConfirm, setRecordConfirm] = useState(null);
+            const [actionFor, setActionFor] = useState(null);
             const [flash, setFlash] = useState('');
             const [rows, setRows] = useState(null);
             const [err, setErr] = useState(null);
@@ -8320,6 +8321,20 @@
                     );
                     if (!resp.ok) throw new Error('HTTP ' + resp.status);
                 } catch (e) { console.error('Enroll write failed, reloading:', e); load(); }
+            };
+
+            // Toggle availability (column I / "Active" of the Benefits tab): 'Used' greys it out
+            // and sinks it; 'Y' restores it. ('N' still hides a row entirely — set that in the sheet.)
+            const saveActive = async (b, value) => {
+                setActionFor(null);
+                setRows(prev => prev.map((row, i) => (i + 2 === b.rowNum) ? (() => { const c = [...row]; while (c.length < 9) c.push(''); c[8] = value; return c; })() : row));
+                try {
+                    const resp = await fetch(
+                        `https://sheets.googleapis.com/v4/spreadsheets/${getSheetId()}/values/${encodeURIComponent(BENEFITS_TAB)}!I${b.rowNum}?valueInputOption=USER_ENTERED`,
+                        { method: 'PUT', headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ values: [[value]] }) }
+                    );
+                    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                } catch (e) { console.error('Active write failed, reloading:', e); load(); }
             };
 
             // Record offsetting credit line items straight from a benefit's already-linked charges.
@@ -8504,6 +8519,9 @@
                 // "Settled" = nothing left to optimize this period: a maxed-out credit, an
                 // informational benefit (no dollar progress), or an unavailable one. These sink down.
                 b.settled = b.maxed || b.informational || b.unavailable;
+                // Sort tier within a card: active/has-value on top (0), then used-up/handled (1),
+                // then unavailable ("we don't have it") dead last (2).
+                b.sortRank = b.unavailable ? 2 : (b.maxed || b.informational) ? 1 : 0;
                 // Spend trackers aren't credits — never flag them as "at risk / left on the table".
                 if (b.autoKind === 'spend') b.atRisk = false;
                 // Monthly credits: also roll up the calendar-year total (auto-match only).
@@ -8609,8 +8627,8 @@
                     </div>
 
                     {cardOrder.map(card => {
-                        // Unused/partial credits float to the top; maxed-out and informational ones sink.
-                        const items = byCard[card].slice().sort((a, b) => (a.settled ? 1 : 0) - (b.settled ? 1 : 0));
+                        // Active credits on top, then used-up/informational, then unavailable last.
+                        const items = byCard[card].slice().sort((a, b) => a.sortRank - b.sortRank);
                         const cardLeft = items.filter(b => b.unit === '$' && b.win && !b.win.long && b.autoKind !== 'spend' && !b.unavailable).reduce((t, b) => t + b.remaining, 0);
                         const col = cardColor(card);
                         return (
@@ -8659,8 +8677,20 @@
                                                                 {b.enrollState === 'done' ? '✓' : '!'}
                                                             </button>
                                                         )}
+                                                        <button onClick={() => setActionFor(actionFor === b.rowNum ? null : b.rowNum)}
+                                                            title="More options"
+                                                            className="w-5 h-5 rounded-full flex items-center justify-center text-gray-400 hover:text-gray-600 hover:bg-gray-100 text-base leading-none flex-shrink-0">⋯</button>
                                                     </div>
                                                 </div>
+                                                {actionFor === b.rowNum && (
+                                                    <div className="mt-2 flex items-center gap-2">
+                                                        <button onClick={() => saveActive(b, b.unavailable ? 'Y' : 'Used')}
+                                                            className="text-[11px] font-medium text-gray-700 bg-gray-100 border border-gray-200 rounded-full px-2.5 py-1">
+                                                            {b.unavailable ? '↩ Make available again' : '⊘ Mark used up / unavailable'}
+                                                        </button>
+                                                        <button onClick={() => setActionFor(null)} className="text-[11px] text-gray-400 px-1">cancel</button>
+                                                    </div>
+                                                )}
                                                 {!b.informational && !b.unavailable && (
                                                 <div className="mt-1.5 h-1.5 bg-gray-100 rounded-full overflow-hidden">
                                                     <div className={`h-full rounded-full ${barColor}`} style={{ width: b.pct + '%' }} />
